@@ -53,8 +53,10 @@ STOP_WORDS = ('그만', '종료', '잘가', '잘 가')
 
 # When the sentence sounds like it is about what the robot can SEE,
 # a camera frame is attached to the request.
-VISION_WORDS = ('보여', '보이', '뭐가 있', '이게 뭐', '저게 뭐', '누구', '누가',
-                '몇 명', '몇명', '무슨 색', '어떻게 생겼', '읽어', '앞에')
+VISION_WORDS = ('보여', '보이', '뭐가 있', '이게 뭐', '이거 뭐', '저게 뭐', '저거 뭐',
+                '누구', '누가', '몇 명', '몇명', '무슨 색', '무슨색', '어떻게 생겼',
+                '읽어', '읽을', '읽을 수', '앞에', '놓여', '놓여 있', '뭐 놓', '뭐가 보',
+                '입었게', '들었게', '보고 있')
 
 
 # Motion routing: a body part must co-occur with an action verb, or a gesture
@@ -64,19 +66,30 @@ BODY_WORDS = ('팔', '손', '고개', '안테나', '머리', '몸',
 ACTION_STEMS = ('들어', '들고', '들어서', '드', '올려', '올리', '내려', '내리', '흔들',
                 '움직', '벌려', '벌리', '접어', '돌려', '돌리', '가리켜', '가리키',
                 '집어', '집게', '놓', '옮겨', '건네', '넣어', '꺼내', '굴려', '빙글',
-                '펴', '뻗', '세워', '펼쳐', '펼', '휘둘', '휘저', '뻗쳐')
+                '펴', '뻗', '세워', '펼쳐', '펼', '휘둘', '휘저', '뻗쳐',
+                '틀어', '틀', '젖혀', '젖', '숙여', '숙', '까딱', '꺾')
 # Gesture nouns strong enough to trigger on their own (no verb needed) - a
 # bare "만세" or "만세 다시" is unambiguously a motion request.
 GESTURE_WORDS = ('인사', '만세', '박수', '손뼉', '하이파이브', '브이', '악수')
 GESTURE_WEAK = ('춤', '환영')   # need a command tail (춤=대화 맥락도 흔함)
 # Compounds that contain a gesture noun but are not motion requests.
-GESTURE_STOPWORDS = ('인사말', '인사법', '인사드', '박수갈채', '만세력')
+GESTURE_STOPWORDS = ('인사말', '인사법', '인사드', '박수갈채', '만세력',
+                     '무슨뜻', '뜻이야', '뜻이', '그만', '시끄', '멈춰', '멈추')
 COMMAND_TAILS = ('해봐', '해 봐', '해줘', '해 줘', '하자', '해라', '춰봐', '해보',
                  '볼래', '할래', '수있', '다시', '또', '봐', '줘', '자')
 
 
-def wants_motion(text):
-    """Check if the request asks for a physical gesture."""
+# 직전 턴이 동작일 때, 문맥상 이전 동작을 가리키는 후속 발화 (대명사·수식어)
+FOLLOWUP_WORDS = ('다시', '또', '한번더', '한 번 더', '더크게', '더 크게', '더작게',
+                  '반대', '천천히', '처음부터', '계속', '아까처럼', '방금', '그거',
+                  '이번엔', '한번', '해볼래')
+
+
+def wants_motion(text, last_kind=None):
+    """Check if the request asks for a physical gesture.
+
+    last_kind='motion' 이면, 이전 동작을 가리키는 짧은 후속 발화도 동작으로 본다.
+    """
     compact = text.replace(' ', '')
 
     if any(b in compact for b in BODY_WORDS) and any(a in compact for a in ACTION_STEMS):
@@ -87,6 +100,10 @@ def wants_motion(text):
         return True
     if any(g in compact for g in GESTURE_WEAK) and any(t in compact for t in COMMAND_TAILS):
         return True
+    # 직전이 동작이면, 문맥상 그 동작을 이어가는 짧은 후속 요청도 동작으로
+    if last_kind == 'motion' and len(compact) <= 14:
+        if any(w.replace(' ', '') in compact for w in FOLLOWUP_WORDS):
+            return True
     return False
 
 
@@ -274,56 +291,64 @@ def wants_vision(text):
     return any(w.replace(' ', '') in compact for w in VISION_WORDS)
 
 
-def capture_view(reachy, side='left', width=640, quality=70, camera_index=0):
-    """Grab one frame of the robot's view as base64 jpeg, or None on failure.
+def grab_frame(reachy, side='left', camera_index=0):
+    """Return one BGR frame of the robot's view (ndarray), or None.
 
     Different reachy checkouts expose the camera differently, so this tries
     them in order: left/right_camera objects, head.get_image(), and finally
-    opening the video device directly with OpenCV.
+    opening the video device directly with OpenCV. Shared by the vision
+    request path and the background presence watcher, so both read through the
+    same (already-open) camera object instead of fighting over the device.
     """
+    import cv2 as cv
+
+    head = reachy.head
+    img = None
+
+    # 1) left_camera / right_camera attributes (this repo's head.py)
+    other = 'right' if side == 'left' else 'left'
+    for name in (side, other):
+        camera = getattr(head, name + '_camera', None)
+        if camera is None:
+            continue
+        success, frame = camera.read()
+        if success and frame is not None:
+            return frame
+        logger.warning('Camera read failed (%s)', name)
+
+    # 2) head.get_image() (the variant installed on the robot's Pi)
+    if hasattr(head, 'get_image'):
+        try:
+            frame = head.get_image()
+            if frame is not None and len(frame) > 0:
+                return frame
+        except Exception:
+            logger.warning('head.get_image() failed', exc_info=True)
+
+    # 3) open the device directly - always available while video0 works
+    capture = cv.VideoCapture(camera_index)
+    try:
+        frame = None
+        success = False
+        # First frames can be dark while auto-exposure settles.
+        for _ in range(5):
+            success, frame = capture.read()
+        if success and frame is not None:
+            img = frame
+    finally:
+        capture.release()
+
+    return img
+
+
+def capture_view(reachy, side='left', width=640, quality=70, camera_index=0):
+    """Grab one frame of the robot's view as base64 jpeg, or None on failure."""
     import base64
 
     try:
         import cv2 as cv
 
-        head = reachy.head
-        img = None
-
-        # 1) left_camera / right_camera attributes (this repo's head.py)
-        other = 'right' if side == 'left' else 'left'
-        for name in (side, other):
-            camera = getattr(head, name + '_camera', None)
-            if camera is None:
-                continue
-            success, frame = camera.read()
-            if success and frame is not None:
-                img = frame
-                break
-            logger.warning('Camera read failed (%s)', name)
-
-        # 2) head.get_image() (the variant installed on the robot's Pi)
-        if img is None and hasattr(head, 'get_image'):
-            try:
-                frame = head.get_image()
-                if frame is not None and len(frame) > 0:
-                    img = frame
-            except Exception:
-                logger.warning('head.get_image() failed', exc_info=True)
-
-        # 3) open the device directly - always available while video0 works
-        if img is None:
-            capture = cv.VideoCapture(camera_index)
-            try:
-                frame = None
-                success = False
-                # First frames can be dark while auto-exposure settles.
-                for _ in range(5):
-                    success, frame = capture.read()
-                if success and frame is not None:
-                    img = frame
-            finally:
-                capture.release()
-
+        img = grab_frame(reachy, side=side, camera_index=camera_index)
         if img is None:
             logger.warning('No camera image available')
             return None
@@ -382,6 +407,11 @@ class Listener(object):
             with self.microphone as source:
                 logger.info('Calibrating for ambient noise...')
                 self.recognizer.adjust_for_ambient_noise(source, duration=1)
+
+        # The stream is opened once and kept open across turns (see listen()).
+        # Re-opening it every turn added stream-startup latency, so the first
+        # syllable of the next utterance was clipped.
+        self._source = None
 
         logger.info('Energy threshold: %d', self.recognizer.energy_threshold)
         if self.recognizer.energy_threshold < 60:
@@ -450,6 +480,40 @@ class Listener(object):
                 return i
         return None
 
+    def _ensure_stream(self):
+        """Open the mic stream once and keep it open across turns."""
+        if self._source is None:
+            with quiet_stderr():
+                self._source = self.microphone.__enter__()
+
+    def _flush(self):
+        """Discard audio buffered while the robot was speaking/thinking.
+
+        The stream stays open across turns (so the leading syllable of the
+        next utterance is never lost to stream-startup lag), but that means
+        the robot's own TTS leaks into the buffer. Drain it right before we
+        start listening so we begin clean without a stale, self-heard head.
+        """
+        try:
+            raw = self._source.stream.pyaudio_stream
+            chunk = self._source.CHUNK
+            avail = raw.get_read_available()
+            while avail > 0:
+                raw.read(min(avail, chunk), exception_on_overflow=False)
+                avail = raw.get_read_available()
+        except Exception:
+            pass
+
+    def close(self):
+        """Release the persistent mic stream (call once at shutdown)."""
+        if self._source is not None:
+            try:
+                with quiet_stderr():
+                    self.microphone.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._source = None
+
     def listen(self):
         """Wait for one utterance and return its text.
 
@@ -458,16 +522,18 @@ class Listener(object):
             None: heard something but could not understand it
             '': network/service problem (treat as offline)
         """
+        self._ensure_stream()
         with quiet_stderr():
-            with self.microphone as source:
-                logger.info('Listening...')
-                try:
-                    audio = self.recognizer.listen(
-                        source, timeout=20, phrase_time_limit=self.phrase_limit)
-                except self.sr.WaitTimeoutError:
-                    # Nothing said for a while; reopen the stream and keep waiting.
-                    logger.info('(no speech for 20s)')
-                    return None
+            self._flush()
+            source = self._source
+            logger.info('Listening...')
+            try:
+                audio = self.recognizer.listen(
+                    source, timeout=20, phrase_time_limit=self.phrase_limit)
+            except self.sr.WaitTimeoutError:
+                # Nothing said for a while; keep the stream open and wait again.
+                logger.info('(no speech for 20s)')
+                return None
 
         try:
             text = self.recognizer.recognize_google(audio, language=self.language)
@@ -485,6 +551,9 @@ class Listener(object):
 
 # STT often mangles the wake-name '리치'. Only fix clear name-mishears; leave
 # real words like '위치'(position) alone unless they stand alone as address.
+# STT 가 흔히 틀리는 동작 단어 (문맥 안전한 것만)
+_WORD_FIXES = [('안대나', '안테나'), ('보간함', '보관함'), ('방수', '박수'),
+               ('만새', '만세'), ('아까 사', '악수'), ('학수', '악수')]
 _NAME_MISHEARS = ('다비치', '리치야', '리치아', '루치아', '유치하', '유치아',
                   '니치', '이치', '릿지', '리찌', '리취', '리치가', '리치는')
 
@@ -499,6 +568,8 @@ def _normalize_name(text):
         if stripped == w or stripped.startswith(w + ' '):
             text = text.replace(w, '리치', 1)
             break
+    for a, b in _WORD_FIXES:
+        text = text.replace(a, b)
     return text
 
 
@@ -515,18 +586,29 @@ def prepare_fillers(speech, cache_dir='/tmp/reachy_fillers'):
     of lag. The cache key includes the engine and voice: switching TTS engines
     regenerates the fillers instead of replaying stale ones.
     """
-    # Neutral hums only: "잠깐만요" sounds wrong after a greeting,
-    # while "음..." fits any kind of question.
-    phrases = ['음...', '음, 어디 보자...']
+    # Neutral pondering hums, chained back-to-back during a long wait so
+    # there is no dead air. A wide, varied set so a long wait never repeats
+    # the same sound twice in a row and it reads as thinking, not a loop.
+    phrases = [
+        '음...', '어디 보자...', '그러니까...', '음, 잠깐만요.', '네...',
+        '아, 네...', '흠...', '그게...', '음, 그러니까요...', '잠시만요.',
+        '아하...', '으음...', '한번 볼게요.', '네, 네...', '그렇군요...',
+        '음, 어디 보자.', '오...', '그거는...',
+    ]
 
     os.makedirs(cache_dir, exist_ok=True)
 
     voice = getattr(speech, 'edge_voice', '') if speech.engine == 'edge' else speech.voice
     slug = '{}-{}'.format(speech.engine, ''.join(c for c in voice if c.isalnum()))
 
+    import hashlib
+
     paths = []
-    for n, phrase in enumerate(phrases):
-        path = os.path.join(cache_dir, 'filler_{}_{}.mp3'.format(slug, n))
+    for phrase in phrases:
+        # Hash the phrase into the filename so editing the wording regenerates
+        # the file instead of replaying a stale cache from an earlier list.
+        tag = hashlib.md5(phrase.encode('utf-8')).hexdigest()[:8]
+        path = os.path.join(cache_dir, 'filler_{}_{}.mp3'.format(slug, tag))
         if os.path.exists(path) or speech.synthesize_to_file(phrase, path):
             paths.append(path)
 
@@ -535,8 +617,8 @@ def prepare_fillers(speech, cache_dir='/tmp/reachy_fillers'):
 
 
 def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
-             ack_delay=1.2, idle=None, vision=False, camera_side='left',
-             camera_index=0, motion_handler=None, turn_logger=None):
+             ack_delay=0.8, idle=None, vision=False, camera_side='left',
+             camera_index=0, motion_handler=None, turn_logger=None, notes=None):
     """Main conversation loop. Blocks until a stop word or Ctrl-C."""
     import random
 
@@ -552,15 +634,17 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
     try:
         _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
              say_and_move, random, speak, vision, camera_side, camera_index,
-             motion_handler, turn_logger)
+             motion_handler, turn_logger, notes)
     finally:
         if idle is not None:
             idle.stop()
+        listener.close()
 
 
 def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_and_move, random, speak, vision=False, camera_side='left',
-         camera_index=0, motion_handler=None, turn_logger=None):
+         camera_index=0, motion_handler=None, turn_logger=None, notes=None):
+    last_kind = None   # 직전 턴 종류 (motion/chat) — 문맥 라우팅용
     while True:
         # Re-assert neck stiffness each loop: the Orbita disks can thermally
         # cut torque while holding the head, and go limp until re-gripped.
@@ -590,7 +674,7 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
 
         print('나:', text)
 
-        if motion_handler is not None and wants_motion(text):
+        if motion_handler is not None and wants_motion(text, last_kind):
             image = None
             if vision and reachy is not None and wants_vision(text):
                 image = capture_view(reachy, side=camera_side, camera_index=camera_index)
@@ -599,23 +683,58 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             except Exception:
                 logger.exception('Motion handling crashed')
                 speak('동작을 처리하다가 문제가 생겼어요.')
+            last_kind = 'motion'
             continue
 
         if is_stop_word(text):
             speak('네, 다음에 또 얘기해요!')
             break
 
-        ack = None
-        ack_timer = None
-        if fillers and speech is not None:
-            # "um..." only when the wait drags on - a reply that arrives fast
-            # needs no filler, and an instant one right after the user stops
-            # talking feels too eager.
-            from threading import Timer
+        # Instant path: simple greetings / fixed patterns answer from the note
+        # file with no broker round trip at all, so the most common exchanges
+        # feel immediate instead of waiting on the CLI.
+        if notes is not None:
+            note_reply = notes.lookup(text)
+            if note_reply:
+                logger.info('QuickNote hit - answering instantly')
+                if turn_logger is not None:
+                    turn_logger.log('note', {'text': text, 'reply': note_reply})
+                print('리치:', note_reply)
+                speak(note_reply)
+                last_kind = 'chat'
+                continue
 
+        # Fill the whole wait with pondering sounds, not just one blip: after
+        # ack_delay, play fillers back-to-back until the reply arrives, so a
+        # slow (4-10s) CLI turn feels like the robot thinking, not lag.
+        from threading import Event, Thread
+
+        filler_stop = Event()
+        filler_thread = None
+        if fillers and speech is not None:
             ack = type(speech)(voice=speech.voice)
-            ack_timer = Timer(ack_delay, lambda: ack.start(wav=random.choice(fillers)))
-            ack_timer.start()
+
+            def filler_loop():
+                if filler_stop.wait(ack_delay):
+                    return                       # reply came fast, no filler
+                last = None
+                while not filler_stop.is_set():
+                    pick = random.choice(fillers)
+                    if len(fillers) > 1:
+                        while pick == last:      # never repeat back-to-back
+                            pick = random.choice(fillers)
+                    last = pick
+                    ack.start(wav=pick)
+                    while ack.is_playing:
+                        if filler_stop.wait(0.05):
+                            ack.stop()
+                            return
+                    if filler_stop.wait(0.4):     # short gap between hums
+                        return
+
+            filler_thread = Thread(target=filler_loop)
+            filler_thread.daemon = True
+            filler_thread.start()
 
         image = None
         if vision and reachy is not None and wants_vision(text):
@@ -631,10 +750,9 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         if head is not None:
             head.stop_thinking()
 
-        if ack_timer is not None:
-            ack_timer.cancel()
-        if ack is not None:
-            ack.stop()
+        filler_stop.set()
+        if filler_thread is not None:
+            filler_thread.join(timeout=2)
 
         if turn_logger is not None:
             turn_logger.log('vision_chat' if image else 'chat',
@@ -642,6 +760,7 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
 
         print('리치:', reply)
         speak(reply)
+        last_kind = 'chat'
 
 
 def startup_greeting(reachy, speech, head):
@@ -679,9 +798,10 @@ def main():
                         help='silence (s) that ends an utterance; lower = snappier')
     parser.add_argument('--no-ack', action='store_true',
                         help="don't play the short acknowledgement while thinking")
-    parser.add_argument('--ack-delay', type=float, default=1.2,
-                        help='seconds to wait before the acknowledgement plays; '
-                             'a reply that arrives sooner skips it entirely')
+    parser.add_argument('--ack-delay', type=float, default=0.8,
+                        help='seconds to wait before the first pondering hum '
+                             'plays; a reply that arrives sooner skips it. '
+                             'Hums then chain until the reply is ready.')
     parser.add_argument('--voice', default='ko', help='TTS language')
     parser.add_argument('--io', default='/dev/ttyUSB*', help="serial port template, or 'ws'")
     parser.add_argument('--no-robot', action='store_true',
@@ -692,6 +812,11 @@ def main():
                         help='which head camera to try first (left = /dev/video0)')
     parser.add_argument('--camera-index', type=int, default=0,
                         help='V4L2 device index for the direct-OpenCV fallback')
+    parser.add_argument('--no-presence', action='store_true',
+                        help='disable the local face-detection people watcher')
+    parser.add_argument('--attend', action='store_true',
+                        help='turn the head to face detected people while idle '
+                             '(needs the presence watcher; check ATTEND_SIGN)')
     parser.add_argument('--gaze-tilt', type=float, default=None,
                         help='baseline vertical gaze offset in m at 0.5m; '
                              'negative looks down (default -0.08)')
@@ -702,6 +827,10 @@ def main():
                         help="don't broadcast robot state for the web viewer")
     parser.add_argument('--log-dir', default='~/reachy_logs',
                         help="accumulate turns/motions/frames here ('off' disables)")
+    parser.add_argument('--notes', default='auto',
+                        help="instant-answer note file for simple patterns; "
+                             "'auto' = quick_notes.json next to this script, "
+                             "'off' disables")
     parser.add_argument('--list-mics', action='store_true', help='list microphones and exit')
     parser.add_argument('--stt-test', action='store_true',
                         help='loop STT only: print what was heard, no LLM, no robot')
@@ -742,9 +871,24 @@ def main():
 
     fillers = () if args.no_ack else prepare_fillers(speech)
 
+    notes = None
+    if args.notes and args.notes != 'off':
+        notes_path = args.notes
+        if notes_path == 'auto':
+            notes_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      'quick_notes.json')
+        if os.path.exists(os.path.expanduser(notes_path)):
+            from quick_notes import QuickNotes
+            notes = QuickNotes.load(notes_path)
+            logger.info('QuickNotes: %d instant-answer patterns from %s',
+                        len(notes), notes_path)
+        else:
+            logger.info('QuickNotes: no note file at %s, skipping', notes_path)
+
     reachy = None
     head = None
     idle = None
+    watcher = None
 
     motion_handler = None
 
@@ -774,6 +918,23 @@ def main():
         head.setup()
         idle = IdleMotion(reachy)
 
+        # Local people awareness: a background face watcher so the robot knows
+        # someone is there (free, no LLM). With --attend it also turns the head
+        # to face them while idle.
+        if not args.no_presence and not args.no_vision:
+            try:
+                from presence import PresenceWatcher
+                watcher = PresenceWatcher(
+                    lambda: grab_frame(reachy, side=args.camera_side,
+                                       camera_index=args.camera_index))
+                watcher.start()
+                if args.attend:
+                    idle.watcher = watcher
+                    logger.info('Head will attend to detected people')
+            except Exception:
+                logger.exception('Presence watcher failed to start')
+                watcher = None
+
         if args.motions:
             if not hasattr(client, 'ask_motion'):
                 parser.error('--motions requires the broker (not --direct)')
@@ -802,10 +963,12 @@ def main():
                  fillers=fillers, ack_delay=args.ack_delay, idle=idle,
                  vision=not args.no_vision, camera_side=args.camera_side,
                  camera_index=args.camera_index, motion_handler=motion_handler,
-                 turn_logger=turn_logger)
+                 turn_logger=turn_logger, notes=notes)
     except KeyboardInterrupt:
         print()
     finally:
+        if watcher is not None:
+            watcher.stop()
         if motion_handler is not None:
             motion_handler.executor.shutdown()
         if reachy is not None:

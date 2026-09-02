@@ -395,7 +395,10 @@ class TalkingHead(object):
         self._ramp_t0 = None
         self._ramp_gaze = (0.0, 0.0)
         self._ramp_ant = (0.0, 0.0)
-        self._ramp_d = 0.8
+        # Longer glide so the head eases into every motion instead of snapping.
+        # The Orbita neck has no working speed cap (Head.moving_speed is a
+        # no-op), so this ramp IS the only thing that keeps head moves gentle.
+        self._ramp_d = 1.3
 
     def setup(self):
         """Turn the neck and the antennas stiff."""
@@ -404,7 +407,7 @@ class TalkingHead(object):
             m.compliant = False
         time.sleep(0.1)
 
-    def begin_ramp(self, duration=0.8):
+    def begin_ramp(self, duration=1.3):
         """Start the next motion by gliding from the current pose.
 
         Without this, step()/think_step() jump straight to their own targets,
@@ -521,8 +524,8 @@ class TalkingHead(object):
             self.step(t)
             time.sleep(1 / self.freq)
 
-    def home(self, duration=1):
-        """Bring the head back to its neutral pose."""
+    def home(self, duration=1.8):
+        """Bring the head back to its neutral pose, slowly and gently."""
         self.reachy.head.left_antenna.goto(0, duration, interpolation_mode='minjerk')
         self.reachy.head.right_antenna.goto(0, duration, interpolation_mode='minjerk')
         # Gentle forward-and-slightly-down; NOT GAZE_TILT*2 (that bowed the
@@ -543,10 +546,22 @@ class IdleMotion(object):
         freq (float): update rate (in Hz)
     """
 
-    def __init__(self, reachy, distance=0.5, freq=50):
+    # Attend (person-follow) tuning. The servo is relative and iterated, so
+    # the gain just sets how fast the head centers a face; ATTEND_SIGN must
+    # match the camera (flip to -1 if the head turns away from people).
+    ATTEND_GAIN_Y = 0.18
+    ATTEND_GAIN_Z = 0.10
+    ATTEND_MAX_Y = 0.35
+    ATTEND_MAX_Z = 0.22
+    ATTEND_SIGN = 1.0
+
+    def __init__(self, reachy, distance=0.5, freq=50, watcher=None):
         self.reachy = reachy
         self.distance = distance
         self.freq = freq
+        # Optional PresenceWatcher; when set and a person is visible, the head
+        # gently turns to face them instead of glancing around at random.
+        self.watcher = watcher
 
         self._running = None
         self._thread = None
@@ -580,6 +595,16 @@ class IdleMotion(object):
 
         def loop():
             while self._running.is_set():
+                # When someone is in view, keep looking at them; otherwise fall
+                # back to the random idle repertoire.
+                if self.watcher is not None and self.watcher.person:
+                    try:
+                        self._attend()
+                    except Exception:
+                        logger.exception('Attend behavior failed')
+                    self._pause(random.uniform(0.3, 0.7))
+                    continue
+
                 behavior = random.choice(self._behaviors)
                 try:
                     behavior()
@@ -676,6 +701,26 @@ class IdleMotion(object):
     def _recenter(self):
         """Drift back to looking straight ahead."""
         self._move_gaze(0.0, 0.0, duration=2.0)
+
+    def _attend(self):
+        """Turn the head to face the person the watcher is tracking.
+
+        A relative, iterated servo: each call nudges the gaze to shrink the
+        face's offset from the image center, so over a couple of cycles the
+        head settles on the person and then follows them if they move.
+        """
+        w = self.watcher
+
+        def clamp(v, lo, hi):
+            return max(lo, min(hi, v))
+
+        # face_error > 0 means the face is on the right of the image; move the
+        # gaze that way to re-center it. Sign is flippable via ATTEND_SIGN.
+        ty = clamp(self._gaze[0] - self.ATTEND_SIGN * w.face_error * self.ATTEND_GAIN_Y,
+                   -self.ATTEND_MAX_Y, self.ATTEND_MAX_Y)
+        tz = clamp(self._gaze[1] - w.face_yerr * self.ATTEND_GAIN_Z,
+                   -self.ATTEND_MAX_Z, self.ATTEND_MAX_Z)
+        self._move_gaze(ty, tz, duration=0.8)
 
 
 def say_and_move(reachy, text=None, wav=None, speech=None, head=None, timeout=60):

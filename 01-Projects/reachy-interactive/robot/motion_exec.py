@@ -559,7 +559,8 @@ class MotionExecutor(object):
         seed = {m.name: m.present_position for m in arm_motors}
         delta = max(abs(target[j] - seed.get(j, 0.0)) for j in target)
         # Slow and deliberate: the gesture is over, this is the wind-down.
-        duration = min(max(delta / 30.0, 1.5), 4.0)
+        # Higher floor so the return to base never feels rushed.
+        duration = min(max(delta / 25.0, 2.0), 4.5)
         self._play([(target, duration)], seed, follow_side=None)
 
     def _enter_ready(self, gesture_motors):
@@ -663,7 +664,10 @@ class MotionExecutor(object):
                 break
 
         t_start = time.time()
-        follow_ramp_end = t_start + 0.6
+        # Ease the head-follow in over a longer window so the neck never
+        # lurches toward the hand when a gesture starts.
+        follow_ramp = 1.2
+        follow_ramp_end = t_start + follow_ramp
         tick = 0
 
         for seg in plan:
@@ -702,9 +706,11 @@ class MotionExecutor(object):
 
                     target = getattr(self, '_gaze_target', None)
                     if target is not None:
-                        alpha = min(1.0, dt / 0.2)
+                        # Slower smoothing (tau ~0.35s) keeps the gaze gliding
+                        # rather than tracking the hand abruptly.
+                        alpha = min(1.0, dt / 0.35)
                         if now < follow_ramp_end:
-                            alpha *= (now - t_start) / 0.6
+                            alpha *= (now - t_start) / follow_ramp
                         gaze[0] += (target[0] - gaze[0]) * alpha
                         gaze[1] += (target[1] - gaze[1]) * alpha
                         point_head(self.reachy, 0.5, gaze[0], gaze[1], tilt=False)
@@ -750,7 +756,7 @@ class MotionExecutor(object):
 
         self._gaze_target = None
 
-    def _home_head(self, duration=1.2):
+    def _home_head(self, duration=1.8):
         """Glide the gaze and antennas back to neutral after a gesture.
 
         Hand-follow leaves the head aimed at wherever the hand ended, and some

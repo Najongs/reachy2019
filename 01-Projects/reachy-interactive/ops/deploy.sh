@@ -3,11 +3,13 @@
 # Pi 는 모든 파일을 ~/Documents/ 에 평면으로 둔다(경로 고정). PARA 구조는 DGX/git 에만.
 set -e
 cd "$(dirname "$0")/.."          # reachy-interactive/
-ROBOT=robot; SIM=sim; OPS=ops
+ROBOT=robot; SIM=sim; OPS=ops; CFG=config
 FILES="$ROBOT/base_pose.py $ROBOT/custom_hands.py $ROBOT/llm_client.py \
 $ROBOT/motion_exec.py $ROBOT/motion_presets.py $ROBOT/say_and_move.py \
 $ROBOT/snap_view.py $ROBOT/voice_chat.py $ROBOT/state_mirror.py $ROBOT/calibrate_real.py \
+$ROBOT/quick_notes.py $ROBOT/presence.py \
 $SIM/sim_play.py $SIM/sim_viewer.html \
+$CFG/quick_notes.json \
 $OPS/pi_tunnel.service $OPS/pi_viewer.service"
 # reachy.glb 는 대용량 → 03-Resources 에서 별도(있을 때만)
 GLB=../../03-Resources/3d-models/reachy.glb

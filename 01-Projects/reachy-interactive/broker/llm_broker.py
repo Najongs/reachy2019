@@ -124,7 +124,7 @@ class ClaudeCliBackend(Backend):
 
     MAX_SESSIONS = 4
 
-    def __init__(self, model='haiku', timeout=60, system_prompt=None):
+    def __init__(self, model='haiku', timeout=60, system_prompt=None, effort='low'):
         import shutil
 
         self.claude = shutil.which('claude')
@@ -133,6 +133,7 @@ class ClaudeCliBackend(Backend):
 
         self.model = model
         self.timeout = timeout
+        self.effort = effort
         self._system_prompt = system_prompt
 
         import threading
@@ -148,6 +149,11 @@ class ClaudeCliBackend(Backend):
             '--output-format', 'stream-json',
             '--verbose',
             '--model', self.model,
+            # Speed: short spoken answers / motion JSON need no deep reasoning
+            # and no tools. Low effort + tools off cuts per-turn latency.
+            '--effort', self.effort,
+            '--disallowedTools', 'Bash Read Write Edit Glob Grep WebFetch '
+            'WebSearch Task NotebookEdit TodoWrite',
             '--append-system-prompt', (self._system_prompt or SYSTEM_PROMPT +
             ' Reply with the sentence only - no preamble.') +
             ' Do not use any tools.',

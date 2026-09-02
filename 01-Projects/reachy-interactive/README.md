@@ -39,6 +39,8 @@ robot/voice_chat.py ── STT(구글) ── HTTP ──▶ broker/llm_broker.p
 | `state_mirror.py` | 실물 관절 실제 엔코더값을 ws(6171)로 방송 → sim 미러 |
 | `calibrate_real.py` | 관절 하나씩 왕복시켜 시뮬과 방향 대조 |
 | `snap_view.py` | 머리 숙여 카메라 프레임 저장 |
+| `quick_notes.py` | 단순 패턴(인사/FAQ) 즉답 — CLI 안 거치고 `config/quick_notes.json`에서 바로 응답 |
+| `presence.py` | 머리 카메라로 얼굴 검출(로컬·무료). 사람 있으면 idle이 고개를 사람 쪽으로(`--attend`) |
 
 ## 실행
 
@@ -50,7 +52,12 @@ python3 broker/llm_broker.py --host 127.0.0.1 --port 8080 \
   --motion-model opus --motion-prompt-file config/motion_prompt.txt &
 
 # [Pi] 메인 (동작 포함; 전원만 켜면 준비 — 부팅 자동화는 02-Areas 참조)
-python3 robot/voice_chat.py --motions --url http://127.0.0.1:8080 --token <TOKEN>
+#   --attend: 사람 얼굴 쪽으로 고개 (얼굴검출은 기본 on, 고개추적만 옵트인)
+python3 robot/voice_chat.py --motions --attend --url http://127.0.0.1:8080 --token <TOKEN>
+
+# [DGX] 대화 로그에서 즉답 노트 자동 구축 (로그 갱신 후)
+python3 broker/build_notes.py          # 후보만 quick_notes.proposed.json 에
+python3 broker/build_notes.py --merge  # 안전·일관된 것만 quick_notes.json 에 승격
 
 # [Pi/DGX] 시뮬만
 python3 sim/sim_play.py --candidates --url http://127.0.0.1:8080 --token <TOKEN>
@@ -66,6 +73,19 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition` + `sudo apt install
 - 안전층(모델 불신): 관절 화이트리스트, 실한계 클램프 + **SAFE_LIMITS**(기계한계보다 좁은 안전범위), 평균속도 상한, **팔 전체 FK 충돌검사**(몸통·머리·정중선·양팔거리), 온도게이트 55°C, 뮤텍스
 - 실행: 단일 50Hz 스레드, 명령값 FK로 손 시야추적, 키프레임마다 실측 동기화(스톨 감지)
 - 상태: 시작(인사+레디포즈) → 대기(idle) → 생각/말하기 → 동작(손추적) → 레디복귀 → 3분후 자동이완
+
+## 응답성 (CLI 지연 가리기 · 즉답 · 사람 인지)
+
+- **연속 맞장구**: CLI 응답(4~10s)을 기다리는 동안 `--ack-delay`(0.8s) 후부터 뜸들이는 소리를
+  이어 붙여 침묵을 없앰. 응답 오면 즉시 컷, 빠른 답(0.8s 이내)은 스킵. 문구는 `voice_chat.prepare_fillers`
+- **즉답 노트**(`quick_notes.py` + `config/quick_notes.json`): 인사/이름/위치 같은 단순·정형 패턴은
+  CLI 없이 즉시 응답. 매칭은 보수적(짧은 발화만) — 실제 질문은 절대 가로채지 않음. 동작/비전 라우팅이 먼저 걸러짐
+- **노트 자동 성장**(`broker/build_notes.py`): 대화 로그에서 자주 나오는 짧은 발화를 찾아 **로그에 실제로 나온 답변**을
+  재사용해 제안(할루시네이션 방지, 실행 약속성 답변 제외). `--merge`로 일관·안전한 것만 승격
+- **머리 항상 천천히**: Orbita neck 은 속도 상한이 없어(Head.moving_speed 무동작) 글라이드 시간이 유일한 제어 —
+  begin_ramp 1.3s, home 1.8s, 핸드팔로우 램프 1.2s·τ0.35, 베이스복귀 하한 2.0s
+- **사람 인지**(`presence.py`): 머리 카메라로 얼굴 검출(로컬·무료·상시). `--attend` 시 idle 이 고개를 사람 쪽으로
+  (상대 서보, 부호는 `IdleMotion.ATTEND_SIGN`). STT 앞부분 잘림도 수정 — 마이크 스트림 상시 개방 + 듣기 직전 버퍼 flush
 
 ## 시뮬레이터
 
