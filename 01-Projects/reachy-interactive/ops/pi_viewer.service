@@ -1,0 +1,14 @@
+# 웹 뷰어 서빙 (http://<Pi>:8090/sim_viewer.html)
+# 설치: sudo cp pi_viewer.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now pi_viewer
+[Unit]
+Description=Reachy sim viewer http server
+After=network-online.target
+
+[Service]
+User=pi
+ExecStart=/usr/bin/python3 -m http.server 8090 --directory /home/pi/Documents
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

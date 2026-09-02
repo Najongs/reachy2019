@@ -1,0 +1,211 @@
+<!-- Reachy 2019 viewer with the real CAD model (reachy.glb from pollen's
+     Blender release). Loads the mesh, then drives the named joint nodes with
+     angles streamed over the ws.py protocol (port 6171 real mirror / 6172 sim):
+       server -> {"motors":[{name, goal_position(motor frame)}...]}
+     Values are echoed back as present_position. Serve this file next to
+     reachy.glb (DGX or Pi); browser needs internet for the three.js CDN. -->
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Reachy 2019 Viewer</title>
+<style>
+  body { margin:0; background:#1a1e24; color:#dde; font:13px sans-serif; overflow:hidden; }
+  #hud { position:fixed; top:10px; left:10px; background:#000b; padding:10px 12px;
+         border-radius:8px; z-index:2; }
+  #hud input { width:180px; }
+  #status { margin-top:6px; } .ok{color:#7f7;} .bad{color:#f77;}
+  button { margin-left:3px; }
+  #load { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+          font-size:16px; color:#89a; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div>ws://<input id="host"> <button id="connect">연결</button>
+       <button id="btnReal">실물</button><button id="btnSim">시뮬</button>
+       <button id="btnCal">캘리브레이션</button></div>
+  <div id="status">모델 로딩 중...</div>
+  <div id="calpanel" style="display:none; margin-top:8px; max-height:70vh; overflow:auto;"></div>
+</div>
+<div id="load">Reachy 3D 모델 불러오는 중...</div>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// motor name -> [glTF joint node, local rotation axis, motor->user conv]
+// axes/signs verified by test renders against the real robot.
+// [node, axis, offset, dir(for motorToUser), sign(geometric flip vs real)]
+// sign values corrected against the live robot (right shoulder + both elbows).
+const J = {
+  // [node, axis, offset, dir, sign] — 모든 관절 DOF = 로컬 z (모터축).
+  // 2026-09-02 실물 관절 하나씩 왕복시켜 대조 완료 (calibrate_real.py). 확정값.
+  'right_arm.shoulder_pitch': ['right_shoulder_pitch_joint','z', 90,false,-1],
+  'right_arm.shoulder_roll' : ['right_shoulder_roll_joint', 'z', 90,false, 1],
+  'right_arm.arm_yaw'       : ['right_arm_yaw_joint',       'z', 0, false, 1],
+  'right_arm.elbow_pitch'   : ['right_elbow_pitch_joint',   'z', 0, false,-1],
+  'right_arm.hand.forearm_yaw':['right_forearm_yaw_joint',  'z', 0, false, 1],
+  'right_arm.hand.wrist_pitch':['right_wrist_pitch_joint',  'z', 0, false,-1],
+  'right_arm.hand.gripper'  : ['right_gripper_joint',       'z', 0, true , 1],
+  'left_arm.shoulder_pitch' : ['left_shoulder_pitch_joint', 'z', 90,true , 1],
+  'left_arm.shoulder_roll'  : ['left_shoulder_roll_joint',  'z',-90,false,-1],
+  'left_arm.arm_yaw'        : ['left_arm_yaw_joint',        'z', 0, false,-1],
+  'left_arm.elbow_pitch'    : ['left_elbow_pitch_joint',    'z', 0, false,-1],
+  'left_arm.hand.forearm_yaw':['left_forearm_yaw_joint',    'z', 0, false,-1],
+  'left_arm.hand.wrist_pitch':['left_wrist_pitch_joint',    'z', 0, false,-1],
+  'head.left_antenna'  : ['left_ear_joint',  'z', 0, true, 1],
+  'head.right_antenna' : ['right_ear_joint', 'z', 0, true, 1],
+};
+const motorToUser = (m, v) => (m[3] ? v : -v) - m[2];   // deg
+const D = Math.PI/180;
+
+const nodes = {};          // joint node name -> THREE.Object3D
+const rest  = {};          // joint name -> rest euler (radians), captured at load
+const userAngle = {};      // motor name -> user-frame degrees
+
+// --- scene ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1e24);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.01, 20);
+camera.position.set(0.9, 0.15, 0.9);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight); renderer.setPixelRatio(devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, -0.15, 0);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445, 1.2));
+const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(1,2,1.5); scene.add(key);
+const fill = new THREE.DirectionalLight(0x88aaff, 0.4); fill.position.set(-1,0.5,-1); scene.add(fill);
+
+new GLTFLoader().load('reachy.glb', gltf => {
+  const root = gltf.scene;
+  root.rotation.x = -Math.PI/2;   // glb is Z-up (native Blender) -> three is Y-up
+  root.traverse(o => { if (o.name && o.name.includes('joint')) {
+    nodes[o.name] = o; rest[o.name] = o.quaternion.clone();
+  }});
+  scene.add(root);
+  // frame it
+  const box = new THREE.Box3().setFromObject(root);
+  const c = box.getCenter(new THREE.Vector3());
+  controls.target.copy(c); camera.position.set(c.x+0.8, c.y+0.1, c.z+0.8); controls.update();
+  document.getElementById('load').style.display = 'none';
+  status.innerHTML = '<span class=ok>모델 로드됨</span> — 연결하세요';
+}, undefined, err => {
+  document.getElementById('load').textContent = '모델 로드 실패: ' + err;
+});
+
+const AXV = { x:new THREE.Vector3(1,0,0), y:new THREE.Vector3(0,1,0), z:new THREE.Vector3(0,0,1) };
+const _dq = new THREE.Quaternion();
+function applyAngles() {
+  for (const [motor, meta] of Object.entries(J)) {
+    const node = nodes[meta[0]];
+    if (!node || userAngle[motor] === undefined) continue;
+    // rotate about the joint's LOCAL DOF axis, relative to its rest pose.
+    // Robust to any baked rest rotation; mirrored L/R joints stay symmetric.
+    _dq.setFromAxisAngle(AXV[meta[1]], userAngle[motor] * (meta[4]||1) * D);
+    node.quaternion.copy(rest[meta[0]]).multiply(_dq);
+  }
+  // Head: turn neck_joint toward the gaze (pan about local z, tilt about y).
+  const neck = nodes['neck_joint'];
+  if (neck && headGaze && rest['neck_joint']) {
+    const pan  = Math.atan2(headGaze.gy, 0.5) * NECK.panSign;
+    const tilt = Math.atan2(headGaze.gz, 0.5) * NECK.tiltSign;
+    const qp = new THREE.Quaternion().setFromAxisAngle(AXV.z, pan);
+    const qt = new THREE.Quaternion().setFromAxisAngle(AXV.y, tilt);
+    neck.quaternion.copy(rest['neck_joint']).multiply(qp).multiply(qt);
+  }
+}
+
+// --- protocol ---
+const status = document.getElementById('status');
+let ws = null;
+let headGaze = null;
+const NECK = { panSign: 1, tiltSign: 1 };   // 캘리브레이션으로 조정
+function apply(text) {
+  const state = JSON.parse(text);
+  for (const m of (state.motors||[])) {
+    const meta = J[m.name];
+    if (meta) userAngle[m.name] = motorToUser(meta, m.goal_position);
+  }
+  if (state.head && state.head.gy !== undefined) headGaze = state.head;
+  return JSON.stringify({motors:(state.motors||[]).map(m=>({name:m.name, present_position:m.goal_position}))});
+}
+document.getElementById('connect').onclick = () => {
+  if (ws) ws.close();
+  const host = document.getElementById('host').value;
+  ws = new WebSocket('ws://'+host); ws.binaryType='arraybuffer';
+  status.textContent='연결 중... '+host;
+  ws.onopen = ()=> status.innerHTML='<span class=ok>연결됨</span> '+host;
+  ws.onclose= ()=> status.innerHTML='<span class=bad>끊김</span>';
+  ws.onerror= ()=> status.innerHTML='<span class=bad>연결 실패</span> (io/미러 실행중인지 확인)';
+  ws.onmessage = ev => {
+    if (calMode) return;
+    const t = typeof ev.data==='string' ? ev.data : new TextDecoder().decode(ev.data);
+    try { ws.send(apply(t)); } catch(e){ console.error(e); }
+  };
+};
+function connectTo(port){ const b=(location.hostname||'localhost');
+  document.getElementById('host').value=b+':'+port; document.getElementById('connect').onclick(); }
+document.getElementById('btnReal').onclick=()=>connectTo(6171);
+document.getElementById('btnSim').onclick =()=>connectTo(6172);
+document.getElementById('host').value=(location.hostname||'localhost')+':6171';
+
+// --- 캘리브레이션: 관절별 슬라이더로 축/방향 직접 확인 ---
+let calMode = false;
+const panel = document.getElementById('calpanel');
+function buildPanel(){
+  panel.innerHTML = '<div style="color:#9cf">각 관절을 움직여 실물과 방향이 같은지 확인.'
+    + ' 반대면 알려주세요.</div>';
+  // 목(neck) pan/tilt 수동 슬라이더
+  for (const nk of [['목 좌우(pan)','gy','panSign'], ['목 위아래(tilt)','gz','tiltSign']]){
+    const row=document.createElement('div');
+    const lab=document.createElement('span'); lab.textContent=nk[0];
+    lab.style.cssText='display:inline-block;width:150px;font-size:11px;color:#fc9';
+    const sl=document.createElement('input'); sl.type='range'; sl.min=-40; sl.max=40; sl.value=0; sl.style.width='140px';
+    const val=document.createElement('span'); val.textContent='0'; val.style.marginLeft='6px';
+    sl.oninput=()=>{ headGaze=headGaze||{gy:0,gz:0}; headGaze[nk[1]]=sl.value/100; val.textContent=sl.value; };
+    const sg=document.createElement('button'); sg.textContent='±';
+    sg.onclick=()=>{ NECK[nk[2]]=-NECK[nk[2]]; };
+    row.append(lab, sl, val, sg); panel.append(row);
+  }
+  for (const motor of Object.keys(J)){
+    const row=document.createElement('div');
+    const lab=document.createElement('span'); lab.textContent=motor.replace('_arm.','.').replace('.hand','');
+    lab.style.cssText='display:inline-block;width:150px;font-size:11px';
+    const sl=document.createElement('input');
+    sl.type='range'; sl.min=-90; sl.max=90; sl.value=0; sl.style.width='140px';
+    const val=document.createElement('span'); val.textContent='0'; val.style.marginLeft='6px';
+    sl.oninput=()=>{ userAngle[motor]=+sl.value; val.textContent=sl.value; };
+    const meta=J[motor];
+    const info=document.createElement('span');
+    info.style.cssText='margin-left:8px;font-size:11px;color:#8ac';
+    const upd=()=>info.textContent='['+meta[1]+(meta[4]<0?'-':'+')+']';
+    upd();
+    const axBtn=document.createElement('button'); axBtn.textContent='축';
+    axBtn.onclick=()=>{ meta[1]={x:'y',y:'z',z:'x'}[meta[1]]; upd(); };
+    const sgBtn=document.createElement('button'); sgBtn.textContent='±';
+    sgBtn.onclick=()=>{ meta[4]=-meta[4]; upd(); };
+    row.append(lab, sl, val, info, axBtn, sgBtn); panel.append(row);
+  }
+}
+document.getElementById('btnCal').onclick=()=>{
+  calMode=!calMode;
+  panel.style.display = calMode ? 'block' : 'none';
+  if(calMode){ if(ws) ws.close(); if(!panel.children.length) buildPanel();
+    status.innerHTML='<span class=ok>캘리브레이션 모드</span> (스트림 중단, 슬라이더로 수동)'; }
+  else { status.textContent='캘리브레이션 종료'; }
+};
+
+addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight); });
+(function loop(){ requestAnimationFrame(loop); applyAngles(); controls.update(); renderer.render(scene,camera); })();
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# Pi <-> DGX 상시 SSH 터널. 윈도우 중계 불필요.
+#   -L 8080 : Pi 에서 127.0.0.1:8080 = DGX 브로커
+#   -R 2222 : DGX 에서 ssh -p 2222 pi@localhost = 이 Pi (역방향 접속/파일 배포용)
+#   -R 8090/6171 : DGX(및 외부에서 DGX 경유)에서 뷰어/미러 확인용
+# 설치 (Pi에서):
+#   sudo cp pi_tunnel.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now pi_tunnel
+[Unit]
+Description=SSH tunnel to DGX broker (Reachy)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=pi
+ExecStart=/usr/bin/ssh -N \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o StrictHostKeyChecking=accept-new \
+  -i /home/pi/.ssh/dgx_tunnel \
+  -p 20411 \
+  -L 8080:localhost:8080 \
+  -R 2222:localhost:22 \
+  -R 8090:localhost:8090 \
+  -R 6171:localhost:6171 \
+  -R 6172:localhost:6172 \
+  kiro-ai@210.183.240.125
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

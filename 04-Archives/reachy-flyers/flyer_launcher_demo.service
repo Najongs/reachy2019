@@ -1,0 +1,13 @@
+[Unit]
+Description=Flyer Distribution service
+Wants=network-online.target
+After=network.target network-online.target
+[Service]
+Type=simple
+PIDFile=/var/run/flyers.pid
+Environment="PATH=$PATH"
+ExecStart=/usr/bin/python3 /home/pi/dev/reachy-flyers/reachy_flyers/demo.py
+User=pi
+Group=pi
+[Install]
+WantedBy=multi-user.target
