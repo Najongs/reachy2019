@@ -320,7 +320,7 @@ def wants_long_answer(user_text):
     return any(w.replace(' ', '') in compact for w in _WANTS_LONG)
 
 
-def spoken_trim(text, max_sentences=3, max_chars=220):
+def spoken_trim(text, max_sentences=3, max_chars=170):
     """Cut a reply down to something a robot can say out loud.
 
     Small local models ignore "answer in one or two sentences" and happily
@@ -352,6 +352,7 @@ def spoken_trim(text, max_sentences=3, max_chars=220):
         out.append(buf)
 
     result = ''.join(out).strip() or text
+    truncated = len(result) < len(text)
     if len(result) > max_chars:
         cut = result[:max_chars]
         for mark in ('. ', '! ', '? '):
@@ -360,6 +361,12 @@ def spoken_trim(text, max_sentences=3, max_chars=220):
                 cut = cut[:i + 1]
                 break
         result = cut.strip()
+        truncated = True
+
+    # A story cut off mid-telling just dangles; offer to go on instead. Only
+    # for long-form answers (short chat replies are complete as they are).
+    if truncated and max_sentences > 4 and not result.rstrip().endswith('?'):
+        result = result.rstrip() + ' 더 들려드릴까요?'
     return result
 
 
@@ -371,7 +378,7 @@ class OllamaBackend(Backend):
     """
 
     def __init__(self, model='exaone3.5:7.8b', host='127.0.0.1:11434',
-                 timeout=90, num_predict=110, temperature=0.7):
+                 timeout=90, num_predict=90, temperature=0.7):
         self.model = model
         self.url = 'http://{}/api/chat'.format(host)
         self.timeout = timeout
@@ -389,7 +396,7 @@ class OllamaBackend(Backend):
         # A story/explanation request gets room to finish; a normal turn stays
         # short so the robot does not monologue at someone passing by.
         long_form = wants_long_answer(text)
-        num_predict = 420 if long_form else self.num_predict
+        num_predict = 260 if long_form else self.num_predict
 
         body = json.dumps({
             'model': self.model,
@@ -407,8 +414,10 @@ class OllamaBackend(Backend):
         out = (data.get('message', {}).get('content') or '').strip()
         out = _EMOJI.sub('', out).strip()
         if long_form:
+            # Long-form still means "a few sentences", not a monologue - the
+            # persona offers to continue instead of saying everything at once.
             return spoken_trim(speakable_reply(out),
-                               max_sentences=12, max_chars=900)
+                               max_sentences=6, max_chars=420)
         return spoken_trim(speakable_reply(out))
 
     def reset(self, session):

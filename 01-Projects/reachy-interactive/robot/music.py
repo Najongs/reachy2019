@@ -141,22 +141,29 @@ class MusicPlayer(object):
         except Exception:
             pass
 
-        # A steady beat the head can nod to (clips are upbeat, ~2 Hz feels right).
-        beat = 1.9
+        # The Orbita neck cannot track a 2 Hz beat - driving it that fast just
+        # makes it jitter. So the ANTENNAS carry the rhythm (they are light
+        # dynamixels and can) while the head only sways slowly underneath.
+        beat = 1.9          # antennas
+        head_sway = 0.22    # Hz - one slow sweep every ~4.5s
+        head_bob = 0.30     # Hz
         freq = 25.0
         t0 = time.time()
         next_accent = 3.0
 
         while not self._stop.is_set() and self.playing:
             t = time.time() - t0
-            # Head: nod on the beat, sway slower - reads as dancing, not twitching.
-            z = 0.09 * math.sin(2 * math.pi * beat * t)
-            y = 0.13 * math.sin(2 * math.pi * (beat / 4.0) * t)
+            # Head: slow, small - a relaxed sway, never a nod on the beat.
+            z = 0.045 * math.sin(2 * math.pi * head_bob * t)
+            y = 0.10 * math.sin(2 * math.pi * head_sway * t)
             try:
                 point_head(self.reachy, 0.5, y, z, tilt=False)
-                amp = 22 * math.sin(2 * math.pi * beat * t)
-                head.left_antenna.goal_position = amp
-                head.right_antenna.goal_position = -amp
+                # Antennas do the dancing: full beat plus a flick on the
+                # off-beat, and they counter-rotate so it reads as rhythm.
+                a = (30 * math.sin(2 * math.pi * beat * t)
+                     + 12 * math.sin(2 * math.pi * beat * 2 * t + 0.6))
+                head.left_antenna.goal_position = a
+                head.right_antenna.goal_position = -a
             except Exception:
                 pass
 
