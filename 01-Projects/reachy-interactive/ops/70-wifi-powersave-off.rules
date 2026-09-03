@@ -1,0 +1,8 @@
+# Disable wifi power-save on every wlan interface as it appears.
+#
+# The MT7601U USB dongle's power saving dropped ~30% of packets when idle
+# (verified: 30% ping loss -> 0% after turning it off). Without this the SSH
+# tunnel to the broker flaps constantly. Install on the Pi:
+#   sudo cp ops/70-wifi-powersave-off.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo iw dev wlan0 set power_save off
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/sbin/iw dev %k set power_save off"
