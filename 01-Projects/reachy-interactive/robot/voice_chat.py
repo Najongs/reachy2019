@@ -428,7 +428,7 @@ class Listener(object):
 
     def __init__(self, language='ko-KR', mic_index=None, energy=200, phrase_limit=10,
                  pause=0.5, energy_floor=100, energy_ceil=400,
-                 stt='auto', vosk_model=None):
+                 fixed_energy=None, stt='auto', vosk_model=None):
         with quiet_stderr():
             import speech_recognition as sr
 
@@ -464,8 +464,17 @@ class Listener(object):
         # Bound the Google STT HTTP call: the default is None (unbounded
         # urlopen), so a half-open connection would freeze the loop forever.
         self.recognizer.operation_timeout = 10
-        self.recognizer.energy_threshold = energy
-        self.recognizer.dynamic_energy_threshold = True
+        # Fixed threshold = deterministic sensitivity: nothing below it is ever
+        # treated as speech. Best for a stationary robot in a steady room - the
+        # dynamic threshold otherwise drifts DOWN in quiet and starts catching
+        # micro-noise (RMS ~75-280) below the floor. --fixed-energy N pins it.
+        self.fixed_energy = fixed_energy
+        if fixed_energy is not None:
+            self.recognizer.energy_threshold = fixed_energy
+            self.recognizer.dynamic_energy_threshold = False
+        else:
+            self.recognizer.energy_threshold = energy
+            self.recognizer.dynamic_energy_threshold = True
         # How much silence marks the end of an utterance. The 0.8s default
         # adds nearly half a second of dead air to every single turn.
         self.recognizer.pause_threshold = pause
@@ -618,10 +627,12 @@ class Listener(object):
                 # The dynamic threshold drifts UP after any noise (going deaf to
                 # soft voices) and DOWN in dead silence (hair-trigger). Clamp
                 # it to the configured band every turn - lower the floor for a
-                # quiet room with soft speakers (--energy-floor).
-                self.recognizer.energy_threshold = min(
-                    max(self.recognizer.energy_threshold, self.energy_floor),
-                    self.energy_ceil)
+                # quiet room with soft speakers (--energy-floor). Skipped when
+                # --fixed-energy pins the threshold outright.
+                if self.fixed_energy is None:
+                    self.recognizer.energy_threshold = min(
+                        max(self.recognizer.energy_threshold, self.energy_floor),
+                        self.energy_ceil)
                 source = self._source
                 logger.info('Listening...')
                 try:
@@ -1073,6 +1084,12 @@ def main():
                         help='highest the speech threshold may rise to; LOWER '
                              'for a quiet room so soft voices still trigger, '
                              'RAISE if it self-triggers on noise (default 400)')
+    parser.add_argument('--fixed-energy', type=int, default=None,
+                        help='pin the speech threshold to this exact value and '
+                             'disable auto-adjust (deterministic sensitivity). '
+                             'RAISE to ignore more micro-noise, LOWER to catch '
+                             'softer speech. Tune with --stt-test (watch RMS). '
+                             'Try ~250 if it picks up too much background noise.')
     parser.add_argument('--stt', default='auto', choices=['auto', 'google', 'vosk'],
                         help="speech engine: 'vosk' offline (flaky internet), "
                              "'google' online (more accurate), 'auto' = vosk if "
@@ -1143,8 +1160,8 @@ def main():
     listener = Listener(language=args.language, mic_index=args.mic,
                         energy=args.energy, phrase_limit=args.phrase_limit,
                         pause=args.pause, energy_floor=args.energy_floor,
-                        energy_ceil=args.energy_ceil, stt=args.stt,
-                        vosk_model=args.vosk_model)
+                        energy_ceil=args.energy_ceil, fixed_energy=args.fixed_energy,
+                        stt=args.stt, vosk_model=args.vosk_model)
 
     if args.stt_test:
         print('말해보세요 (Ctrl-C 로 종료):')
