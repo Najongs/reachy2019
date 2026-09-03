@@ -387,6 +387,68 @@ def point_head(reachy, x, y, z, tilt=True):
     reachy.head._soft_gaze = (y, z)
 
 
+# -- Neck (Orbita) gestures --------------------------------------------------
+# The neck IS a motorised 3-disk Orbita parallel mechanism - the same one the
+# gaze/idle/attend motions already drive. It just isn't a set of angle joints,
+# so it can't go through the arm keyframe pipeline. These gestures move it
+# directly via point_head (gaze direction), fully offline (no broker). Each is
+# a list of (y, z) gaze waypoints; y = left(+)/right(-), z = up(+)/down(-).
+HEAD_GESTURES = {
+    'up':        [(0.0, 0.35)],
+    'down':      [(0.0, -0.30)],
+    'left':      [(0.40, 0.0)],
+    'right':     [(-0.40, 0.0)],
+    'center':    [(0.0, 0.0)],
+    'tilt_back': [(0.0, 0.42)],
+    'nod':       [(0.0, -0.22), (0.0, 0.10), (0.0, -0.22), (0.0, 0.0)],
+    'shake':     [(0.35, 0.0), (-0.35, 0.0), (0.35, 0.0), (0.0, 0.0)],
+    'roll':      [(0.30, 0.10), (0.0, 0.30), (-0.30, 0.10),
+                  (0.0, -0.20), (0.0, 0.0)],
+}
+
+
+def run_head_gesture(reachy, name, distance=0.5, freq=50, seg=0.9, hold=0.35):
+    """Move the neck through a named gesture, then return to neutral.
+
+    Glides between gaze waypoints at `freq` Hz so the Orbita moves smoothly
+    (it has no speed cap; the glide is the only rate control). Ends looking
+    forward. Returns True if the gesture ran.
+    """
+    waypoints = HEAD_GESTURES.get(name)
+    if waypoints is None:
+        return False
+
+    head = reachy.head
+    try:
+        head.compliant = False
+        for m in head.motors:
+            m.compliant = False
+    except Exception:
+        pass
+    time.sleep(0.05)
+
+    start = list(getattr(head, '_soft_gaze', (0.0, 0.0)))
+    path = list(waypoints)
+    if path[-1] != (0.0, 0.0):
+        path = path + [(0.0, 0.0)]        # always settle looking forward
+
+    for (ty, tz) in path:
+        y0, z0 = start
+        t0 = time.time()
+        while True:
+            t = (time.time() - t0) / seg
+            if t >= 1:
+                break
+            k = 0.5 - 0.5 * np.cos(np.pi * t)      # cosine ease
+            point_head(reachy, distance, y0 + (ty - y0) * k,
+                       z0 + (tz - z0) * k, tilt=False)
+            time.sleep(1.0 / freq)
+        point_head(reachy, distance, ty, tz, tilt=False)
+        start = [ty, tz]
+        time.sleep(hold)
+    return True
+
+
 class TalkingHead(object):
     """Small idle-like head motion meant to run while Reachy talks.
 

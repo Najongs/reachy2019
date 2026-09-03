@@ -108,6 +108,49 @@ FOLLOWUP_WORDS = ('다시', '또', '한번더', '한 번 더', '더크게', '더
 FOLLOWUP_BLOCK = ('뭐', '왜', '어떻', '누구', '말', '신기', '대박', '우와', '멋')
 
 
+# Head/neck movement. The neck is a motorised Orbita mechanism (gaze-driven,
+# not keyframe joints), so these run LOCALLY via run_head_gesture - offline,
+# no broker. A head word + a direction/action maps to a gesture.
+HEAD_WORDS = ('고개', '목', '머리', '얼굴')
+# Unambiguous head gestures - trigger even without a 고개/목 word ('도리도리
+# 해봐'). '까딱' is NOT here (it collides with wrist gestures).
+_HEAD_STRONG = [
+    (('끄덕끄덕', '끄덕여', '끄덕', '네네'), 'nod'),
+    (('도리도리', '절레절레', '절레'), 'shake'),
+]
+# With a head word, a direction/action cue. Directions come BEFORE 'roll' so
+# "왼쪽으로 돌려" = look left, while a bare "돌려/한바퀴" = full roll.
+_HEAD_DIR = [
+    (('끄덕', '까딱'), 'nod'),
+    (('도리도리', '절레', '좌우로', '흔들'), 'shake'),
+    (('위로', '위', '올려', '쳐들'), 'up'),
+    (('아래', '밑', '숙여', '숙이', '내려'), 'down'),
+    (('왼쪽', '왼', '좌측', '좌로'), 'left'),
+    (('오른쪽', '오른', '우측', '우로'), 'right'),
+    (('젖혀', '젖히', '뒤로'), 'tilt_back'),
+    (('돌려', '돌리', '한바퀴', '빙', '돌아'), 'roll'),
+    (('정면', '앞', '가운데', '중앙', '똑바로', '원위치', '제자리'), 'center'),
+]
+
+
+def wants_head_gesture(text):
+    """Return a head-gesture name for a neck/head movement request, else None."""
+    compact = text.replace(' ', '')
+    for cues, name in _HEAD_STRONG:
+        if any(c in compact for c in cues):
+            return name
+    # '목' must not be the '목' inside '손목'(wrist) - that is an arm gesture.
+    has_head = ('고개' in compact or '머리' in compact or '얼굴' in compact
+                or ('목' in compact and '손목' not in compact))
+    if not has_head:
+        return None
+    # Needs a movement cue, not just a mention ("머리 아파" -> chat).
+    for cues, name in _HEAD_DIR:
+        if any(c in compact for c in cues):
+            return name
+    return None
+
+
 def wants_motion(text, last_kind=None):
     """Check if the request asks for a physical gesture.
 
@@ -965,6 +1008,29 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             motion_handler.executor.stop_idle_arms()
 
         print('나:', text)
+
+        # Head/neck movement: the Orbita neck moves via gaze, not arm keyframes,
+        # so run it LOCALLY (offline, no broker) instead of saying it can't.
+        head_g = wants_head_gesture(text) if reachy is not None and head is not None else None
+        if head_g is not None:
+            from say_and_move import run_head_gesture
+            if hallway is not None:
+                hallway.begin_turn()
+            if idle is not None:
+                idle.stop()
+            logger.info('Head gesture: %s', head_g)
+            if speech is not None:
+                speech.start(text='네')
+            try:
+                run_head_gesture(reachy, head_g)
+            except Exception:
+                logger.exception('Head gesture failed')
+            if speech is not None:
+                speech.wait()
+            if turn_logger is not None:
+                turn_logger.log('head_gesture', {'text': text, 'gesture': head_g})
+            last_kind = 'motion'
+            continue
 
         if motion_handler is not None and wants_motion(text, last_kind):
             image = None
