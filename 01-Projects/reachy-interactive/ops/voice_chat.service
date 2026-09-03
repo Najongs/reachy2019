@@ -13,7 +13,11 @@ WorkingDirectory=/home/pi/Documents
 Environment=HOME=/home/pi
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=PYTHONUNBUFFERED=1
-# Wait up to 5 min for the tunnel+broker so the first turn (and the filler
+# Wait for the robot's 3 FTDI Luos gates to enumerate - at boot voice_chat
+# used to start before /dev/ttyUSB* existed and crash-loop 3x (Restart caught
+# it, but ugly). ttyUSB2 present => all three are up.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/ttyUSB2 ] && exit 0; sleep 1; done; exit 0'
+# Then wait up to 5 min for the tunnel+broker so the first turn (and filler
 # synthesis) has a network; start anyway if it never comes (degraded mode).
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -sf -m 3 http://127.0.0.1:8080/health >/dev/null && exit 0; sleep 5; done; exit 0'
 ExecStart=/usr/bin/python3 /home/pi/Documents/voice_chat.py --motions --hallway --stt vosk \
