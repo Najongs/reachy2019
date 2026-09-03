@@ -20,6 +20,7 @@ API:
 import argparse
 import json
 import logging
+import re
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -264,6 +265,57 @@ class ClaudeCliBackend(Backend):
             self._kill(session)
 
 
+# Strip emojis / pictographs - the local models add them despite the persona,
+# and the TTS reads them as garbage.
+_EMOJI = re.compile(
+    '[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F0FF'
+    '\U00002190-\U000021FF\U00002B00-\U00002BFF️‍]+')
+
+
+class OllamaBackend(Backend):
+    """Local LLM via an Ollama server (free, on the DGX GPUs/CPU, no API cost).
+
+    Uses the broker's per-session history (Conversations), so it is stateless
+    itself. Emojis are stripped from replies for the TTS.
+    """
+
+    def __init__(self, model='exaone3.5:7.8b', host='127.0.0.1:11434',
+                 timeout=90, num_predict=160, temperature=0.7):
+        self.model = model
+        self.url = 'http://{}/api/chat'.format(host)
+        self.timeout = timeout
+        self.num_predict = num_predict
+        self.temperature = temperature
+
+    def reply(self, text, history, session='default', image=None):
+        import json
+        import urllib.request
+
+        messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
+        messages += list(history)
+        messages.append({'role': 'user', 'content': text})
+
+        body = json.dumps({
+            'model': self.model,
+            'messages': messages,
+            'stream': False,
+            'options': {'num_predict': self.num_predict,
+                        'temperature': self.temperature},
+        }).encode('utf-8')
+
+        req = urllib.request.Request(
+            self.url, data=body, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+
+        out = (data.get('message', {}).get('content') or '').strip()
+        out = _EMOJI.sub('', out).strip()
+        return out
+
+    def reset(self, session):
+        pass   # history lives in the broker's Conversations
+
+
 class Conversations(object):
     """Per-session rolling history."""
 
@@ -452,7 +504,7 @@ def main():
     parser.add_argument('--host', default='0.0.0.0', help='bind address')
     parser.add_argument('--port', type=int, default=8080)
     parser.add_argument('--backend', default='claude',
-                        choices=['claude', 'claude-cli', 'echo'])
+                        choices=['claude', 'claude-cli', 'ollama', 'echo'])
     parser.add_argument('--model', default='claude-opus-5')
     parser.add_argument('--max-tokens', type=int, default=512)
     parser.add_argument('--effort', default='low', choices=['low', 'medium', 'high'])
@@ -465,6 +517,10 @@ def main():
                         help='file whose contents replace the persona prompt (UTF-8)')
     parser.add_argument('--cli-model', default='haiku',
                         help="model for the claude-cli backend (e.g. 'haiku', 'sonnet')")
+    parser.add_argument('--ollama-model', default='exaone3.5:7.8b',
+                        help='model for the ollama chat backend (local, free)')
+    parser.add_argument('--ollama-host', default='127.0.0.1:11434',
+                        help='host:port of the Ollama server')
     parser.add_argument('--motion-model', default='opus',
                         help='model for the motion-generation session')
     parser.add_argument('--motion-prompt-file',
@@ -489,6 +545,9 @@ def main():
         backend = EchoBackend()
     elif args.backend == 'claude-cli':
         backend = ClaudeCliBackend(model=args.cli_model)
+    elif args.backend == 'ollama':
+        backend = OllamaBackend(model=args.ollama_model, host=args.ollama_host)
+        logger.info('Chat backend: Ollama %s @ %s', args.ollama_model, args.ollama_host)
     else:
         backend = ClaudeBackend(model=args.model, max_tokens=args.max_tokens,
                                 effort=args.effort, workspace_id=args.workspace_id)
