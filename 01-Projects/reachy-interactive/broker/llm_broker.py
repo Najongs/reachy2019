@@ -272,15 +272,82 @@ _EMOJI = re.compile(
     '\U00002190-\U000021FF\U00002B00-\U00002BFF️‍]+')
 
 
+# Small models keep describing the robot in the third person ("리치는 ~해요")
+# even when told to speak as itself, so rewrite it deterministically. Also fix
+# spellings the TTS mispronounces.
+_THIRD_PERSON = [
+    ('리치는 ', '저는 '), ('리치가 ', '제가 '), ('리치도 ', '저도 '),
+    ('리치를 ', '저를 '), ('리치의 ', '제 '), ('리치에게 ', '저에게 '),
+    ('리치와 ', '저와 '), ('리치한테 ', '저한테 '), ('리치입니다', '저예요'),
+    ('리치예요', '저예요'), ('리치라고 해요', '리치라고 해요'),
+]
+_SPELLING = [('KIRO', '키로'), ('Kiro', '키로'), ('kiro', '키로'),
+             ('Reachy', '리치'), ('reachy', '리치')]
+
+
+def speakable_reply(text):
+    """Fix third-person slips and TTS-hostile spellings in a model reply."""
+    if not text:
+        return text
+    for a, b in _THIRD_PERSON:
+        text = text.replace(a, b)
+    for a, b in _SPELLING:
+        text = text.replace(a, b)
+    # The persona forbids parentheses (the TTS reads them awkwardly), and the
+    # spelling fixes can produce duplicates like "리치(리치)". Drop the whole
+    # parenthetical - the sentence reads fine without it.
+    text = re.sub(r'\s*[（(][^)）]*[)）]', '', text)
+    return ' '.join(text.split())
+
+
+def spoken_trim(text, max_sentences=3, max_chars=220):
+    """Cut a reply down to something a robot can say out loud.
+
+    Small local models ignore "answer in one or two sentences" and happily
+    write multi-paragraph stories, which the TTS then reads for a minute.
+    Collapse newlines and keep only the first few sentences.
+    """
+    if not text:
+        return text
+
+    # Multi-paragraph answers: keep the first paragraph only.
+    text = text.split('\n\n')[0]
+    text = ' '.join(text.split())
+
+    out, count = [], 0
+    buf = ''
+    for ch in text:
+        buf += ch
+        if ch in '.!?。':
+            out.append(buf)
+            buf = ''
+            count += 1
+            if count >= max_sentences:
+                break
+    if buf and count < max_sentences:
+        out.append(buf)
+
+    result = ''.join(out).strip() or text
+    if len(result) > max_chars:
+        cut = result[:max_chars]
+        for mark in ('. ', '! ', '? '):
+            i = cut.rfind(mark)
+            if i > max_chars * 0.5:
+                cut = cut[:i + 1]
+                break
+        result = cut.strip()
+    return result
+
+
 class OllamaBackend(Backend):
     """Local LLM via an Ollama server (free, on the DGX GPUs/CPU, no API cost).
 
     Uses the broker's per-session history (Conversations), so it is stateless
-    itself. Emojis are stripped from replies for the TTS.
+    itself. Replies are cleaned for speech: emojis stripped, length capped.
     """
 
     def __init__(self, model='exaone3.5:7.8b', host='127.0.0.1:11434',
-                 timeout=90, num_predict=160, temperature=0.7):
+                 timeout=90, num_predict=110, temperature=0.7):
         self.model = model
         self.url = 'http://{}/api/chat'.format(host)
         self.timeout = timeout
@@ -310,7 +377,7 @@ class OllamaBackend(Backend):
 
         out = (data.get('message', {}).get('content') or '').strip()
         out = _EMOJI.sub('', out).strip()
-        return out
+        return spoken_trim(speakable_reply(out))
 
     def reset(self, session):
         pass   # history lives in the broker's Conversations
