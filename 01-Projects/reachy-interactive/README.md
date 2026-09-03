@@ -110,9 +110,16 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition` + `sudo apt install
   [100,400] 클램프(조용한 방·작은 목소리용, 현장 튜닝은 `--stt-test`로 captured RMS 보며). 잡힌
   음성 RMS를 매 발화 로그로 남김
 
+- **목(Orbita) 움직임 명령**(`say_and_move.run_head_gesture`): 목은 3디스크 Orbita 평행 로봇 —
+  키프레임이 아니라 시선으로 제어. "고개 끄덕여/도리도리/위·아래·좌·우 봐/젖혀/한바퀴 돌려" 를
+  로컬 실행(오프라인). `voice_chat.wants_head_gesture` 라우팅, 손목(손목)은 팔 경로로 분리
+- **물체 주시**(`object_vision.py`): "저거/물건 봐" → MobileNet-SSD(로컬·오프라인, ~0.6s)로 물체 검출
+  → 목을 그쪽으로 조준(반복 수렴) → 뭘 봤는지 말함. 비전 유도 파지의 1단계. 모델 23MB git 제외
+  (`ops/install_object_vision.sh`). 팔로 집는 건 다음 단계
+
 ## 지속적 개선 루프 (로그 → 분석 → 반영)
 
-운영 중 모든 턴이 Pi `~/reachy_logs/<session>/events.jsonl` 에 저장된다 (대화·동작·노트·비전·복도이벤트 + STT엔진·LLM지연·마이크RMS + 프레임). `voice_chat.log` 는 원시 stdout(마이크 captured RMS 포함), logrotate 로 상한(`ops/reachy-logrotate.conf`).
+운영 중 모든 턴이 Pi `~/reachy_logs/<session>/events.jsonl` 에 저장된다 (대화·동작·노트·비전·복도이벤트 + STT엔진·LLM지연·마이크RMS + 프레임). `voice_chat.log` 는 원시 stdout(마이크 captured RMS 포함). 로봇은 계속 켜져 있으니 로그 정리는 아래 pull 단계에서 한다 — `daily_update.sh` 가 로그를 DGX 로 안전히 당겨온 뒤 Pi 의 커지는 `voice_chat.log` 만 비운다(`--no-clean` 로 생략).
 
 주기적으로(사용자 요청 시) 한 줄로 당겨와 분석·개선:
 ```bash

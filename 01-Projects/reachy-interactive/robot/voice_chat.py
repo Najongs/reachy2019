@@ -133,6 +133,19 @@ _HEAD_DIR = [
 ]
 
 
+# "Look at that / the object" - point the camera+neck at a detected object.
+_LOOK_OBJ = ('저거 봐', '저것 봐', '이거 봐', '이것 봐', '그거 봐', '물건 봐',
+             '물체 봐', '저기 봐', '저 물건', '저 물체', '이 물건', '이 물체',
+             '물건을 봐', '물체를 봐', '저거 찾', '물건 찾', '물체 찾', '뭐 있나 봐',
+             '저거 뭐', '이거 집', '그거 집', '물건 집', '저거 잡', '물건 잡')
+
+
+def wants_object_look(text):
+    """True if the user wants the robot to look at / find an object."""
+    compact = text.replace(' ', '')
+    return any(w.replace(' ', '') in compact for w in _LOOK_OBJ)
+
+
 def wants_head_gesture(text):
     """Return a head-gesture name for a neck/head movement request, else None."""
     compact = text.replace(' ', '')
@@ -915,7 +928,7 @@ def prepare_fillers(speech, cache_dir='~/.cache/reachy_fillers'):
 def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
              ack_delay=0.8, idle=None, vision=False, camera_side='left',
              camera_index=0, motion_handler=None, turn_logger=None, notes=None,
-             hallway=None):
+             hallway=None, objvis=None):
     """Main conversation loop. Blocks until a stop word or Ctrl-C."""
     import random
 
@@ -933,7 +946,7 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
     try:
         _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
              say_and_move, random, speak, vision, camera_side, camera_index,
-             motion_handler, turn_logger, notes, hallway)
+             motion_handler, turn_logger, notes, hallway, objvis)
     finally:
         # Order matters: silence the greeter FIRST so its finally-block can't
         # restart idle after we stop it (then throw against a closed robot).
@@ -947,7 +960,7 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
 def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_and_move, random, speak, vision=False, camera_side='left',
          camera_index=0, motion_handler=None, turn_logger=None, notes=None,
-         hallway=None):
+         hallway=None, objvis=None):
     last_kind = None   # 직전 턴 종류 (motion/chat) — 문맥 라우팅용
     offline_mute_until = 0.0   # STT 불가 안내 백오프 (한 번 말하고 점점 조용히)
     offline_backoff = 60.0
@@ -1008,6 +1021,36 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             motion_handler.executor.stop_idle_arms()
 
         print('나:', text)
+
+        # Look at an object: detect it with the camera and turn the neck toward
+        # it (offline). First step toward vision-guided grasping.
+        if objvis is not None and reachy is not None and wants_object_look(text):
+            from object_vision import look_at_object, describe
+            if hallway is not None:
+                hallway.begin_turn()
+            if idle is not None:
+                idle.stop()
+            if speech is not None:
+                speech.start(text='어디 볼까요...')
+                speech.wait()
+            det = None
+            try:
+                det = look_at_object(
+                    reachy, lambda: grab_frame(reachy, side=camera_side,
+                                               camera_index=camera_index), objvis,
+                    sign=getattr(idle, 'ATTEND_SIGN', 1.0))
+            except Exception:
+                logger.exception('look_at_object failed')
+            line = describe(det)
+            print('리치:', line)
+            speak(line)
+            if turn_logger is not None:
+                turn_logger.log('object_look',
+                                {'text': text,
+                                 'object': det.get('label') if det else None,
+                                 'cx': det.get('cx') if det else None})
+            last_kind = 'motion'
+            continue
 
         # Head/neck movement: the Orbita neck moves via gaze, not arm keyframes,
         # so run it LOCALLY (offline, no broker) instead of saying it can't.
@@ -1298,6 +1341,7 @@ def main():
     idle = None
     watcher = None
     hallway = None
+    objvis = None
 
     motion_handler = None
 
@@ -1344,6 +1388,22 @@ def main():
             except Exception:
                 logger.exception('Presence watcher failed to start')
                 watcher = None
+
+        # Object attention: look at what someone shows the robot (offline DNN).
+        if not args.no_vision:
+            here = os.path.dirname(os.path.abspath(__file__))
+            try:
+                from object_vision import ObjectVision
+                ov = ObjectVision(os.path.join(here, 'mnssd.prototxt'),
+                                  os.path.join(here, 'mnssd.caffemodel'))
+                if ov.available():
+                    objvis = ov
+                    logger.info('Object vision enabled')
+                else:
+                    logger.info('Object vision model not found - skipping '
+                                '(install with ops/install_object_vision.sh)')
+            except Exception:
+                logger.exception('Object vision failed to init')
 
         if args.motions:
             if not hasattr(client, 'ask_motion'):
@@ -1400,7 +1460,8 @@ def main():
                  fillers=fillers, ack_delay=args.ack_delay, idle=idle,
                  vision=not args.no_vision, camera_side=args.camera_side,
                  camera_index=args.camera_index, motion_handler=motion_handler,
-                 turn_logger=turn_logger, notes=notes, hallway=hallway)
+                 turn_logger=turn_logger, notes=notes, hallway=hallway,
+                 objvis=objvis)
     except KeyboardInterrupt:
         print()
     finally:
