@@ -1,7 +1,11 @@
 [Unit]
 Description=Reachy hallway voice loop (auto-restart)
-After=network-online.target pi_tunnel.service respeaker_gain.service sound.target
-Wants=network-online.target
+# NO After= here. Any After= (network-online.target, respeaker_gain.service,
+# which are themselves After=multi-user.target) created a systemd ordering
+# CYCLE, so the boot deleted the start job and the demo never came up.
+# ExecStartPre waits for the broker, so readiness is fully covered without
+# ordering deps. Restart limit off so Restart=always never gives up.
+StartLimitIntervalSec=0
 
 [Service]
 User=pi
@@ -18,7 +22,6 @@ ExecStart=/usr/bin/python3 /home/pi/Documents/voice_chat.py --motions --hallway 
 # or manual stop word in non-hallway runs just restarts the loop.
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=0
 StandardOutput=append:/home/pi/reachy_logs/voice_chat.log
 StandardError=append:/home/pi/reachy_logs/voice_chat.log
 
