@@ -219,6 +219,24 @@ class TurnLogger(object):
         os.makedirs(self.frames, exist_ok=True)
         self.path = os.path.join(self.root, 'events.jsonl')
         self._seq = 0
+        self._disk_checked = 0.0
+        self._disk_ok = True
+
+    def _frames_ok(self, min_free_mb=500):
+        """Stop writing frames if the SD card is running low (checked hourly)."""
+        now = time.time()
+        if now - self._disk_checked > 3600:
+            self._disk_checked = now
+            try:
+                st = os.statvfs(self.root)
+                free_mb = st.f_bavail * st.f_frsize / (1024 * 1024)
+                self._disk_ok = free_mb > min_free_mb
+                if not self._disk_ok:
+                    logger.warning('Only %.0fMB free - not saving more frames',
+                                   free_mb)
+            except Exception:
+                self._disk_ok = True
+        return self._disk_ok
 
     def log(self, kind, data, image_b64=None):
         """Record one event; never raises."""
@@ -229,7 +247,7 @@ class TurnLogger(object):
             entry = {'ts': time.strftime('%Y-%m-%d %H:%M:%S'), 'kind': kind}
             entry.update(data)
 
-            if image_b64:
+            if image_b64 and self._frames_ok():
                 self._seq += 1
                 name = 'frame-{:04d}-{}.jpg'.format(self._seq, kind)
                 frame_path = os.path.join(self.frames, name)
@@ -931,7 +949,7 @@ def prepare_fillers(speech, cache_dir='~/.cache/reachy_fillers'):
 def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
              ack_delay=0.8, idle=None, vision=False, camera_side='left',
              camera_index=0, motion_handler=None, turn_logger=None, notes=None,
-             hallway=None, objvis=None):
+             hallway=None, objvis=None, music_player=None):
     """Main conversation loop. Blocks until a stop word or Ctrl-C."""
     import random
 
@@ -949,7 +967,8 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
     try:
         _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
              say_and_move, random, speak, vision, camera_side, camera_index,
-             motion_handler, turn_logger, notes, hallway, objvis)
+             motion_handler, turn_logger, notes, hallway, objvis,
+             music_player)
     finally:
         # Order matters: silence the greeter FIRST so its finally-block can't
         # restart idle after we stop it (then throw against a closed robot).
@@ -963,7 +982,7 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
 def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_and_move, random, speak, vision=False, camera_side='left',
          camera_index=0, motion_handler=None, turn_logger=None, notes=None,
-         hallway=None, objvis=None):
+         hallway=None, objvis=None, music_player=None):
     last_kind = None   # 직전 턴 종류 (motion/chat) — 문맥 라우팅용
     offline_mute_until = 0.0   # STT 불가 안내 백오프 (한 번 말하고 점점 조용히)
     offline_backoff = 60.0
@@ -1024,6 +1043,33 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             motion_handler.executor.stop_idle_arms()
 
         print('나:', text)
+
+        # Music: play a short clip and dance to it (offline, local mp3s).
+        if music_player is not None:
+            from music import wants_music, wants_music_stop
+            if wants_music_stop(text):
+                if music_player.playing:
+                    music_player.stop()
+                    speak('네, 음악 끌게요.')
+                    last_kind = 'chat'
+                    continue
+            elif wants_music(text):
+                if hallway is not None:
+                    hallway.begin_turn()
+                if idle is not None:
+                    idle.stop()
+                if motion_handler is not None:
+                    motion_handler.executor.stop_idle_arms()
+                speak('네, 한 곡 틀어드릴게요!')
+                clip = music_player.play()
+                if clip is None:
+                    speak('음악 파일이 없네요.')
+                else:
+                    music_player.wait(timeout=40)
+                if turn_logger is not None:
+                    turn_logger.log('music', {'text': text, 'clip': clip})
+                last_kind = 'chat'
+                continue
 
         # Look at an object: detect it with the camera and turn the neck toward
         # it (offline). First step toward vision-guided grasping.
@@ -1111,6 +1157,11 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                                              'engine': getattr(listener, 'last_engine', None),
                                              'rms': getattr(listener, 'last_rms', None)})
                 print('리치:', note_reply)
+                if motion_handler is not None and random.random() < 0.5:
+                    try:
+                        motion_handler.executor.talk_accent(duration=1.8)
+                    except Exception:
+                        pass
                 speak(note_reply)
                 last_kind = 'chat'
                 continue
@@ -1175,6 +1226,15 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                             image_b64=image)
 
         print('리치:', reply)
+        # Gesture a little while talking - a talking head alone reads as stiff.
+        # Small offsets on the already-powered ready pose, so it is safe and
+        # runs alongside the speech instead of delaying it.
+        if motion_handler is not None and len(reply) > 12 and random.random() < 0.45:
+            try:
+                motion_handler.executor.talk_accent(
+                    duration=min(4.0, 1.4 + len(reply) / 55.0))
+            except Exception:
+                logger.debug('talk accent failed', exc_info=True)
         speak(reply)
         last_kind = 'chat'
 
@@ -1345,6 +1405,7 @@ def main():
     watcher = None
     hallway = None
     objvis = None
+    music_player = None
 
     motion_handler = None
 
@@ -1408,12 +1469,25 @@ def main():
             except Exception:
                 logger.exception('Object vision failed to init')
 
+        # Music: short royalty-free clips the robot can play and dance to.
+        try:
+            from music import MusicPlayer, available as music_available
+            if music_available():
+                music_player = MusicPlayer(reachy=reachy)
+                logger.info('Music enabled (%d clips)', len(music_available()))
+            else:
+                logger.info('No music clips found - skipping')
+        except Exception:
+            logger.exception('Music init failed')
+
         if args.motions:
             if not hasattr(client, 'ask_motion'):
                 parser.error('--motions requires the broker (not --direct)')
             motion_handler = MotionHandler(reachy, client, speech,
                                            turn_logger=turn_logger)
             logger.info('Motion handling enabled')
+            if music_player is not None:
+                music_player.executor = motion_handler.executor
 
         if args.io != 'ws' and not args.no_mirror:
             # Real hardware: broadcast commanded pose so sim_viewer can show
@@ -1451,10 +1525,16 @@ def main():
                 except Exception:
                     logger.exception('Greeting wave unavailable (voice-only greeting)')
 
-            hallway = HallwayGreeter(watcher, speech, head, idle,
-                                     executor=executor,
-                                     wave_segments=wave_segments,
-                                     turn_logger=turn_logger)
+            hallway = HallwayGreeter(
+                watcher, speech, head, idle,
+                executor=executor,
+                wave_segments=wave_segments,
+                turn_logger=turn_logger,
+                # Photograph visitors as they arrive so the logs accumulate
+                # real scenes for later analysis/improvement.
+                snap=(lambda: capture_view(reachy, side=args.camera_side,
+                                           camera_index=args.camera_index))
+                if not args.no_vision else None)
             hallway.start()
             logger.info('Hallway demo mode on - will greet visitors')
 
@@ -1464,7 +1544,7 @@ def main():
                  vision=not args.no_vision, camera_side=args.camera_side,
                  camera_index=args.camera_index, motion_handler=motion_handler,
                  turn_logger=turn_logger, notes=notes, hallway=hallway,
-                 objvis=objvis)
+                 objvis=objvis, music_player=music_player)
     except KeyboardInterrupt:
         print()
     finally:

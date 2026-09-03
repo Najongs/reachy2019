@@ -42,6 +42,7 @@ robot/voice_chat.py                                broker/llm_broker.py
 | `presence.py` | 얼굴 검출 + 프레임 차분 움직임 감지(로컬). 사람 쪽으로 고개(`--attend`) |
 | `hallway.py` | 복도 데모(`--hallway`): 방문자 인사·말걸기 유도, 자기 목소리 에코 가드, 이벤트 로그 |
 | `object_vision.py` | MobileNet-SSD 로 물체 검출 → 목을 그쪽으로 조준(비전 유도 파지 1단계) |
+| `music.py` | 짧은 무료 음원 재생 + 박자에 맞춰 춤(머리·안테나·팔). `music/` 클립, 오프라인 |
 | `custom_hands.py` | 실물 관절: 오른손 `gripper_no_wrist_roll`, 왼손 `wrist_pitch_only` |
 | `base_pose.py` | 로봇 연결(`connect()`)·기본자세·stiffen/relax |
 | `llm_client.py` | 브로커 HTTP 클라이언트 (stdlib만, Py3.7) |
@@ -81,12 +82,13 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition vosk` + `sudo apt in
 
 1. **STT 교정** — `config/stt_corrections.json` (양파→양팔 등 49개) + 이름 오인식. *라우팅 전*에 적용되어 동작 인식률까지 올린다
 2. **에코 가드** — 로봇 자기 인사말이 마이크로 되돌아온 것 버림
-3. **목 제스처** (`wants_head_gesture`) — 고개/목 + 방향·동작 → 로컬 즉시 실행
-4. **물체 주시** (`wants_object_look`) — "저거 봐/물건 확인해봐" → 검출 후 목 조준
-5. **팔 동작** (`wants_motion`) — 신체어∧동작어 또는 제스처명사 → opus 생성/프리셋
-6. **종료어** — 근사-정확 매칭만(복도 모드에선 프로그램 안 끝내고 대화만 종료)
-7. **즉답 노트** — 인사/FAQ 35종
-8. **비전** → 카메라 프레임 첨부, 그 외 → **대화 LLM**
+3. **음악** (`music.wants_music`) — "노래 틀어줘" → 20초 클립 재생 + 춤
+4. **목 제스처** (`wants_head_gesture`) — 고개/목 + 방향·동작 → 로컬 즉시 실행
+5. **물체 주시** (`wants_object_look`) — "저거 봐/물건 확인해봐" → 검출 후 목 조준
+6. **팔 동작** (`wants_motion`) — 신체어∧동작어 또는 제스처명사 → opus 생성/프리셋
+7. **종료어** — 근사-정확 매칭만(복도 모드에선 프로그램 안 끝내고 대화만 종료)
+8. **즉답 노트** — 인사/FAQ 35종
+9. **비전** → 카메라 프레임 첨부, 그 외 → **대화 LLM**
 
 회귀 테스트: `config/hallway_testset.json`(38케이스), `config/routing_testset.json`.
 
@@ -117,6 +119,16 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition vosk` + `sudo apt in
 - `object_vision.py`: "저거 봐" → MobileNet-SSD 검출(~0.6s) → 목 조준 → 뭘 봤는지 말함
 - 복도 모드: 음성 인사 1시간 간격(소음 방지), 그 사이 새 방문자엔 **말 없이 손만 흔듦**(5분 간격), 대화 중엔 완전 침묵
 
+**대화 중 제스처**
+- 말할 때 머리만 움직이면 뻣뻣해 보여서, 응답의 45%(노트 응답은 50%)에 가벼운 팔 제스처를 곁들인다
+  (`motion_exec.talk_accent`). 이미 파워가 들어간 레디 자세에서 ±14° 이내 오프셋이라 충돌 검사가 필요 없고
+  발화를 지연시키지도 않는다
+
+**노래**
+- `music/` 에 20초 클립 4곡(Kevin MacLeod, CC-BY 3.0 — `music/CREDITS.txt` 에 출처 표기 필수).
+  "노래 틀어줘/한 곡 들려줘/춤춰봐" → 재생하며 머리·안테나로 박자 타고 팔 제스처를 섞는다. "노래 그만" 으로 정지
+- mp3 는 git 제외. 곡을 바꾸려면 `music/` 에 mp3 를 넣기만 하면 자동 인식
+
 **머리 움직임**
 - 목은 Orbita 3디스크 병렬 로봇 — 시선으로 제어하므로 팔 키프레임 파이프라인 밖. `run_head_gesture` 로 끄덕임/도리도리/상하좌우/젖히기/한바퀴를 로컬 실행
 - **속도 상한 설정이 없다** → 글라이드 시간이 유일한 제어(begin_ramp 1.3s, home 1.8s, 핸드팔로우 램프 1.2s·τ0.35)
@@ -131,6 +143,8 @@ bash ops/daily_update.sh     # ① 로그 pull → ② 다이제스트 → ③ �
 - **다이제스트**(`ops/log_digest.py`): 종류별 건수, 복도 통계(등장/인사/체류), 자주 나온 발화, 동작 실패 사유, STT 엔진 분포·LLM 지연, **마이크 RMS 분포**(→ `--fixed-energy` 제안값)
 - **노트 제안**(`broker/build_notes.py`): 반복 발화를 *로그에 실제로 나온 답변*으로 제안 → `quick_notes.proposed.json` (할루시네이션 방지)
 - **반영**: 제안 검토 → `quick_notes.json` / `stt_corrections.json` 편집 → `bash ops/deploy.sh`
+- **이미지 축적**: 방문자가 나타나면 자동으로 한 장 촬영해 `frames/` 에 쌓는다(90초 간격·세션당 200장 상한,
+  SD 여유 500MB 미만이면 중단). 비전 질문·동작 스냅샷도 함께 쌓여 학습·분석 소재가 된다
 - ⚠️ 제안이 STT garbage("이다", "노 는")면 반영하지 말 것 — 그건 노트가 아니라 인식 문제
 
 ## 시뮬레이터

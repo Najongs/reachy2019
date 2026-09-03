@@ -54,7 +54,8 @@ class HallwayGreeter(object):
                  executor=None, wave_segments=None, turn_logger=None,
                  greet_cooldown=3600.0, absence_reset=20.0,
                  linger_after=120.0, prompt_cooldown=3600.0,
-                 gesture_cooldown=300.0, max_prompts=1):
+                 gesture_cooldown=300.0, max_prompts=1,
+                 snap=None, snap_interval=90.0, snap_budget=200):
         self.watcher = watcher
         self.speech = speech
         self.head = head
@@ -69,6 +70,14 @@ class HallwayGreeter(object):
         self.prompt_cooldown = prompt_cooldown
         self.gesture_cooldown = gesture_cooldown
         self.max_prompts = max_prompts
+        # Photograph visitors as they appear, so the logs accumulate real
+        # scenes to learn from. Rate-limited and capped so a busy day cannot
+        # fill the SD card. snap() -> base64 jpeg or None.
+        self.snap = snap
+        self.snap_interval = snap_interval
+        self.snap_budget = snap_budget
+        self._last_snap = 0.0
+        self._snaps = 0
 
         # True while the greeter is speaking/gesturing; the main loop skips
         # restarting idle during that window.
@@ -170,12 +179,34 @@ class HallwayGreeter(object):
 
     # -- internals ------------------------------------------------------------
 
-    def _log(self, event, extra=None):
+    def _log(self, event, extra=None, image_b64=None):
         if self.turn_logger is not None:
             data = {'event': event}
             if extra:
                 data.update(extra)
-            self.turn_logger.log('hallway', data)
+            self.turn_logger.log('hallway', data, image_b64=image_b64)
+
+    def _maybe_snap(self):
+        """A photo of the visitor, if we are due one. Returns base64 or None.
+
+        Every appearance is a real scene worth keeping for later analysis, but
+        a busy corridor would otherwise write a frame a minute all day - hence
+        the interval and the per-run budget.
+        """
+        if self.snap is None or self._snaps >= self.snap_budget:
+            return None
+        now = time.time()
+        if now - self._last_snap < self.snap_interval:
+            return None
+        try:
+            img = self.snap()
+        except Exception:
+            logger.debug('visitor snapshot failed', exc_info=True)
+            return None
+        if img:
+            self._last_snap = now
+            self._snaps += 1
+        return img
 
     def _loop(self):
         w = self.watcher
@@ -193,7 +224,9 @@ class HallwayGreeter(object):
                     if absence >= self.absence_reset:
                         self._greeted_this_visit = False
                         self._prompts_this_visit = 0
-                        self._log('appeared', {'absence_s': round(min(absence, 9999), 1)})
+                        self._log('appeared',
+                                  {'absence_s': round(min(absence, 9999), 1)},
+                                  image_b64=self._maybe_snap())
 
                 if not person and prev_person:
                     self._log('left', {

@@ -33,3 +33,4 @@ dist/
 *.npy
 *.npz
 **/quick_notes.proposed.json
+01-Projects/reachy-interactive/music/*.mp3

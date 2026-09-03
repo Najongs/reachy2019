@@ -1,0 +1,18 @@
+음원 출처 / Music credits
+=========================
+
+아래 곡들은 Kevin MacLeod (incompetech.com) 의 로열티프리 음원이며
+Creative Commons Attribution 3.0 (CC BY 3.0) 라이선스로 제공됩니다.
+https://creativecommons.org/licenses/by/3.0/
+
+  Carefree
+  Cheery Monday
+  Happy Boy End Theme
+  Monkeys Spinning Monkeys
+
+  Music by Kevin MacLeod (incompetech.com)
+  Licensed under Creative Commons: By Attribution 3.0
+
+이 저장소에 포함된 파일은 원곡에서 20초를 잘라내고 페이드를 넣은 클립입니다.
+CC BY 3.0 은 출처 표기 시 상업적 사용까지 허용합니다. 로봇이 공개 장소에서
+재생할 경우 이 파일(또는 데모 안내판)에 위 표기를 유지하세요.

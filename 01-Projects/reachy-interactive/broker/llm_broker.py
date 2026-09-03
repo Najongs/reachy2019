@@ -297,21 +297,45 @@ def speakable_reply(text):
     # spelling fixes can produce duplicates like "리치(리치)". Drop the whole
     # parenthetical - the sentence reads fine without it.
     text = re.sub(r'\s*[（(][^)）]*[)）]', '', text)
+    # Markdown the model sprinkles in despite the persona - the TTS would read
+    # "dash dash dash" / "star star".
+    text = re.sub(r'(?m)^\s*[-*#>]{1,4}\s*', ' ', text)
+    text = text.replace('**', '').replace('---', ' ').replace('__', '')
     return ' '.join(text.split())
+
+
+# Asking for a story / joke / explanation is a request for a LONGER answer -
+# cutting those to three sentences left the listener hanging mid-story.
+_WANTS_LONG = ('이야기', '얘기해', '얘기 해', '스토리', '동화', '농담', '개그',
+               '유머', '재밌는 거', '재미있는 거', '설명해', '알려줘', '가르쳐',
+               '소개해', '노래', '시 한', '자세히', '더 말해', '계속해', '더 해',
+               '왜 그래', '어떻게 되', '무슨 일')
+
+
+def wants_long_answer(user_text):
+    """True when the person asked for something that needs room to tell."""
+    if not user_text:
+        return False
+    compact = user_text.replace(' ', '')
+    return any(w.replace(' ', '') in compact for w in _WANTS_LONG)
 
 
 def spoken_trim(text, max_sentences=3, max_chars=220):
     """Cut a reply down to something a robot can say out loud.
 
     Small local models ignore "answer in one or two sentences" and happily
-    write multi-paragraph stories, which the TTS then reads for a minute.
-    Collapse newlines and keep only the first few sentences.
+    write multi-paragraph stories, which the TTS then reads for a minute. For
+    a normal turn keep it short; when the person actually asked for a story or
+    an explanation the caller passes a bigger budget so it can finish.
     """
     if not text:
         return text
 
-    # Multi-paragraph answers: keep the first paragraph only.
-    text = text.split('\n\n')[0]
+    # Keep paragraphs for long-form answers, first paragraph only for short.
+    if max_sentences <= 4:
+        text = text.split('\n\n')[0]
+    else:
+        text = text.replace('\n\n', ' ').replace('\n', ' ')
     text = ' '.join(text.split())
 
     out, count = [], 0
@@ -362,11 +386,16 @@ class OllamaBackend(Backend):
         messages += list(history)
         messages.append({'role': 'user', 'content': text})
 
+        # A story/explanation request gets room to finish; a normal turn stays
+        # short so the robot does not monologue at someone passing by.
+        long_form = wants_long_answer(text)
+        num_predict = 420 if long_form else self.num_predict
+
         body = json.dumps({
             'model': self.model,
             'messages': messages,
             'stream': False,
-            'options': {'num_predict': self.num_predict,
+            'options': {'num_predict': num_predict,
                         'temperature': self.temperature},
         }).encode('utf-8')
 
@@ -377,6 +406,9 @@ class OllamaBackend(Backend):
 
         out = (data.get('message', {}).get('content') or '').strip()
         out = _EMOJI.sub('', out).strip()
+        if long_form:
+            return spoken_trim(speakable_reply(out),
+                               max_sentences=12, max_chars=900)
         return spoken_trim(speakable_reply(out))
 
     def reset(self, session):

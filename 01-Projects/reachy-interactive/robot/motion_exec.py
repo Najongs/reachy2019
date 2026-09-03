@@ -142,6 +142,29 @@ IDLE_BREATH = {
 }
 IDLE_LEFT_PHASE = math.pi * 0.6      # left arm lags right for an organic look
 
+# Small gestures played WHILE talking, so the robot gestures like a person
+# instead of being a talking head. Offsets in degrees from READY_POSE on
+# already-powered joints: {joint: (amplitude_deg, cycles_over_the_gesture)}.
+# Amplitudes stay small (<=14 deg) - they cannot reach the body or the head,
+# so they need no collision pass.
+TALK_ACCENTS = {
+    # one open-handed "here's the thing" beat with the right arm
+    'right_open': {'right_arm.shoulder_roll': (-12, 0.5),
+                   'right_arm.hand.forearm_yaw': (14, 0.5),
+                   'right_arm.elbow_pitch': (8, 0.5)},
+    # both hands open slightly - explaining
+    'both_open': {'right_arm.shoulder_roll': (-9, 0.5),
+                  'left_arm.shoulder_roll': (9, 0.5),
+                  'right_arm.elbow_pitch': (7, 0.5),
+                  'left_arm.elbow_pitch': (7, 0.5)},
+    # a couple of small beats, like emphasising words
+    'beat': {'right_arm.elbow_pitch': (9, 2.0),
+             'right_arm.hand.wrist_pitch': (7, 2.0)},
+    # gentle left-hand accent
+    'left_soft': {'left_arm.shoulder_roll': (10, 0.5),
+                  'left_arm.hand.forearm_yaw': (-11, 0.5)},
+}
+
 # Natural hanging pose used for full power-off. All zeros = the arm points
 # straight down, which is where gravity leaves it anyway - so cutting power
 # afterwards causes no visible drop.
@@ -679,6 +702,68 @@ class MotionExecutor(object):
             thread.join(timeout=1.0)
         self._idle_thread = None
         self._idle_stop = None
+
+    # -- conversational accents -----------------------------------------------
+
+    def talk_accent(self, kind=None, duration=2.0, freq=25.0):
+        """A small arm gesture while talking, so the robot is not just a head.
+
+        Deliberately NOT a full execute(): these are a few degrees of offset on
+        joints that are already powered at the ready pose (same mechanism as
+        the idle breather), so they need no stiffen/collision pass and cannot
+        reach anything. Runs in a thread and returns immediately; a no-op when
+        the arms are not held or a real gesture owns the lock.
+        """
+        import random
+        import threading
+
+        if not self._arms_held or self._lock.locked():
+            return None
+        self.stop_idle_arms()
+
+        kind = kind or random.choice(list(TALK_ACCENTS))
+        pattern = TALK_ACCENTS.get(kind)
+        if pattern is None:
+            return None
+
+        stop = threading.Event()
+
+        def run():
+            motor_by_name = {m.name: m for m in self.reachy.motors}
+            dt = 1.0 / freq
+            t0 = time.time()
+            while not stop.is_set():
+                t = time.time() - t0
+                if t >= duration or not self._arms_held:
+                    break
+                # Ease in and out so it starts and ends softly.
+                env = math.sin(math.pi * min(1.0, t / duration))
+                for joint, (amp, cycles) in pattern.items():
+                    base = READY_POSE.get(joint)
+                    motor = motor_by_name.get(joint)
+                    if base is None or motor is None:
+                        continue
+                    phase = 2 * math.pi * cycles * (t / duration)
+                    try:
+                        motor.goal_position = base + amp * env * math.sin(phase)
+                    except Exception:
+                        pass
+                if stop.wait(dt):
+                    break
+            # Settle back onto the ready pose.
+            for joint in pattern:
+                base = READY_POSE.get(joint)
+                motor = motor_by_name.get(joint)
+                if base is not None and motor is not None:
+                    try:
+                        motor.goal_position = base
+                    except Exception:
+                        pass
+
+        t = threading.Thread(target=run)
+        t.daemon = True
+        t.start()
+        return t
 
     def _idle_arm_loop(self):
         """Write tiny slow offsets onto the powered ready-pose joints."""

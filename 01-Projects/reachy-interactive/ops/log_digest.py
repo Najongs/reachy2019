@@ -114,6 +114,15 @@ def main():
                 lats[len(lats) // 2], lats[-1], len(lats))
         print(line)
 
+    # -- accumulated images (dataset growth) ---------------------------------
+    frames = [e for e in events if e.get('frame')]
+    if frames:
+        by_kind = collections.Counter(e.get('kind') for e in frames)
+        print('\n[축적된 이미지] {}장: {}'.format(
+            len(frames), ', '.join('{} {}'.format(k, n)
+                                   for k, n in by_kind.most_common())))
+        print('  경로: <세션>/frames/  (방문자 등장·비전질문·동작 스냅샷)')
+
     # -- mic level distribution (tune --fixed-energy) ------------------------
     _rms_report(args.logs_dir)
 
