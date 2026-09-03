@@ -110,6 +110,20 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition` + `sudo apt install
   [100,400] 클램프(조용한 방·작은 목소리용, 현장 튜닝은 `--stt-test`로 captured RMS 보며). 잡힌
   음성 RMS를 매 발화 로그로 남김
 
+## 지속적 개선 루프 (로그 → 분석 → 반영)
+
+운영 중 모든 턴이 Pi `~/reachy_logs/<session>/events.jsonl` 에 저장된다 (대화·동작·노트·비전·복도이벤트 + STT엔진·LLM지연·마이크RMS + 프레임). `voice_chat.log` 는 원시 stdout(마이크 captured RMS 포함), logrotate 로 상한(`ops/reachy-logrotate.conf`).
+
+주기적으로(사용자 요청 시) 한 줄로 당겨와 분석·개선:
+```bash
+bash ops/daily_update.sh          # ① Pi 로그 pull → ② 다이제스트 → ③ 노트 제안
+```
+- **다이제스트**(`ops/log_digest.py`): 종류별 건수, 복도 통계(등장/인사/체류), 자주 나온 발화,
+  동작 실패 사유, STT 엔진 분포·LLM 지연 추이, **마이크 RMS 분포**(→ `--fixed-energy` 튜닝값 제안)
+- **노트 제안**(`broker/build_notes.py`): 반복 발화를 실제 로그 답변으로 `quick_notes.proposed.json` 에
+- **반영**: 제안 검토 → `quick_notes.json`/`stt_corrections.json` 편집(Vosk 오인식은 로그에서 확인) →
+  `bash ops/deploy.sh` 배포. 이렇게 인사/FAQ·오인식 교정·라우팅이 실사용 데이터로 계속 좋아진다.
+
 ## 시뮬레이터
 
 - `sim/sim_viewer.html`: 실물 CAD 모델(reachy.glb) 3D 렌더. [실물](6171)/[시뮬](6172) 전환, [캘리브레이션] 패널

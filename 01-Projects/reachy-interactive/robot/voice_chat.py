@@ -439,6 +439,8 @@ class Listener(object):
         # STT backend: 'google' (online), 'vosk' (offline), 'auto' (vosk if a
         # model loads, else google - offline-first for a flaky hallway).
         self.stt = stt
+        self.last_engine = None   # which STT engine produced the last text
+        self.last_rms = None      # captured audio level of the last utterance
         self._vosk = None
         if stt in ('vosk', 'auto') and vosk_model:
             self._vosk = self._load_vosk(vosk_model)
@@ -658,6 +660,7 @@ class Listener(object):
         try:
             import audioop
             rms = audioop.rms(audio.get_raw_data(), 2)
+            self.last_rms = rms
             logger.info('captured RMS %d (threshold %d)',
                         rms, int(self.recognizer.energy_threshold))
         except Exception:
@@ -684,11 +687,14 @@ class Listener(object):
         if self._vosk is not None and self.stt in ('vosk', 'auto'):
             text = self._recognize_vosk(audio)
             if text is not None or self.stt == 'vosk':
+                self.last_engine = 'vosk'
                 return text            # vosk-only: trust its verdict
 
         if self.stt in ('google', 'auto'):
             try:
-                return self.recognizer.recognize_google(audio, language=self.language)
+                text = self.recognizer.recognize_google(audio, language=self.language)
+                self.last_engine = 'google'
+                return text
             except self.sr.UnknownValueError:
                 logger.info('Heard something, could not understand it')
                 return None
@@ -696,6 +702,7 @@ class Listener(object):
                 logger.warning('Google STT unavailable: %s', e)
                 # Fall back to offline if we have it, else signal offline.
                 if self._vosk is not None:
+                    self.last_engine = 'vosk'
                     return self._recognize_vosk(audio)
                 return ''
 
@@ -984,7 +991,9 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             if note_reply:
                 logger.info('QuickNote hit - answering instantly')
                 if turn_logger is not None:
-                    turn_logger.log('note', {'text': text, 'reply': note_reply})
+                    turn_logger.log('note', {'text': text, 'reply': note_reply,
+                                             'engine': getattr(listener, 'last_engine', None),
+                                             'rms': getattr(listener, 'last_rms', None)})
                 print('리치:', note_reply)
                 speak(note_reply)
                 last_kind = 'chat'
@@ -1031,7 +1040,9 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             head.setup()
             head.start_thinking()
 
+        t_ask = time.time()
         reply = client.ask_or_fallback(text, image=image)
+        latency = round(time.time() - t_ask, 1)
 
         if head is not None:
             head.stop_thinking()
@@ -1042,7 +1053,10 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
 
         if turn_logger is not None:
             turn_logger.log('vision_chat' if image else 'chat',
-                            {'text': text, 'reply': reply}, image_b64=image)
+                            {'text': text, 'reply': reply, 'latency_s': latency,
+                             'engine': getattr(listener, 'last_engine', None),
+                             'rms': getattr(listener, 'last_rms', None)},
+                            image_b64=image)
 
         print('리치:', reply)
         speak(reply)

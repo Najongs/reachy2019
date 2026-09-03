@@ -98,6 +98,58 @@ def main():
         for t, n in repeated_chat[:args.top]:
             print('  {}x  {}'.format(n, t))
 
+    # -- STT engine + LLM latency (drift over time) --------------------------
+    engines = collections.Counter(e.get('engine') for e in events
+                                  if e.get('engine'))
+    lats = [e['latency_s'] for e in events
+            if isinstance(e.get('latency_s'), (int, float))]
+    if engines or lats:
+        line = '\n[STT/지연] '
+        if engines:
+            line += '엔진: ' + ', '.join('{} {}'.format(k, n)
+                                        for k, n in engines.most_common())
+        if lats:
+            lats.sort()
+            line += '  |  LLM 지연: 중앙 {:.1f}s / 최대 {:.1f}s (n={})'.format(
+                lats[len(lats) // 2], lats[-1], len(lats))
+        print(line)
+
+    # -- mic level distribution (tune --fixed-energy) ------------------------
+    _rms_report(args.logs_dir)
+
+
+def _rms_report(logs_dir):
+    """Captured-audio RMS distribution from voice_chat.log, for mic tuning."""
+    path = os.path.join(logs_dir, 'voice_chat.log')
+    if not os.path.exists(path):
+        return
+    import re
+    rms, thr = [], []
+    pat = re.compile(r'captured RMS (\d+) \(threshold (\d+)\)')
+    try:
+        with open(path, encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                m = pat.search(line)
+                if m:
+                    rms.append(int(m.group(1)))
+                    thr.append(int(m.group(2)))
+    except OSError:
+        return
+    if not rms:
+        return
+    rms.sort()
+    n = len(rms)
+    pct = lambda p: rms[min(n - 1, int(n * p))]
+    cur_thr = thr[-1] if thr else 0
+    print('\n[마이크 감지 레벨 (captured RMS, n={})]'.format(n))
+    print('  분포: p10 {} · 중앙 {} · p90 {} · 최대 {}'.format(
+        pct(0.1), pct(0.5), pct(0.9), rms[-1]))
+    print('  현재 threshold ~{} 기준: 아래 {}건(소음성) / 위 {}건(발화성)'.format(
+        cur_thr, sum(1 for r in rms if r < cur_thr),
+        sum(1 for r in rms if r >= cur_thr)))
+    print('  → 소음 많으면 --fixed-energy 를 중앙({})~p90({}) 사이로 올리기'.format(
+        pct(0.5), pct(0.9)))
+
 
 if __name__ == '__main__':
     main()
