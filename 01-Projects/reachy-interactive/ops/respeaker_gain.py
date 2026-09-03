@@ -72,8 +72,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true',
                         help='enable AGC and raise the gain ceiling to ~30 dB')
-    parser.add_argument('--max-gain-db', type=float, default=30.0,
-                        help='AGC max gain in dB (default 30, hardware cap 60)')
+    parser.add_argument('--max-gain-db', type=float, default=50.0,
+                        help='AGC max gain in dB (default 50, hardware cap 60)')
+    parser.add_argument('--desired-level', type=float, default=0.05,
+                        help='AGC target output level 0..0.99; raise so soft/'
+                             'far voices are captured louder (default 0.05)')
     args = parser.parse_args()
 
     dev = find_dev()
@@ -84,11 +87,12 @@ def main():
         linear = 10.0 ** (args.max_gain_db / 20.0)
         write_param(dev, 'AGCONOFF', 1)
         write_param(dev, 'AGCMAXGAIN', linear)
-        write_param(dev, 'AGCDESIREDLEVEL', 0.03)
+        write_param(dev, 'AGCDESIREDLEVEL', args.desired_level)
         time.sleep(0.2)
         print('after:')
         show(dev)
-        print('AGC on, max gain {:.0f} dB'.format(args.max_gain_db))
+        print('AGC on, max gain {:.0f} dB, desired {:.3f}'.format(
+            args.max_gain_db, args.desired_level))
 
 
 if __name__ == '__main__':

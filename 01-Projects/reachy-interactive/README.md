@@ -101,9 +101,14 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition` + `sudo apt install
 - **사무실 복도 시나리오**(서브에이전트 생성, 2026-09-03): quick_notes 35종(길안내 한계/사진OK/만지기 사양/
   심부름 거절/출퇴근 인사 등) + persona 복도 지침(조각 발화 짧게, 그룹/아이/장난 대응) +
   `config/hallway_testset.json` 38케이스 회귀 (라우팅 37/37, '박수' 단독은 이제 동작 아님)
-- **마이크 수음**: ReSpeaker XMOS DSP AGC 천장 30→40dB·목표레벨 6배(`ops/respeaker_gain.py`,
-  전원 리셋 대응 `respeaker_gain.service` 부팅 자동적용) + STT 동적 임계값 [150,900] 클램프
-  (시끄러운 복도에서 귀먹는 드리프트 방지)
+- **오프라인 STT (Vosk 한국어)**: 인터넷 불안정한 복도용. `robot/voice_chat.py --stt vosk` 는
+  구글 서버 없이 Pi에서 인식 (`~/vosk-ko-model`, 253MB, git 제외 — `ops/install_vosk.sh` 로 설치).
+  `--stt auto`=vosk 우선+구글 백업, `--stt google`=온라인만. 즉답노트·제스처 프리셋도 로컬이라
+  인터넷 끊겨도 인사/FAQ/동작은 계속 됨 (자유 대화만 브로커 필요).
+- **마이크 수음**: ReSpeaker XMOS DSP AGC 천장 50dB·목표레벨 0.05(`ops/respeaker_gain.py`,
+  전원 리셋 대응 `respeaker_gain.service` 부팅 자동적용) + STT 동적 임계값 `--energy-floor/-ceil`
+  [100,400] 클램프(조용한 방·작은 목소리용, 현장 튜닝은 `--stt-test`로 captured RMS 보며). 잡힌
+  음성 RMS를 매 발화 로그로 남김
 
 ## 시뮬레이터
 

@@ -426,14 +426,32 @@ class Listener(object):
         phrase_limit (float): max seconds per utterance
     """
 
-    def __init__(self, language='ko-KR', mic_index=None, energy=300, phrase_limit=10,
-                 pause=0.5):
+    def __init__(self, language='ko-KR', mic_index=None, energy=200, phrase_limit=10,
+                 pause=0.5, energy_floor=100, energy_ceil=400,
+                 stt='auto', vosk_model=None):
         with quiet_stderr():
             import speech_recognition as sr
 
         self.sr = sr
         self.language = language
         self.phrase_limit = phrase_limit
+
+        # STT backend: 'google' (online), 'vosk' (offline), 'auto' (vosk if a
+        # model loads, else google - offline-first for a flaky hallway).
+        self.stt = stt
+        self._vosk = None
+        if stt in ('vosk', 'auto') and vosk_model:
+            self._vosk = self._load_vosk(vosk_model)
+        if stt == 'vosk' and self._vosk is None:
+            logger.warning('Vosk requested but model failed to load - '
+                           'falling back to Google STT')
+            self.stt = 'google'
+        # The dynamic threshold is clamped to this band each turn. A low floor
+        # matters in a quiet hallway where people speak softly - too high and
+        # the recognizer never hears them; the ceiling stops it going deaf if
+        # a burst of noise pushes it up.
+        self.energy_floor = energy_floor
+        self.energy_ceil = energy_ceil
 
         if mic_index is None:
             mic_index = self.pick_best_mic()
@@ -533,6 +551,24 @@ class Listener(object):
                 return i
         return None
 
+    def _load_vosk(self, model_path):
+        """Load a Vosk model + recognizer, or None on failure."""
+        model_path = os.path.expanduser(model_path)
+        if not os.path.isdir(model_path):
+            logger.warning('Vosk model not found at %s', model_path)
+            return None
+        try:
+            import vosk
+            vosk.SetLogLevel(-1)   # silence kaldi chatter
+            model = vosk.Model(model_path)
+            rec = vosk.KaldiRecognizer(model, 16000)
+            self._vosk_model = model   # keep a ref alive
+            logger.info('Vosk offline STT loaded from %s', model_path)
+            return rec
+        except Exception:
+            logger.exception('Could not load Vosk model')
+            return None
+
     def _ensure_stream(self):
         """Open the mic stream once and keep it open across turns."""
         if self._source is None:
@@ -579,11 +615,13 @@ class Listener(object):
             self._ensure_stream()
             with quiet_stderr():
                 self._flush()
-                # The dynamic threshold drifts UP in a noisy hallway until the
-                # robot goes deaf to normal voices, and DOWN in silence until
-                # it hair-triggers. Clamp it to a sane band every turn.
+                # The dynamic threshold drifts UP after any noise (going deaf to
+                # soft voices) and DOWN in dead silence (hair-trigger). Clamp
+                # it to the configured band every turn - lower the floor for a
+                # quiet room with soft speakers (--energy-floor).
                 self.recognizer.energy_threshold = min(
-                    max(self.recognizer.energy_threshold, 150), 900)
+                    max(self.recognizer.energy_threshold, self.energy_floor),
+                    self.energy_ceil)
                 source = self._source
                 logger.info('Listening...')
                 try:
@@ -602,18 +640,73 @@ class Listener(object):
             time.sleep(2)
             return None
 
+        # Log the captured level vs the threshold - the fastest way to tune
+        # --energy-floor/--energy-ceil on site (soft speech should read clearly
+        # above the threshold; if 'could not understand' with a low RMS, the
+        # voice is too quiet/far - raise AGC or move closer).
         try:
-            text = self.recognizer.recognize_google(audio, language=self.language)
-        except self.sr.UnknownValueError:
-            logger.info('Heard something, could not understand it')
+            import audioop
+            rms = audioop.rms(audio.get_raw_data(), 2)
+            logger.info('captured RMS %d (threshold %d)',
+                        rms, int(self.recognizer.energy_threshold))
+        except Exception:
+            pass
+
+        text = self._recognize(audio)
+        if text is None:
             return None
-        except self.sr.RequestError as e:
-            logger.warning('STT service unavailable: %s', e)
+        if text == '':
             return ''
 
         text = _normalize_name(text)
         logger.info('Heard: %s', text)
         return text
+
+    def _recognize(self, audio):
+        """Turn captured audio into text. Returns str, None (unclear), '' (err).
+
+        Backends: offline Vosk (no internet) and/or online Google. In a hallway
+        with flaky wifi, Vosk keeps the robot listening when Google can't be
+        reached; Google is more accurate when the connection is good.
+        """
+        # Offline first when configured/available - no network round trip.
+        if self._vosk is not None and self.stt in ('vosk', 'auto'):
+            text = self._recognize_vosk(audio)
+            if text is not None or self.stt == 'vosk':
+                return text            # vosk-only: trust its verdict
+
+        if self.stt in ('google', 'auto'):
+            try:
+                return self.recognizer.recognize_google(audio, language=self.language)
+            except self.sr.UnknownValueError:
+                logger.info('Heard something, could not understand it')
+                return None
+            except self.sr.RequestError as e:
+                logger.warning('Google STT unavailable: %s', e)
+                # Fall back to offline if we have it, else signal offline.
+                if self._vosk is not None:
+                    return self._recognize_vosk(audio)
+                return ''
+
+        return None
+
+    def _recognize_vosk(self, audio):
+        import json
+
+        try:
+            data = audio.get_raw_data(convert_rate=16000, convert_width=2)
+            self._vosk.AcceptWaveform(data)
+            text = (json.loads(self._vosk.FinalResult()).get('text') or '').strip()
+            self._vosk.Reset()
+            if not text:
+                logger.info('Vosk heard nothing intelligible')
+                return None
+            # Vosk emits space-separated tokens; keep as-is (Korean STT normalize
+            # handles the rest downstream).
+            return text
+        except Exception:
+            logger.exception('Vosk recognition failed')
+            return None
 
 
 # STT often mangles the wake-name '리치'. Only fix clear name-mishears; leave
@@ -972,8 +1065,20 @@ def main():
     parser.add_argument('--workspace-id', help='workspace id for --direct')
     parser.add_argument('--language', default='ko-KR', help='STT language')
     parser.add_argument('--mic', type=int, help='microphone device index (see --list-mics)')
-    parser.add_argument('--energy', type=int, default=300,
-                        help='mic sensitivity threshold; raise if it self-triggers')
+    parser.add_argument('--energy', type=int, default=200,
+                        help='initial mic sensitivity threshold (auto-calibrated too)')
+    parser.add_argument('--energy-floor', type=int, default=100,
+                        help='lowest the speech threshold may fall to (default 100)')
+    parser.add_argument('--energy-ceil', type=int, default=400,
+                        help='highest the speech threshold may rise to; LOWER '
+                             'for a quiet room so soft voices still trigger, '
+                             'RAISE if it self-triggers on noise (default 400)')
+    parser.add_argument('--stt', default='auto', choices=['auto', 'google', 'vosk'],
+                        help="speech engine: 'vosk' offline (flaky internet), "
+                             "'google' online (more accurate), 'auto' = vosk if "
+                             "its model loads else google (default)")
+    parser.add_argument('--vosk-model', default='~/vosk-ko-model',
+                        help='path to the offline Vosk Korean model directory')
     parser.add_argument('--phrase-limit', type=float, default=10,
                         help='max seconds per utterance')
     parser.add_argument('--pause', type=float, default=0.5,
@@ -1037,7 +1142,9 @@ def main():
 
     listener = Listener(language=args.language, mic_index=args.mic,
                         energy=args.energy, phrase_limit=args.phrase_limit,
-                        pause=args.pause)
+                        pause=args.pause, energy_floor=args.energy_floor,
+                        energy_ceil=args.energy_ceil, stt=args.stt,
+                        vosk_model=args.vosk_model)
 
     if args.stt_test:
         print('말해보세요 (Ctrl-C 로 종료):')
