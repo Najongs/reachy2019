@@ -1,0 +1,14 @@
+[Unit]
+Description=ReSpeaker mic array AGC gain boost (resets on power-up)
+# The XMOS DSP forgets its settings at power-on; re-apply after USB enumerates.
+After=multi-user.target
+
+[Service]
+Type=oneshot
+# Wait for the array to enumerate on slow boots, then push the AGC settings.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do lsusb -d 2886:0018 >/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/bin/python3 /home/pi/Documents/respeaker_gain.py --apply --max-gain-db 40
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

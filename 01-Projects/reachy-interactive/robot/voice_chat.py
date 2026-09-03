@@ -53,36 +53,59 @@ STOP_WORDS = ('그만', '종료', '잘가', '잘 가')
 
 # When the sentence sounds like it is about what the robot can SEE,
 # a camera frame is attached to the request.
+# '누구'/'누가' alone are too broad ("누구세요"=identity, "누가 만들었어"=maker):
+# only the clearly camera-flavored forms count as vision.
 VISION_WORDS = ('보여', '보이', '뭐가 있', '이게 뭐', '이거 뭐', '저게 뭐', '저거 뭐',
-                '누구', '누가', '몇 명', '몇명', '무슨 색', '무슨색', '어떻게 생겼',
-                '읽어', '읽을', '읽을 수', '앞에', '놓여', '놓여 있', '뭐 놓', '뭐가 보',
-                '입었게', '들었게', '보고 있')
+                '누구 있', '누가 있', '누가 왔', '사람 누구',
+                '몇 명이야', '몇명이야', '몇 명 있', '몇명 있',
+                '무슨 색', '무슨색', '어떻게 생겼',
+                '읽어봐', '읽어줘', '읽을 수', '앞에 뭐', '앞에뭐',
+                '놓여', '놓여 있', '뭐 놓', '뭐가 보',
+                '입었게', '입고 있게', '들었게', '보고 있')
 
 
 # Motion routing: a body part must co-occur with an action verb, or a gesture
 # noun with a command-ish tail. "팔 아파" has the noun but no verb -> chat.
 BODY_WORDS = ('팔', '손', '고개', '안테나', '머리', '몸',
               '물건', '이거', '저거', '그거', '컵', '공', '펜', '상자', '보관함', '트레이')
-ACTION_STEMS = ('들어', '들고', '들어서', '드', '올려', '올리', '내려', '내리', '흔들',
+# Single-syllable stems ('드','놓','숙','젖') matched inside ordinary words
+# (만드는/놓고 가요/몸살/젖었어) - only multi-syllable, verb-shaped stems now.
+ACTION_STEMS = ('들어', '들고', '들어서', '올려', '올리', '내려', '내리', '흔들',
                 '움직', '벌려', '벌리', '접어', '돌려', '돌리', '가리켜', '가리키',
-                '집어', '집게', '놓', '옮겨', '건네', '넣어', '꺼내', '굴려', '빙글',
+                '집어', '집게', '놓아', '놓고', '옮겨', '건네', '넣어', '꺼내',
+                '굴려', '빙글', '잡아',
                 '펴', '뻗', '세워', '펼쳐', '펼', '휘둘', '휘저', '뻗쳐',
-                '틀어', '틀', '젖혀', '젖', '숙여', '숙', '까딱', '꺾')
+                '틀어', '틀', '젖혀', '숙여', '까딱', '꺾')
+# Phrases that LOOK like body+verb but are everyday hallway talk, never a
+# command to the robot ("먼저 들어가볼게요", "그거 드셨어요", "몸살 나서").
+NOT_MOTION = ('들어가', '들어오', '들어온', '들어간', '들어갈', '드셨', '드세요',
+              '드실', '만드는', '몸살', '팔레트', '학수고대', '컵라면', '놓고가')
 # Gesture nouns strong enough to trigger on their own (no verb needed) - a
 # bare "만세" or "만세 다시" is unambiguously a motion request.
-GESTURE_WORDS = ('인사', '만세', '박수', '손뼉', '하이파이브', '브이', '악수')
-GESTURE_WEAK = ('춤', '환영')   # need a command tail (춤=대화 맥락도 흔함)
-# Compounds that contain a gesture noun but are not motion requests.
+# In the hallway, a bare overheard fragment ("박수", clapping talk nearby)
+# must not trigger a gesture - 박수/손뼉 need a command tail now.
+GESTURE_WORDS = ('인사', '만세', '하이파이브', '브이', '악수')
+GESTURE_WEAK = ('춤', '환영', '포즈', '박수', '손뼉', '가리켜', '가리키')
+# Compounds that contain a gesture noun but are not motion requests
+# (office talk: 인사이동/인사팀, 티브이/브이로그 contain 브이, etc).
 GESTURE_STOPWORDS = ('인사말', '인사법', '인사드', '박수갈채', '만세력',
+                     '인사이동', '인사팀', '인사평가', '인사과',
+                     '티브이', '브이로그', '만세운동', '하는것', '하는 것',
                      '무슨뜻', '뜻이야', '뜻이', '그만', '시끄', '멈춰', '멈추')
-COMMAND_TAILS = ('해봐', '해 봐', '해줘', '해 줘', '하자', '해라', '춰봐', '해보',
-                 '볼래', '할래', '수있', '다시', '또', '봐', '줘', '자')
+# Bare '자' matched inside 자연스럽다/자리 - removed. For GESTURE_WEAK the
+# tail must also come AFTER the gesture word, close by (see wants_motion).
+COMMAND_TAILS = ('해봐', '해 봐', '해줘', '해 줘', '하자', '해라', '춰봐', '쳐봐',
+                 '쳐줘', '해보', '볼래', '할래', '수있', '다시', '또', '봐', '줘',
+                 '취해', '취하', '지어')
 
 
 # 직전 턴이 동작일 때, 문맥상 이전 동작을 가리키는 후속 발화 (대명사·수식어)
 FOLLOWUP_WORDS = ('다시', '또', '한번더', '한 번 더', '더크게', '더 크게', '더작게',
                   '반대', '천천히', '처음부터', '계속', '아까처럼', '방금', '그거',
                   '이번엔', '한번', '해볼래')
+# ...but a question or a comment about the motion is NOT a repeat request:
+# "방금 뭐 한 거야?", "그거 진짜 신기하다", "천천히 말해줘".
+FOLLOWUP_BLOCK = ('뭐', '왜', '어떻', '누구', '말', '신기', '대박', '우와', '멋')
 
 
 def wants_motion(text, last_kind=None):
@@ -92,17 +115,31 @@ def wants_motion(text, last_kind=None):
     """
     compact = text.replace(' ', '')
 
+    # Everyday phrases that merely CONTAIN body/verb fragments never route
+    # to motion, whatever else matches.
+    if any(w in compact for w in NOT_MOTION):
+        return False
+
     if any(b in compact for b in BODY_WORDS) and any(a in compact for a in ACTION_STEMS):
         return True
-    # Strong gesture nouns trigger alone; weak ones still need a command tail.
+    # Strong gesture nouns trigger alone; weak ones still need a command tail
+    # positioned shortly AFTER the gesture word ("포즈 취해봐" yes,
+    # "포즈가 아주 자연스럽네요" / "환영회 언제인지 알아봐줘" no).
     if any(g in compact for g in GESTURE_WORDS) \
-            and not any(w in compact for w in GESTURE_STOPWORDS):
+            and not any(w.replace(' ', '') in compact for w in GESTURE_STOPWORDS):
         return True
-    if any(g in compact for g in GESTURE_WEAK) and any(t in compact for t in COMMAND_TAILS):
-        return True
+    for g in GESTURE_WEAK:
+        gi = compact.find(g)
+        if gi < 0:
+            continue
+        after = compact[gi + len(g):gi + len(g) + 8]
+        if any(t.replace(' ', '') in after for t in COMMAND_TAILS):
+            return True
     # 직전이 동작이면, 문맥상 그 동작을 이어가는 짧은 후속 요청도 동작으로
+    # (단, 동작에 대한 질문/감상은 제외)
     if last_kind == 'motion' and len(compact) <= 14:
-        if any(w.replace(' ', '') in compact for w in FOLLOWUP_WORDS):
+        if any(w.replace(' ', '') in compact for w in FOLLOWUP_WORDS) \
+                and not any(b in compact for b in FOLLOWUP_BLOCK):
             return True
     return False
 
@@ -291,17 +328,30 @@ def wants_vision(text):
     return any(w.replace(' ', '') in compact for w in VISION_WORDS)
 
 
+_CAMERA_LOCK = None
+
+
 def grab_frame(reachy, side='left', camera_index=0):
     """Return one BGR frame of the robot's view (ndarray), or None.
 
     Different reachy checkouts expose the camera differently, so this tries
     them in order: left/right_camera objects, head.get_image(), and finally
     opening the video device directly with OpenCV. Shared by the vision
-    request path and the background presence watcher, so both read through the
-    same (already-open) camera object instead of fighting over the device.
+    request path and the background presence watcher; a module lock keeps the
+    two from opening /dev/video0 at the same moment.
     """
     import cv2 as cv
 
+    global _CAMERA_LOCK
+    if _CAMERA_LOCK is None:
+        from threading import Lock
+        _CAMERA_LOCK = Lock()
+
+    with _CAMERA_LOCK:
+        return _grab_frame_locked(cv, reachy, side, camera_index)
+
+
+def _grab_frame_locked(cv, reachy, side, camera_index):
     head = reachy.head
     img = None
 
@@ -393,6 +443,9 @@ class Listener(object):
         self._check_input_device(mic_index)
 
         self.recognizer = sr.Recognizer()
+        # Bound the Google STT HTTP call: the default is None (unbounded
+        # urlopen), so a half-open connection would freeze the loop forever.
+        self.recognizer.operation_timeout = 10
         self.recognizer.energy_threshold = energy
         self.recognizer.dynamic_energy_threshold = True
         # How much silence marks the end of an utterance. The 0.8s default
@@ -522,18 +575,32 @@ class Listener(object):
             None: heard something but could not understand it
             '': network/service problem (treat as offline)
         """
-        self._ensure_stream()
-        with quiet_stderr():
-            self._flush()
-            source = self._source
-            logger.info('Listening...')
-            try:
-                audio = self.recognizer.listen(
-                    source, timeout=20, phrase_time_limit=self.phrase_limit)
-            except self.sr.WaitTimeoutError:
-                # Nothing said for a while; keep the stream open and wait again.
-                logger.info('(no speech for 20s)')
-                return None
+        try:
+            self._ensure_stream()
+            with quiet_stderr():
+                self._flush()
+                # The dynamic threshold drifts UP in a noisy hallway until the
+                # robot goes deaf to normal voices, and DOWN in silence until
+                # it hair-triggers. Clamp it to a sane band every turn.
+                self.recognizer.energy_threshold = min(
+                    max(self.recognizer.energy_threshold, 150), 900)
+                source = self._source
+                logger.info('Listening...')
+                try:
+                    audio = self.recognizer.listen(
+                        source, timeout=20, phrase_time_limit=self.phrase_limit)
+                except self.sr.WaitTimeoutError:
+                    # Nothing said for a while; keep the stream open, wait again.
+                    logger.info('(no speech for 20s)')
+                    return None
+        except Exception:
+            # A device hiccup (USB mic brownout, ALSA stream error) must never
+            # kill the whole program: drop the broken stream so the next call
+            # reopens it fresh, breathe, and treat this turn as silence.
+            logger.exception('Audio capture failed - resetting the mic stream')
+            self.close()
+            time.sleep(2)
+            return None
 
         try:
             text = self.recognizer.recognize_google(audio, language=self.language)
@@ -552,21 +619,77 @@ class Listener(object):
 # STT often mangles the wake-name '리치'. Only fix clear name-mishears; leave
 # real words like '위치'(position) alone unless they stand alone as address.
 # STT 가 흔히 틀리는 동작 단어 (문맥 안전한 것만)
+# '학수'(학수고대)/'아까 사'(아까 사무실) proved unsafe as blind replaces -
+# the LLM-side persona hints still cover those mishears in context.
 _WORD_FIXES = [('안대나', '안테나'), ('보간함', '보관함'), ('방수', '박수'),
-               ('만새', '만세'), ('아까 사', '악수'), ('학수', '악수')]
-_NAME_MISHEARS = ('다비치', '리치야', '리치아', '루치아', '유치하', '유치아',
-                  '니치', '이치', '릿지', '리찌', '리취', '리치가', '리치는')
+               ('만새', '만세')]
+# '유치하'(childish) and '이치'(reason) are real words - handled by the
+# sentence-start position guard below, not blind-replaced here.
+_NAME_MISHEARS = ('다비치', '리치야', '리치아', '루치아', '유치아',
+                  '니치', '릿지', '리찌', '리취', '리치가', '리치는')
+
+
+def load_stt_corrections(path):
+    """Merge extra STT mishear fixes from a JSON note file into the built-ins.
+
+    Lets the correction lists grow from conversation logs without editing code
+    (config/stt_corrections.json). Schema:
+      {"word_fixes": [["양파","양팔"], ...], "name_mishears": ["이츠야", ...]}
+    Deterministic word_fixes run before routing, so they also fix which turns
+    are recognized as motion commands - not just what the LLM sees.
+    """
+    import json
+
+    global _WORD_FIXES, _NAME_MISHEARS
+    try:
+        with open(os.path.expanduser(path), encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        logger.info('STT corrections: none loaded from %s', path)
+        return 0
+
+    added = 0
+    have_fix = {tuple(p) for p in _WORD_FIXES}
+    for pair in data.get('word_fixes', []):
+        if isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[0] and pair[1]:
+            t = (pair[0], pair[1])
+            if t not in have_fix:
+                _WORD_FIXES.append(t)
+                have_fix.add(t)
+                added += 1
+
+    names = list(_NAME_MISHEARS)
+    have_name = set(names)
+    for w in data.get('name_mishears', []):
+        if w and w not in have_name:
+            names.append(w)
+            have_name.add(w)
+            added += 1
+    _NAME_MISHEARS = tuple(names)
+
+    logger.info('STT corrections: +%d (%d word fixes, %d name mishears)',
+                added, len(_WORD_FIXES), len(_NAME_MISHEARS))
+    return added
 
 
 def _normalize_name(text):
     for w in _NAME_MISHEARS:
         text = text.replace(w, '리치')
-    # Address-position mishears at sentence start -> '리치' (leave mid-sentence
-    # '위치'/'유치' alone, which are real words).
+    # Address-position mishears at sentence start -> '리치'. These are real
+    # words (위치=position, 지하=basement, 유치원=kindergarten, 몇시야=what
+    # time...), so two guards: they must OPEN the utterance the way the name
+    # would, AND the rest must contain a robot-ish cue (a command/greeting) -
+    # otherwise "위치 알려줘" or "몇시야 지금" are real questions, not the name.
+    _cues = ('인사', '만세', '악수', '박수', '팔', '손', '고개', '안테나',
+             '해봐', '해 봐', '해줘', '해 줘', '하자', '들어', '올려', '내려',
+             '흔들', '움직', '뻗', '안녕', '보관함', '물건')
     stripped = text.strip()
-    for w in ('위치', '유치', '지하'):
+    for w in ('위치', '유치원', '유치하', '유치', '지하', '몇 시야', '몇시야',
+              '비치', '이치'):
         if stripped == w or stripped.startswith(w + ' '):
-            text = text.replace(w, '리치', 1)
+            rest = stripped[len(w):].replace(' ', '')
+            if rest and any(c.replace(' ', '') in rest for c in _cues):
+                text = text.replace(w, '리치', 1)
             break
     for a, b in _WORD_FIXES:
         text = text.replace(a, b)
@@ -574,12 +697,23 @@ def _normalize_name(text):
 
 
 def is_stop_word(text):
-    """Check if the user asked to end the conversation."""
+    """Check if the user asked to end the conversation.
+
+    Near-exact only: a stop word buried in a longer sentence is almost always
+    overheard hallway talk ("이제 그만 가자", "회사 그만두고 싶다", "종료
+    버튼이 어디에 있어요") - substring matching here used to KILL the whole
+    program on those. The utterance must essentially BE the stop phrase,
+    with at most a short polite tail ("그만할게요", "잘가요").
+    """
     compact = text.replace(' ', '')
-    return any(w.replace(' ', '') in compact for w in STOP_WORDS)
+    for w in STOP_WORDS:
+        w = w.replace(' ', '')
+        if compact.startswith(w) and len(compact) - len(w) <= 3:
+            return True
+    return False
 
 
-def prepare_fillers(speech, cache_dir='/tmp/reachy_fillers'):
+def prepare_fillers(speech, cache_dir='~/.cache/reachy_fillers'):
     """Pre-synthesize short acknowledgements ("um...") for instant playback.
 
     Played when the LLM+TTS wait drags on, so it feels like pondering instead
@@ -596,6 +730,10 @@ def prepare_fillers(speech, cache_dir='/tmp/reachy_fillers'):
         '음, 어디 보자.', '오...', '그거는...',
     ]
 
+    # Persistent (NOT /tmp): the Pi's /tmp is tmpfs, so a reboot wiped the
+    # cache and re-synthesis needed network right at boot - if the wifi was
+    # late, the whole day ran with no fillers (dead air on every LLM wait).
+    cache_dir = os.path.expanduser(cache_dir)
     os.makedirs(cache_dir, exist_ok=True)
 
     voice = getattr(speech, 'edge_voice', '') if speech.engine == 'edge' else speech.voice
@@ -618,7 +756,8 @@ def prepare_fillers(speech, cache_dir='/tmp/reachy_fillers'):
 
 def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
              ack_delay=0.8, idle=None, vision=False, camera_side='left',
-             camera_index=0, motion_handler=None, turn_logger=None, notes=None):
+             camera_index=0, motion_handler=None, turn_logger=None, notes=None,
+             hallway=None):
     """Main conversation loop. Blocks until a stop word or Ctrl-C."""
     import random
 
@@ -630,12 +769,18 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
         elif speech is not None:
             speech.start(text=line)
             speech.wait()
+        if hallway is not None:
+            hallway.note_activity()   # keep the greeter quiet mid-conversation
 
     try:
         _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
              say_and_move, random, speak, vision, camera_side, camera_index,
-             motion_handler, turn_logger, notes)
+             motion_handler, turn_logger, notes, hallway)
     finally:
+        # Order matters: silence the greeter FIRST so its finally-block can't
+        # restart idle after we stop it (then throw against a closed robot).
+        if hallway is not None:
+            hallway.stop()
         if idle is not None:
             idle.stop()
         listener.close()
@@ -643,8 +788,11 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
 
 def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_and_move, random, speak, vision=False, camera_side='left',
-         camera_index=0, motion_handler=None, turn_logger=None, notes=None):
+         camera_index=0, motion_handler=None, turn_logger=None, notes=None,
+         hallway=None):
     last_kind = None   # 직전 턴 종류 (motion/chat) — 문맥 라우팅용
+    offline_mute_until = 0.0   # STT 불가 안내 백오프 (한 번 말하고 점점 조용히)
+    offline_backoff = 60.0
     while True:
         # Re-assert neck stiffness each loop: the Orbita disks can thermally
         # cut torque while holding the head, and go limp until re-gripped.
@@ -654,9 +802,18 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             except Exception:
                 pass
 
-        # Small random motions while waiting keep the robot looking alive.
-        if idle is not None:
+        # Back at the top of the loop = the previous turn (if any) is done.
+        if hallway is not None:
+            hallway.end_turn()
+
+        # Small random motions while waiting keep the robot looking alive:
+        # the head glances/breathes and (with arms) the held pose breathes too,
+        # so the robot looks relaxed and welcoming rather than frozen.
+        # (While the hallway greeter is mid-speech it owns the head - skip.)
+        if idle is not None and not (hallway is not None and hallway.busy):
             idle.start()
+        if motion_handler is not None:
+            motion_handler.executor.start_idle_arms()
 
         text = listener.listen()
 
@@ -665,12 +822,32 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             continue
 
         if text == '':
-            speak('지금 인터넷이 불안정한 것 같아요.')
+            # STT service unreachable. In a noisy hallway this path fires on
+            # every captured noise - announce once, then back off (60s
+            # doubling to 10min) instead of repeating the line all hour.
+            now = time.time()
+            if now >= offline_mute_until:
+                speak('지금 인터넷이 불안정한 것 같아요.')
+                offline_mute_until = now + offline_backoff
+                offline_backoff = min(offline_backoff * 2, 600.0)
             time.sleep(2)
             continue
 
+        offline_backoff = 60.0   # network is back - reset the backoff
+
+        # The far-field mic hears the robot's own hallway greeting; drop
+        # recognized text that is just our recent words coming back.
+        if hallway is not None and hallway.is_echo(text):
+            logger.info('Dropping self-echo: %r', text)
+            continue
+
+        if hallway is not None:
+            hallway.begin_turn()   # hard-mute proactive greeting for this turn
+
         if idle is not None:
             idle.stop()
+        if motion_handler is not None:
+            motion_handler.executor.stop_idle_arms()
 
         print('나:', text)
 
@@ -688,6 +865,11 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
 
         if is_stop_word(text):
             speak('네, 다음에 또 얘기해요!')
+            if hallway is not None:
+                # Unattended demo: a goodbye ends the conversation, never
+                # the program - go back to waiting for the next visitor.
+                last_kind = None
+                continue
             break
 
         # Instant path: simple greetings / fixed patterns answer from the note
@@ -817,6 +999,10 @@ def main():
     parser.add_argument('--attend', action='store_true',
                         help='turn the head to face detected people while idle '
                              '(needs the presence watcher; check ATTEND_SIGN)')
+    parser.add_argument('--hallway', action='store_true',
+                        help='unattended demo mode: greet people who appear, '
+                             'invite them to talk, react to passers-by '
+                             '(implies --attend)')
     parser.add_argument('--gaze-tilt', type=float, default=None,
                         help='baseline vertical gaze offset in m at 0.5m; '
                              'negative looks down (default -0.08)')
@@ -830,6 +1016,10 @@ def main():
     parser.add_argument('--notes', default='auto',
                         help="instant-answer note file for simple patterns; "
                              "'auto' = quick_notes.json next to this script, "
+                             "'off' disables")
+    parser.add_argument('--stt-corrections', default='auto',
+                        help="STT mishear fix note file; 'auto' = "
+                             "stt_corrections.json next to this script, "
                              "'off' disables")
     parser.add_argument('--list-mics', action='store_true', help='list microphones and exit')
     parser.add_argument('--stt-test', action='store_true',
@@ -861,8 +1051,11 @@ def main():
     if args.direct:
         client = DirectClient(api_key=args.api_key, workspace_id=args.workspace_id)
     else:
+        # Above the broker's worst case (60s CLI turn + one retry on a fresh
+        # process): at 30s the Pi spoke an offline line while the broker was
+        # still successfully answering, then the next request queued behind it.
         client = BrokerClient(url=args.url, token=args.token, session=args.session,
-                              timeout=30)
+                              timeout=140)
         if client.health() is None:
             logger.warning('Broker is not answering; replies will be canned lines.')
 
@@ -885,10 +1078,18 @@ def main():
         else:
             logger.info('QuickNotes: no note file at %s, skipping', notes_path)
 
+    if args.stt_corrections and args.stt_corrections != 'off':
+        corr_path = args.stt_corrections
+        if corr_path == 'auto':
+            corr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'stt_corrections.json')
+        load_stt_corrections(corr_path)
+
     reachy = None
     head = None
     idle = None
     watcher = None
+    hallway = None
 
     motion_handler = None
 
@@ -926,9 +1127,10 @@ def main():
                 from presence import PresenceWatcher
                 watcher = PresenceWatcher(
                     lambda: grab_frame(reachy, side=args.camera_side,
-                                       camera_index=args.camera_index))
+                                       camera_index=args.camera_index),
+                    interval=0.8 if args.hallway else 1.2)
                 watcher.start()
-                if args.attend:
+                if args.attend or args.hallway:
                     idle.watcher = watcher
                     logger.info('Head will attend to detected people')
             except Exception:
@@ -958,15 +1160,44 @@ def main():
             # bend) and hold it at low torque; they settle down on idle.
             motion_handler.executor.hold_ready()
 
+        if args.hallway:
+            if watcher is None:
+                parser.error('--hallway needs the presence watcher '
+                             '(do not combine with --no-presence/--no-vision)')
+            from hallway import HallwayGreeter
+
+            wave_segments = None
+            executor = None
+            if motion_handler is not None:
+                executor = motion_handler.executor
+                try:
+                    from motion_exec import validate
+                    from motion_presets import PRESETS
+                    wave_segments = validate(
+                        PRESETS['wave']['moves'],
+                        {j: 0.0 for j in executor.available_joints()},
+                        executor.available_joints())
+                except Exception:
+                    logger.exception('Greeting wave unavailable (voice-only greeting)')
+
+            hallway = HallwayGreeter(watcher, speech, head, idle,
+                                     executor=executor,
+                                     wave_segments=wave_segments,
+                                     turn_logger=turn_logger)
+            hallway.start()
+            logger.info('Hallway demo mode on - will greet visitors')
+
     try:
         run_loop(listener, client, reachy=reachy, speech=speech, head=head,
                  fillers=fillers, ack_delay=args.ack_delay, idle=idle,
                  vision=not args.no_vision, camera_side=args.camera_side,
                  camera_index=args.camera_index, motion_handler=motion_handler,
-                 turn_logger=turn_logger, notes=notes)
+                 turn_logger=turn_logger, notes=notes, hallway=hallway)
     except KeyboardInterrupt:
         print()
     finally:
+        if hallway is not None:
+            hallway.stop()
         if watcher is not None:
             watcher.stop()
         if motion_handler is not None:

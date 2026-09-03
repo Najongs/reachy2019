@@ -123,6 +123,10 @@ class ClaudeCliBackend(Backend):
     """
 
     MAX_SESSIONS = 4
+    # A CLI child holds its whole conversation, so an all-day session grows
+    # turn after turn (latency drift, eventual auto-compact stall). Hallway
+    # chats are bursty and stateless-ish: after this much quiet, start fresh.
+    IDLE_RESET = 900.0
 
     def __init__(self, model='haiku', timeout=60, system_prompt=None, effort='low'):
         import shutil
@@ -139,6 +143,7 @@ class ClaudeCliBackend(Backend):
         import threading
         self._lock = threading.Lock()
         self._procs = {}   # session -> Popen
+        self._last_use = {}   # session -> time.time() of last turn
 
     def _spawn(self):
         import subprocess
@@ -164,9 +169,19 @@ class ClaudeCliBackend(Backend):
         )
 
     def _get_proc(self, session):
+        import time as _time
+
         proc = self._procs.get(session)
         if proc is not None and proc.poll() is None:
-            return proc
+            # Fresh context after a long quiet spell (see IDLE_RESET).
+            idle = _time.time() - self._last_use.get(session, 0)
+            if idle > self.IDLE_RESET:
+                logger.info('Session %r idle %.0fs - starting fresh', session, idle)
+                self._kill(session)
+            else:
+                self._last_use[session] = _time.time()
+                return proc
+        self._last_use[session] = _time.time()
 
         if len(self._procs) >= self.MAX_SESSIONS and session not in self._procs:
             # Drop the oldest conversation to stay bounded.
@@ -221,6 +236,13 @@ class ClaudeCliBackend(Backend):
                 continue
 
             if event.get('type') == 'result':
+                # Error results (usage limit, API failure) carry an English
+                # error string - never hand that to the TTS. Raising here
+                # triggers the retry-on-fresh-process path, then a 502 and
+                # the Pi's canned Korean line.
+                if event.get('is_error') or event.get('subtype') not in (None, 'success'):
+                    raise RuntimeError('claude CLI error result: {}'.format(
+                        (event.get('result') or event.get('subtype') or '')[:200]))
                 return (event.get('result') or '').strip()
 
     def reply(self, text, history, session='default', image=None):

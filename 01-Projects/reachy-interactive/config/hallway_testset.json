@@ -1,0 +1,195 @@
+{
+  "_comment": "사무실 복도 시나리오 라우팅 회귀 테스트 (2026-09-03 서브에이전트 생성)",
+  "tests": [
+    {
+      "text": "화장실이 어디예요",
+      "expect": "chat",
+      "good_reply_hint": "건물 안내 몰라서 직원분께 여쭤보시라고 안내"
+    },
+    {
+      "text": "엘리베이터 어느 쪽이에요",
+      "expect": "chat",
+      "good_reply_hint": "길 안내 불가, 직원분께 안내"
+    },
+    {
+      "text": "인사해봐",
+      "expect": "motion",
+      "good_reply_hint": "인사 동작 실행"
+    },
+    {
+      "text": "손 흔들어줘",
+      "expect": "motion",
+      "good_reply_hint": "손 흔들기 동작 실행"
+    },
+    {
+      "text": "악수하자",
+      "expect": "motion",
+      "good_reply_hint": "악수 동작 실행"
+    },
+    {
+      "text": "만세 해봐",
+      "expect": "motion",
+      "good_reply_hint": "만세 동작 실행"
+    },
+    {
+      "text": "박수 쳐봐",
+      "expect": "motion",
+      "good_reply_hint": "박수 동작 실행"
+    },
+    {
+      "text": "저쪽 좀 가리켜봐",
+      "expect": "motion",
+      "good_reply_hint": "가리키기 동작 실행"
+    },
+    {
+      "text": "손 씻고 올게",
+      "expect": "chat",
+      "good_reply_hint": "다녀오시라는 가벼운 인사, 손 흔들기 동작으로 오인 금지"
+    },
+    {
+      "text": "머리 아프다",
+      "expect": "chat",
+      "good_reply_hint": "짧은 위로, 머리 동작으로 오인 금지"
+    },
+    {
+      "text": "팔짱 끼지 마",
+      "expect": "chat",
+      "good_reply_hint": "동작 명령 아님, 가볍게 유머로 응답"
+    },
+    {
+      "text": "박수",
+      "expect": "chat",
+      "good_reply_hint": "맥락 없는 조각이라 실행하지 말고 가볍게 되묻기"
+    },
+    {
+      "text": "지금 뭐가 보여",
+      "expect": "vision",
+      "good_reply_hint": "카메라로 본 장면 묘사"
+    },
+    {
+      "text": "내가 뭐 입고 있게",
+      "expect": "vision",
+      "good_reply_hint": "카메라로 옷차림 묘사"
+    },
+    {
+      "text": "앞에 사람 몇 명 있어",
+      "expect": "vision",
+      "good_reply_hint": "카메라로 보이는 사람 수 답변"
+    },
+    {
+      "text": "커피 한 잔만 갖다줄래",
+      "expect": "chat",
+      "good_reply_hint": "걷지 못해 심부름 불가, 유쾌하게 거절"
+    },
+    {
+      "text": "김 대리한테 이것 좀 전해줘",
+      "expect": "chat",
+      "good_reply_hint": "자리를 떠날 수 없어 전달 불가"
+    },
+    {
+      "text": "이리 와봐",
+      "expect": "chat",
+      "good_reply_hint": "걷지 못한다고 밝히고 이쪽으로 와달라고 유쾌하게"
+    },
+    {
+      "text": "걸어봐",
+      "expect": "chat",
+      "good_reply_hint": "다리가 없어 걷지 못함, 팔과 머리는 움직임"
+    },
+    {
+      "text": "춤춰봐",
+      "expect": "chat",
+      "good_reply_hint": "춤은 못 추지만 할 수 있는 동작 소개, 하겠다고 약속 금지"
+    },
+    {
+      "text": "누구세요",
+      "expect": "chat",
+      "good_reply_hint": "리치 자기소개, 폴렌 로보틱스와 키로 언급"
+    },
+    {
+      "text": "여기서 뭐해요",
+      "expect": "chat",
+      "good_reply_hint": "복도에서 인사하고 대화하는 역할 소개"
+    },
+    {
+      "text": "몇 살이야",
+      "expect": "chat",
+      "good_reply_hint": "정확히 모름을 귀엽게, 지어내지 않기"
+    },
+    {
+      "text": "사진 찍어도 돼요",
+      "expect": "chat",
+      "good_reply_hint": "흔쾌히 환영"
+    },
+    {
+      "text": "만져봐도 돼요",
+      "expect": "chat",
+      "good_reply_hint": "모터 보호 위해 부드럽게 사양, 사진은 환영"
+    },
+    {
+      "text": "시끄럽지 않아요",
+      "expect": "chat",
+      "good_reply_hint": "복도 소음 괜찮다고 여유 있게"
+    },
+    {
+      "text": "무섭다 야",
+      "expect": "chat",
+      "good_reply_hint": "미안하다며 순한 로봇이라고 안심"
+    },
+    {
+      "text": "수고하세요",
+      "expect": "chat",
+      "good_reply_hint": "짧은 감사 인사"
+    },
+    {
+      "text": "안녕 로봇아",
+      "expect": "chat",
+      "good_reply_hint": "밝은 짧은 인사"
+    },
+    {
+      "text": "야 너 말할 줄 알아",
+      "expect": "chat",
+      "good_reply_hint": "장난스러운 테스트에 여유 있게 응수"
+    },
+    {
+      "text": "점심 뭐 먹지",
+      "expect": "chat",
+      "good_reply_hint": "주변 대화 조각일 수 있음, 끼어들지 않고 가볍게"
+    },
+    {
+      "text": "아 진짜 부장님 때문에 못 살아",
+      "expect": "chat",
+      "good_reply_hint": "남의 대화에 끼어들지 않고 무시성 짧은 반응"
+    },
+    {
+      "text": "이따 회의 몇 시지",
+      "expect": "chat",
+      "good_reply_hint": "모른다고 짧게, 일정 지어내지 않기"
+    },
+    {
+      "text": "키로가 뭐하는 곳이에요",
+      "expect": "chat",
+      "good_reply_hint": "2005년 설립 로봇 연구기관, 본원 포항"
+    },
+    {
+      "text": "견학 신청은 어떻게 해요",
+      "expect": "chat",
+      "good_reply_hint": "절차 모름, 직원 문의 안내"
+    },
+    {
+      "text": "여기 입주하려면 어떻게 해요",
+      "expect": "chat",
+      "good_reply_hint": "입주 절차 모름, 직원 문의 안내"
+    },
+    {
+      "text": "너 프랑스에서 왔다며",
+      "expect": "chat",
+      "good_reply_hint": "폴렌 로보틱스 제작, 오픈소스 리치 소개"
+    },
+    {
+      "text": "엄마 이 로봇 봐봐",
+      "expect": "chat",
+      "good_reply_hint": "아이에게 쉽고 다정한 짧은 인사"
+    }
+  ]
+}

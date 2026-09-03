@@ -32,3 +32,4 @@ dist/
 *.bin
 *.npy
 *.npz
+**/quick_notes.proposed.json

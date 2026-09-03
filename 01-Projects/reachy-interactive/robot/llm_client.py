@@ -148,7 +148,7 @@ class BrokerClient(BaseClient):
 
         return payload.get('reply')
 
-    def ask_motion(self, text, image=None, timeout=90):
+    def ask_motion(self, text, image=None, timeout=150):
         """Ask the motion session to design a gesture.
 
         Returns {'say': str, 'preset': str|None, 'moves': list|None},

@@ -171,11 +171,16 @@ class Speech(object):
         text = speakable(text)
 
         if self.engine == 'edge':
-            result = subprocess.run(
-                [shutil.which('edge-tts'),
-                 '--voice', self.edge_voice, '--rate={}'.format(self.edge_rate),
-                 '--text', text, '--write-media', path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            try:
+                result = subprocess.run(
+                    [shutil.which('edge-tts'),
+                     '--voice', self.edge_voice, '--rate={}'.format(self.edge_rate),
+                     '--text', text, '--write-media', path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                    timeout=15)
+            except subprocess.TimeoutExpired:
+                logger.warning('edge-tts pre-synthesis timed out')
+                result = subprocess.CompletedProcess([], 1, stderr='timeout')
             if result.returncode == 0 and os.path.getsize(path) > 0:
                 return path
             logger.warning('edge-tts pre-synthesis failed: %s',
@@ -225,6 +230,7 @@ class Speech(object):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         self._worker = Thread(target=synth_and_play)
+        self._worker.daemon = True
         self._worker.start()
 
     def _start_edge(self, text):
@@ -240,11 +246,17 @@ class Speech(object):
         os.close(fd)
 
         def synth_and_play():
-            result = subprocess.run(
-                [shutil.which('edge-tts'),
-                 '--voice', self.edge_voice, '--rate={}'.format(self.edge_rate),
-                 '--text', text, '--write-media', self._tmp_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            try:
+                result = subprocess.run(
+                    [shutil.which('edge-tts'),
+                     '--voice', self.edge_voice, '--rate={}'.format(self.edge_rate),
+                     '--text', text, '--write-media', self._tmp_path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                    timeout=15)
+            except subprocess.TimeoutExpired:
+                # A half-open connection must never freeze the robot.
+                logger.warning('edge-tts timed out, falling back')
+                result = subprocess.CompletedProcess([], 1, stderr='timeout')
 
             if result.returncode != 0 or os.path.getsize(self._tmp_path) == 0:
                 logger.warning('edge-tts failed: %s',
@@ -276,6 +288,7 @@ class Speech(object):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         self._worker = Thread(target=synth_and_play)
+        self._worker.daemon = True
         self._worker.start()
 
     def start(self, text=None, wav=None):
@@ -312,20 +325,27 @@ class Speech(object):
         return self._proc is not None and self._proc.poll() is None
 
     def stop(self):
-        """Cut the sound short."""
+        """Cut the sound short. Never blocks more than a few seconds."""
         if self._worker is not None and self._worker.is_alive():
-            self._worker.join()
+            self._worker.join(timeout=5)
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
-            self._proc.wait()
+            try:
+                self._proc.wait(timeout=3)
+            except Exception:
+                self._proc.kill()
         self._cleanup()
 
     def wait(self):
-        """Block until the sound is over."""
+        """Block until the sound is over (bounded - a hung synth can't
+        freeze the robot for the day)."""
         if self._worker is not None:
-            self._worker.join()
+            self._worker.join(timeout=25)
         if self._proc is not None:
-            self._proc.wait()
+            try:
+                self._proc.wait(timeout=60)
+            except Exception:
+                self._proc.kill()
         self._cleanup()
 
     def _cleanup(self):
@@ -495,6 +515,7 @@ class TalkingHead(object):
                 time.sleep(1 / self.freq)
 
         self._think_t = Thread(target=loop)
+        self._think_t.daemon = True
         self._think_t.start()
 
     def stop_thinking(self):
@@ -565,6 +586,8 @@ class IdleMotion(object):
 
         self._running = None
         self._thread = None
+        from threading import Lock
+        self._lifecycle = Lock()   # start/stop may race (main loop vs greeter)
 
         # Gaze state, interpolated between behaviors so motion stays smooth.
         self._gaze = [0.0, 0.0]
@@ -580,46 +603,59 @@ class IdleMotion(object):
     # -- lifecycle ----------------------------------------------------------
 
     def start(self):
-        """Start idling in the background (idempotent)."""
+        """Start idling in the background (idempotent, thread-safe)."""
         import random
         from threading import Event, Thread
 
-        if self._running is not None and self._running.is_set():
-            return
+        with self._lifecycle:
+            if self._running is not None and self._running.is_set():
+                return
 
-        # Continue from wherever the head is currently pointing.
-        self._gaze = list(getattr(self.reachy.head, '_soft_gaze', (0.0, 0.0)))
+            # Continue from wherever the head is currently pointing.
+            self._gaze = list(getattr(self.reachy.head, '_soft_gaze', (0.0, 0.0)))
 
-        self._running = Event()
-        self._running.set()
+            self._running = Event()
+            self._running.set()
 
-        def loop():
-            while self._running.is_set():
-                # When someone is in view, keep looking at them; otherwise fall
-                # back to the random idle repertoire.
-                if self.watcher is not None and self.watcher.person:
+            def loop():
+                while self._running.is_set():
+                    # When someone is in view, keep looking at them; otherwise fall
+                    # back to the random idle repertoire.
+                    if self.watcher is not None and self.watcher.person:
+                        try:
+                            self._attend()
+                        except Exception:
+                            logger.exception('Attend behavior failed')
+                        self._pause(random.uniform(0.3, 0.7))
+                        continue
+
+                    # No face, but the scene just moved (someone passing by):
+                    # glance toward the motion with an antenna perk.
+                    if self._motion_nearby():
+                        try:
+                            self._glance_motion()
+                        except Exception:
+                            logger.exception('Motion glance failed')
+                        self._pause(random.uniform(0.5, 1.0))
+                        continue
+
+                    behavior = random.choice(self._behaviors)
                     try:
-                        self._attend()
+                        behavior()
                     except Exception:
-                        logger.exception('Attend behavior failed')
-                    self._pause(random.uniform(0.3, 0.7))
-                    continue
+                        logger.exception('Idle behavior failed')
+                    self._pause(random.uniform(1.0, 3.0))
 
-                behavior = random.choice(self._behaviors)
-                try:
-                    behavior()
-                except Exception:
-                    logger.exception('Idle behavior failed')
-                self._pause(random.uniform(1.0, 3.0))
-
-        self._thread = Thread(target=loop)
-        self._thread.start()
+            self._thread = Thread(target=loop)
+            self._thread.daemon = True
+            self._thread.start()
 
     def stop(self):
-        """Stop idling and wait for the thread to finish."""
-        if self._running is not None and self._running.is_set():
-            self._running.clear()
-            self._thread.join()
+        """Stop idling and wait for the thread to finish (thread-safe)."""
+        with self._lifecycle:
+            if self._running is not None and self._running.is_set():
+                self._running.clear()
+                self._thread.join(timeout=3)
 
     # -- helpers ------------------------------------------------------------
 
@@ -701,6 +737,32 @@ class IdleMotion(object):
     def _recenter(self):
         """Drift back to looking straight ahead."""
         self._move_gaze(0.0, 0.0, duration=2.0)
+
+    def _motion_nearby(self):
+        """Scene movement worth glancing at (fresh, above noise, not too often)."""
+        w = self.watcher
+        if w is None:
+            return False
+        now = time.time()
+        if now - getattr(self, '_last_motion_glance', 0.0) < 6.0:
+            return False
+        return (now - getattr(w, 'motion_at', 0.0) < 1.5
+                and getattr(w, 'motion_level', 0.0) > 0.04)
+
+    def _glance_motion(self):
+        """Glance toward where the scene just moved, antennas perking."""
+        self._last_motion_glance = time.time()
+        w = self.watcher
+
+        def clamp(v, lo, hi):
+            return max(lo, min(hi, v))
+
+        ty = clamp(-self.ATTEND_SIGN * w.motion_x * 0.30,
+                   -self.ATTEND_MAX_Y, self.ATTEND_MAX_Y)
+        self._set_antennas(18, -18)
+        self._move_gaze(ty, 0.05, duration=0.9)
+        self._pause(1.2)
+        self._set_antennas(0, 0)
 
     def _attend(self):
         """Turn the head to face the person the watcher is tracking.

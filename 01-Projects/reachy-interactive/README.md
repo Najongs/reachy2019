@@ -40,7 +40,8 @@ robot/voice_chat.py ── STT(구글) ── HTTP ──▶ broker/llm_broker.p
 | `calibrate_real.py` | 관절 하나씩 왕복시켜 시뮬과 방향 대조 |
 | `snap_view.py` | 머리 숙여 카메라 프레임 저장 |
 | `quick_notes.py` | 단순 패턴(인사/FAQ) 즉답 — CLI 안 거치고 `config/quick_notes.json`에서 바로 응답 |
-| `presence.py` | 머리 카메라로 얼굴 검출(로컬·무료). 사람 있으면 idle이 고개를 사람 쪽으로(`--attend`) |
+| `presence.py` | 머리 카메라로 얼굴 검출 + 프레임 차분 움직임 감지(로컬·무료). 사람 있으면 idle이 고개를 사람 쪽으로(`--attend`) |
+| `hallway.py` | 복도 데모(`--hallway`): 음성 인사는 1시간 간격(소음 방지), 그 사이 새 방문자엔 말 없이 wave(5분 간격), 대화 턴 중 하드뮤트, 자기 목소리 에코 가드, 전 이벤트 로그 |
 
 ## 실행
 
@@ -55,9 +56,14 @@ python3 broker/llm_broker.py --host 127.0.0.1 --port 8080 \
 #   --attend: 사람 얼굴 쪽으로 고개 (얼굴검출은 기본 on, 고개추적만 옵트인)
 python3 robot/voice_chat.py --motions --attend --url http://127.0.0.1:8080 --token <TOKEN>
 
-# [DGX] 대화 로그에서 즉답 노트 자동 구축 (로그 갱신 후)
-python3 broker/build_notes.py          # 후보만 quick_notes.proposed.json 에
-python3 broker/build_notes.py --merge  # 안전·일관된 것만 quick_notes.json 에 승격
+# [Pi] 복도 데모: 사람 등장 시 먼저 인사·말 걸기 유도, 지나가는 움직임에 반응 (attend 포함)
+python3 robot/voice_chat.py --motions --hallway --url http://127.0.0.1:8080 --token <TOKEN>
+
+# [DGX] 하루 1회 로그 업데이트 (당겨오기 + 활동 요약 + 노트 제안) — 수동 실행
+bash ops/daily_update.sh               # Pi 로그 pull → 다이제스트 → quick_notes.proposed.json
+bash ops/daily_update.sh --since 2026-09-03   # 그 날짜 이후만 요약
+bash ops/daily_update.sh --merge       # 안전·일관된 노트 제안 자동 승격까지
+#   제안 반영 후: bash ops/deploy.sh 로 Pi 배포. Pi 연결이 없어도 로컬 보관본으로 요약은 됨.
 
 # [Pi/DGX] 시뮬만
 python3 sim/sim_play.py --candidates --url http://127.0.0.1:8080 --token <TOKEN>
@@ -86,6 +92,18 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition` + `sudo apt install
   begin_ramp 1.3s, home 1.8s, 핸드팔로우 램프 1.2s·τ0.35, 베이스복귀 하한 2.0s
 - **사람 인지**(`presence.py`): 머리 카메라로 얼굴 검출(로컬·무료·상시). `--attend` 시 idle 이 고개를 사람 쪽으로
   (상대 서보, 부호는 `IdleMotion.ATTEND_SIGN`). STT 앞부분 잘림도 수정 — 마이크 스트림 상시 개방 + 듣기 직전 버퍼 flush
+- **STT 오인식 교정**(`config/stt_corrections.json`): 실로그 기반 word_fixes 51개(양파→양팔, 포진→포즈 등,
+  블라인드 치환은 도메인에서 절대 다른 뜻으로 안 쓰이는 것만) + 이름 오인식 25개, 시작 시 `_WORD_FIXES`에 병합.
+  실단어(위치/유치/유치원/몇시야/유치하 등)는 문장 시작 위치-가드로만. 라우팅 전에 돌아 동작 인식률도 올림.
+  같은 혼동 목록이 `persona.txt`에도 있어 LLM 도 뭉개진 발음을 관대하게 해석 (약속 금지 규칙은 유지)
+- **대기 팔 숨쉬기**(`motion_exec.start_idle_arms`): 레디 자세로 대기할 때 어깨·팔꿈치·전완에 2~3° 저속
+  사인 오프셋(좌우 위상차) → 얼어있지 않고 편안하게 안내하는 느낌. 제스처/settle 전 자동 정지
+- **사무실 복도 시나리오**(서브에이전트 생성, 2026-09-03): quick_notes 35종(길안내 한계/사진OK/만지기 사양/
+  심부름 거절/출퇴근 인사 등) + persona 복도 지침(조각 발화 짧게, 그룹/아이/장난 대응) +
+  `config/hallway_testset.json` 38케이스 회귀 (라우팅 37/37, '박수' 단독은 이제 동작 아님)
+- **마이크 수음**: ReSpeaker XMOS DSP AGC 천장 30→40dB·목표레벨 6배(`ops/respeaker_gain.py`,
+  전원 리셋 대응 `respeaker_gain.service` 부팅 자동적용) + STT 동적 임계값 [150,900] 클램프
+  (시끄러운 복도에서 귀먹는 드리프트 방지)
 
 ## 시뮬레이터
 

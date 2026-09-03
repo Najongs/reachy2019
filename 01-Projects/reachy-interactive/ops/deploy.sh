@@ -7,10 +7,10 @@ ROBOT=robot; SIM=sim; OPS=ops; CFG=config
 FILES="$ROBOT/base_pose.py $ROBOT/custom_hands.py $ROBOT/llm_client.py \
 $ROBOT/motion_exec.py $ROBOT/motion_presets.py $ROBOT/say_and_move.py \
 $ROBOT/snap_view.py $ROBOT/voice_chat.py $ROBOT/state_mirror.py $ROBOT/calibrate_real.py \
-$ROBOT/quick_notes.py $ROBOT/presence.py \
+$ROBOT/quick_notes.py $ROBOT/presence.py $ROBOT/hallway.py \
 $SIM/sim_play.py $SIM/sim_viewer.html \
-$CFG/quick_notes.json \
-$OPS/pi_tunnel.service $OPS/pi_viewer.service"
+$CFG/quick_notes.json $CFG/stt_corrections.json \
+$OPS/pi_tunnel.service $OPS/pi_viewer.service $OPS/respeaker_gain.py"
 # reachy.glb 는 대용량 → 03-Resources 에서 별도(있을 때만)
 GLB=../../03-Resources/3d-models/reachy.glb
 

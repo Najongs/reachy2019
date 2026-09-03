@@ -129,6 +129,19 @@ HOLD_TORQUE = 50
 # so a quiet robot does not cook its shoulder motors holding a pose.
 SETTLE_AFTER = 180.0
 
+# Gentle "alive" breathing added to the held ready pose while waiting, so the
+# arms look relaxed and welcoming instead of frozen. Tiny, slow offsets on the
+# joints that stay powered (shoulder_pitch/elbow_pitch/forearm_yaw); the left
+# arm is phase-shifted so the two do not move in lockstep. Amplitudes are a few
+# degrees - well inside limits and no more heat than a static hold.
+IDLE_ARM_FREQ = 20.0            # write rate (Hz)
+IDLE_BREATH = {
+    'shoulder_pitch': (2.5, 0.13),   # (amplitude deg, frequency Hz)
+    'elbow_pitch':    (3.0, 0.11),
+    'forearm_yaw':    (2.0, 0.08),
+}
+IDLE_LEFT_PHASE = math.pi * 0.6      # left arm lags right for an organic look
+
 # Natural hanging pose used for full power-off. All zeros = the arm points
 # straight down, which is where gravity leaves it anyway - so cutting power
 # afterwards causes no visible drop.
@@ -419,6 +432,11 @@ class MotionExecutor(object):
         self.abort = threading.Event()
         self._settle_timer = None
 
+        # Idle-arm breathing state (see start_idle_arms).
+        self._arms_held = False
+        self._idle_stop = None
+        self._idle_thread = None
+
     # -- public ---------------------------------------------------------------
 
     def available_joints(self):
@@ -436,6 +454,11 @@ class MotionExecutor(object):
         is too hot. Always tries to return to rest and relax the arms.
         """
         self._cancel_settle()
+        # The breather gates on _arms_held: clear it FIRST so a listen-timeout
+        # wrap in the main loop cannot restart the breather mid-gesture and
+        # fight _play's 50 Hz targets (visible judder, motor stress).
+        self._arms_held = False
+        self.stop_idle_arms()   # never let the breather fight a real gesture
 
         if not self._lock.acquire(False):
             return False, '지금 움직이는 중이에요, 잠깐만요'
@@ -443,10 +466,12 @@ class MotionExecutor(object):
         try:
             arm_motors = self._involved_arm_motors(segments)
 
+            # An unreadable temperature on a flaky bus must not silently pass
+            # the overheat gate - for an unattended run, refuse instead.
             hot = [m for m in arm_motors
-                   if (m.temperature or 0) > TEMPERATURE_LIMIT]
+                   if m.temperature is None or m.temperature > TEMPERATURE_LIMIT]
             if hot:
-                logger.warning('Motors too hot: %s',
+                logger.warning('Motors too hot or unreadable: %s',
                                [(m.name, m.temperature) for m in hot])
                 return False, '모터가 뜨거워서 조금 쉬어야 해요'
 
@@ -454,6 +479,22 @@ class MotionExecutor(object):
             self.max_divergence = 0.0
 
             seed = self.commanded_pose()
+
+            # Segments were collision-checked against a nominal seed at
+            # validation time, but the REAL arm may have been moved by hand
+            # (hallway!). Re-sweep from the actual pose, including the entry
+            # ramp _play will prepend - cheap, pure python.
+            try:
+                first_pose = next((s[0] for s in segments if s[0] != 'grasp'), None)
+                if first_pose is not None:
+                    delta = max(abs(first_pose[j] - seed.get(j, 0.0))
+                                for j in first_pose)
+                    ramp = min(max(delta / 40.0, 1.0), 3.0)
+                    _collision_sweep([(first_pose, ramp)] + [
+                        s for s in segments if s[0] != 'grasp'], seed)
+            except ValidationError as e:
+                logger.warning('Refused at execution: %s (real pose unsafe)', e)
+                return False, '지금 팔 위치에서는 그 동작이 위험해요'
 
             self._stiffen(arm_motors, seed)
             self._play(segments, seed, follow_side=self._follow_side(segments))
@@ -543,6 +584,7 @@ class MotionExecutor(object):
 
     def _relax_arms(self, arm_motors):
         """Release only the arms; the head stays stiff for the voice loop."""
+        self._arms_held = False
         for m in arm_motors:
             m.compliant = True
 
@@ -587,9 +629,12 @@ class MotionExecutor(object):
             else:
                 m.compliant = True
 
+        self._arms_held = True
+
     def hold_ready(self):
         """Public: bring the arms to the ready stance (e.g. at startup)."""
         self._cancel_settle()
+        self.stop_idle_arms()
         if not self._lock.acquire(False):
             return
         try:
@@ -599,6 +644,80 @@ class MotionExecutor(object):
             logger.exception('hold_ready failed')
         finally:
             self._lock.release()
+
+    # -- idle-arm breathing ---------------------------------------------------
+
+    def start_idle_arms(self):
+        """Add gentle breathing to the held ready pose while waiting.
+
+        Idempotent and cheap: no-op unless the arms are currently held (so it
+        never tries to drive relaxed/settled motors, whose goal writes would be
+        silently dropped anyway). Stop it before any gesture or settle.
+        """
+        import threading
+
+        # Belt and braces: never start while a gesture/settle owns the lock.
+        if not self._arms_held or self._lock.locked():
+            return
+        if self._idle_thread is not None and self._idle_thread.is_alive():
+            return
+
+        self._idle_stop = threading.Event()
+        self._idle_thread = threading.Thread(target=self._idle_arm_loop)
+        self._idle_thread.daemon = True
+        self._idle_thread.start()
+
+    def stop_idle_arms(self):
+        """Stop the breathing thread and settle the held joints back to base."""
+        import threading
+
+        stop = self._idle_stop
+        thread = self._idle_thread
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        self._idle_thread = None
+        self._idle_stop = None
+
+    def _idle_arm_loop(self):
+        """Write tiny slow offsets onto the powered ready-pose joints."""
+        motor_by_name = {m.name: m for m in self.reachy.motors}
+        dt = 1.0 / IDLE_ARM_FREQ
+        t0 = time.time()
+
+        while self._idle_stop is not None and not self._idle_stop.is_set():
+            if not self._arms_held:
+                break
+            t = time.time() - t0
+            for joint, base in READY_POSE.items():
+                short = joint.split('.')[-1]
+                breath = IDLE_BREATH.get(short)
+                if breath is None:
+                    continue
+                motor = motor_by_name.get(joint)
+                if motor is None:
+                    continue
+                amp, freq = breath
+                phase = IDLE_LEFT_PHASE if joint.startswith('left') else 0.0
+                offset = amp * math.sin(2 * math.pi * freq * t + phase)
+                try:
+                    motor.goal_position = base + offset
+                except Exception:
+                    pass
+            if self._idle_stop.wait(dt):
+                break
+
+        # Leave the held joints exactly on the base pose, not mid-breath.
+        for joint, base in READY_POSE.items():
+            short = joint.split('.')[-1]
+            if short in IDLE_BREATH:
+                motor = motor_by_name.get(joint)
+                if motor is not None:
+                    try:
+                        motor.goal_position = base
+                    except Exception:
+                        pass
 
     def _settle(self, arm_motors):
         """Lower to the hang pose and power everything off."""
@@ -622,6 +741,8 @@ class MotionExecutor(object):
 
     def _settle_quietly(self):
         """Timer callback: idle too long, lower the arms and relax."""
+        self._arms_held = False   # block breather restarts during the descent
+        self.stop_idle_arms()
         if not self._lock.acquire(False):
             return
         try:
@@ -635,6 +756,7 @@ class MotionExecutor(object):
     def shutdown(self):
         """Lower and relax the arms before program exit."""
         self._cancel_settle()
+        self.stop_idle_arms()
         with self._lock:
             try:
                 self._settle(self._all_arm_motors())

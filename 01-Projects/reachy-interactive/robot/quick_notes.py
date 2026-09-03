@@ -98,6 +98,6 @@ class QuickNotes(object):
         if len(norm) <= self.MAX_LOOSE:
             for pats, reply, _ in self._compiled:
                 for p in pats:
-                    if len(p) >= 4 and p in norm and len(norm) - len(p) <= self.LOOSE_MARGIN:
+                    if len(p) >= 3 and p in norm and len(norm) - len(p) <= self.LOOSE_MARGIN:
                         return reply
         return None
