@@ -550,10 +550,49 @@ class TalkingHead(object):
         """
         y = 0.14 + 0.03 * np.sin(2 * np.pi * 0.25 * t)
         z = 0.10 + 0.03 * np.sin(2 * np.pi * 0.40 * t)
-        left = 45 + 12 * np.sin(2 * np.pi * 0.50 * t)
-        right = -8 + 5 * np.sin(2 * np.pi * 0.35 * t)
+        # Antennas carry the "I am working on it" signal: they are light and
+        # fast (unlike the Orbita neck), so a clear asymmetric sweep is what a
+        # person actually notices from a few metres away.
+        left = 48 + 26 * np.sin(2 * np.pi * 0.55 * t)
+        right = -14 + 18 * np.sin(2 * np.pi * 0.38 * t + 1.1)
 
         self._apply(y, z, left, right)
+
+    def acknowledge(self, duration=0.7):
+        """A quick antenna perk the instant speech is recognised.
+
+        Runs BEFORE the model is even called, so the person gets immediate
+        confirmation that their words landed - the dead zone between "I stopped
+        talking" and "the robot started thinking" was the confusing part.
+        Non-blocking; antennas only, so it never fights the neck or the arms.
+        """
+        from threading import Thread
+
+        def run():
+            head = self.reachy.head
+            try:
+                head.compliant = False
+                for m in head.motors:
+                    m.compliant = False
+                t0 = time.time()
+                while True:
+                    t = time.time() - t0
+                    if t >= duration:
+                        break
+                    # up fast, settle back - like ears pricking up
+                    k = np.sin(np.pi * min(1.0, t / duration))
+                    head.left_antenna.goal_position = 38 * k
+                    head.right_antenna.goal_position = -38 * k
+                    time.sleep(1 / self.freq)
+                head.left_antenna.goal_position = 0
+                head.right_antenna.goal_position = 0
+            except Exception:
+                logger.debug('acknowledge failed', exc_info=True)
+
+        th = Thread(target=run)
+        th.daemon = True
+        th.start()
+        return th
 
     def start_thinking(self):
         """Run the thinking motion in the background until stop_thinking().

@@ -51,6 +51,12 @@ def quiet_stderr():
 
 STOP_WORDS = ('그만', '종료', '잘가', '잘 가')
 
+# When the reply arrives while a pondering hum is playing, let the hum run to
+# its natural end (up to this long) instead of chopping it mid-word, then take
+# a short breath before answering - that is what makes the hand-off feel human.
+FILLER_TAIL_MAX = 1.2
+FILLER_BREATH = 0.18
+
 # When the sentence sounds like it is about what the robot can SEE,
 # a camera frame is attached to the request.
 # '누구'/'누가' alone are too broad ("누구세요"=identity, "누가 만들었어"=maker):
@@ -872,16 +878,26 @@ def _normalize_name(text):
     # time...), so two guards: they must OPEN the utterance the way the name
     # would, AND the rest must contain a robot-ish cue (a command/greeting) -
     # otherwise "위치 알려줘" or "몇시야 지금" are real questions, not the name.
-    _cues = ('인사', '만세', '악수', '박수', '팔', '손', '고개', '안테나',
-             '해봐', '해 봐', '해줘', '해 줘', '하자', '들어', '올려', '내려',
-             '흔들', '움직', '뻗', '안녕', '보관함', '물건')
+    # These stand-alone words are real questions ("위치가 어디야", "몇 시야"),
+    # but the SAME word followed by anything else is almost always the name
+    # being misheard - people say "리치, <명령>". So: alone (or with a
+    # time/place question word) = keep; followed by other content = the name.
+    # An explicit cue list kept missing cases (노래/춤/소개/이야기...), which is
+    # why "몇 시야 노래 불러줘" stayed misheard.
+    # Short fragments like '이야' are unsafe here ('이야기 해줘' would match).
+    _REAL_QUESTION = ('지금', '몇시', '몇 시', '시간', '어디', '어때', '뭐야',
+                      '뭐예요', '몇 분', '몇분')
     stripped = text.strip()
     for w in ('위치', '유치원', '유치하', '유치', '지하', '몇 시야', '몇시야',
               '비치', '이치'):
         if stripped == w or stripped.startswith(w + ' '):
-            rest = stripped[len(w):].replace(' ', '')
-            if rest and any(c.replace(' ', '') in rest for c in _cues):
-                text = text.replace(w, '리치', 1)
+            rest = stripped[len(w):].strip()
+            if not rest:
+                break                      # bare word = the real question
+            compact_rest = rest.replace(' ', '')
+            if any(q.replace(' ', '') in compact_rest for q in _REAL_QUESTION):
+                break                      # "위치가 어디야", "몇 시야 지금"
+            text = text.replace(w, '리치', 1)
             break
     for a, b in _WORD_FIXES:
         text = text.replace(a, b)
@@ -1039,6 +1055,15 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
 
         if idle is not None:
             idle.stop()
+
+        # Immediate "I heard you": antennas prick up the moment the words are
+        # recognised, before any model is called. Without it there is a silent
+        # dead zone between the person finishing and the robot reacting.
+        if head is not None:
+            try:
+                head.acknowledge()
+            except Exception:
+                logger.debug('acknowledge failed', exc_info=True)
         if motion_handler is not None:
             motion_handler.executor.stop_idle_arms()
 
@@ -1172,6 +1197,7 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         from threading import Event, Thread
 
         filler_stop = Event()
+        filler_started = Event()
         filler_thread = None
         if fillers and speech is not None:
             ack = type(speech)(voice=speech.voice)
@@ -1179,6 +1205,7 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             def filler_loop():
                 if filler_stop.wait(ack_delay):
                     return                       # reply came fast, no filler
+                filler_started.set()
                 last = None
                 while not filler_stop.is_set():
                     pick = random.choice(fillers)
@@ -1187,10 +1214,21 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                             pick = random.choice(fillers)
                     last = pick
                     ack.start(wav=pick)
+                    # When the reply lands mid-hum, LET THE HUM FINISH instead
+                    # of chopping it off - a person says "음..." to the end and
+                    # then answers. Cutting mid-word was the jarring part.
+                    cut_at = None
                     while ack.is_playing:
-                        if filler_stop.wait(0.05):
-                            ack.stop()
-                            return
+                        if filler_stop.is_set():
+                            if cut_at is None:
+                                cut_at = time.time()
+                            # ...but never hold the answer for long.
+                            if time.time() - cut_at > FILLER_TAIL_MAX:
+                                ack.stop()
+                                return
+                        time.sleep(0.05)
+                    if filler_stop.is_set():
+                        return
                     if filler_stop.wait(0.4):     # short gap between hums
                         return
 
@@ -1206,6 +1244,13 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         if head is not None:
             head.setup()
             head.start_thinking()
+        # A slow arm accent while the model works reads as "I am on it" from
+        # across the corridor, where antennas alone can be missed.
+        if motion_handler is not None:
+            try:
+                motion_handler.executor.talk_accent(kind='both_open', duration=2.6)
+            except Exception:
+                logger.debug('thinking accent failed', exc_info=True)
 
         t_ask = time.time()
         reply = client.ask_or_fallback(text, image=image)
@@ -1216,7 +1261,12 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
 
         filler_stop.set()
         if filler_thread is not None:
-            filler_thread.join(timeout=2)
+            # Wait for the hum to finish its word (bounded by FILLER_TAIL_MAX
+            # inside the loop), then a short beat so the answer does not start
+            # on top of it.
+            filler_thread.join(timeout=FILLER_TAIL_MAX + 0.5)
+            if filler_started.is_set():
+                time.sleep(FILLER_BREATH)
 
         if turn_logger is not None:
             turn_logger.log('vision_chat' if image else 'chat',
