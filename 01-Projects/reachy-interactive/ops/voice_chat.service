@@ -20,7 +20,7 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/ttyUSB2 ] && exit 0;
 # Then wait up to 5 min for the tunnel+broker so the first turn (and filler
 # synthesis) has a network; start anyway if it never comes (degraded mode).
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -sf -m 3 http://127.0.0.1:8080/health >/dev/null && exit 0; sleep 5; done; exit 0'
-ExecStart=/usr/bin/python3 /home/pi/Documents/voice_chat.py --motions --hallway --stt vosk --fixed-energy 250 \
+ExecStart=/usr/bin/python3 /home/pi/Documents/voice_chat.py --motions --hallway --stt auto --fixed-energy 550 \
   --url http://127.0.0.1:8080 --token reachy2019
 # A visitor's genuine goodbye no longer exits in hallway mode, but any crash
 # or manual stop word in non-hallway runs just restarts the loop.

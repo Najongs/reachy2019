@@ -7,7 +7,7 @@ After=multi-user.target
 Type=oneshot
 # Wait for the array to enumerate on slow boots, then push the AGC settings.
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do lsusb -d 2886:0018 >/dev/null && exit 0; sleep 1; done; exit 1'
-ExecStart=/usr/bin/python3 /home/pi/Documents/respeaker_gain.py --apply --max-gain-db 50 --desired-level 0.05
+ExecStart=/usr/bin/python3 /home/pi/Documents/respeaker_gain.py --apply --max-gain-db 30 --desired-level 0.02
 RemainAfterExit=yes
 
 [Install]

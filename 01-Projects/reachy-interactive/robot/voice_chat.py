@@ -486,9 +486,13 @@ class Listener(object):
             self.microphone = sr.Microphone(device_index=mic_index)
 
             # Calibrate for room noise once, so speech detection is reliable.
-            with self.microphone as source:
-                logger.info('Calibrating for ambient noise...')
-                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+            # Skip it entirely when --fixed-energy pins the threshold, otherwise
+            # ambient calibration OVERWRITES the pinned value (that was the bug:
+            # --fixed-energy 250 ended up at ~600 after calibration).
+            if fixed_energy is None:
+                with self.microphone as source:
+                    logger.info('Calibrating for ambient noise...')
+                    self.recognizer.adjust_for_ambient_noise(source, duration=1)
 
         # The stream is opened once and kept open across turns (see listen()).
         # Re-opening it every turn added stream-startup latency, so the first
@@ -683,30 +687,30 @@ class Listener(object):
         with flaky wifi, Vosk keeps the robot listening when Google can't be
         reached; Google is more accurate when the connection is good.
         """
-        # Offline first when configured/available - no network round trip.
-        if self._vosk is not None and self.stt in ('vosk', 'auto'):
-            text = self._recognize_vosk(audio)
-            if text is not None or self.stt == 'vosk':
+        # Pure offline: Vosk only, never touches the network.
+        if self.stt == 'vosk':
+            self.last_engine = 'vosk'
+            return self._recognize_vosk(audio)
+
+        # 'google' and 'auto' both try Google first (far more accurate on real,
+        # distant hallway speech than the small Vosk model). 'auto' then falls
+        # back to Vosk only when Google is unreachable, so a wifi blip does not
+        # deafen the robot. (Vosk-first was a mistake: it returns confident
+        # garbage like "[90]" that auto then trusted instead of asking Google.)
+        try:
+            text = self.recognizer.recognize_google(audio, language=self.language)
+            self.last_engine = 'google'
+            return text
+        except self.sr.UnknownValueError:
+            logger.info('Heard something, could not understand it')
+            return None
+        except self.sr.RequestError as e:
+            logger.warning('Google STT unavailable: %s', e)
+            if self.stt == 'auto' and self._vosk is not None:
+                logger.info('Falling back to offline Vosk')
                 self.last_engine = 'vosk'
-                return text            # vosk-only: trust its verdict
-
-        if self.stt in ('google', 'auto'):
-            try:
-                text = self.recognizer.recognize_google(audio, language=self.language)
-                self.last_engine = 'google'
-                return text
-            except self.sr.UnknownValueError:
-                logger.info('Heard something, could not understand it')
-                return None
-            except self.sr.RequestError as e:
-                logger.warning('Google STT unavailable: %s', e)
-                # Fall back to offline if we have it, else signal offline.
-                if self._vosk is not None:
-                    self.last_engine = 'vosk'
-                    return self._recognize_vosk(audio)
-                return ''
-
-        return None
+                return self._recognize_vosk(audio)
+            return ''
 
     def _recognize_vosk(self, audio):
         import json
