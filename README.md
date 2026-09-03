@@ -2,7 +2,9 @@
 
 Pollen Robotics Reachy 2019 로봇을 **음성으로 대화하고, 카메라로 보고, 자연어 명령으로 팔·머리를 움직이는** 상호작용 시스템으로 확장한 작업 저장소.
 
-Claude(대화 haiku / 동작 생성 opus)를 브로커로 두고, 라즈베리파이 로봇이 마이크→STT→LLM→TTS+모션 파이프라인을 돌린다. 실물과 동기화되는 3D 브라우저 시뮬레이터도 포함.
+라즈베리파이 로봇이 마이크→STT→응답→TTS+모션 파이프라인을 돌리고, DGX 서버가 LLM 브로커 역할을 한다.
+**대화는 무료 로컬 LLM**(Ollama + EXAONE, DGX GPU), **새 동작 생성은 Claude opus**, 인사·FAQ·목 제스처·물체 주시·오프라인 STT 는 **로봇에서 로컬로** 처리해 인터넷이 끊겨도 계속 동작한다.
+사무실 복도에 무인으로 켜두고 지나가는 사람과 상호작용하며 데이터를 쌓는 것이 현재 용도. 실물과 동기화되는 3D 브라우저 시뮬레이터도 포함.
 
 ## PARA 구조
 
@@ -20,9 +22,13 @@ Claude(대화 haiku / 동작 생성 opus)를 브로커로 두고, 라즈베리�
 전체 아키텍처·실행법은 **[01-Projects/reachy-interactive/README.md](01-Projects/reachy-interactive/README.md)** 참조.
 
 ```
-[Pi: 로봇]  voice_chat.py ── STT ── HTTP ──▶ [DGX] llm_broker.py ── Claude
+[Pi: 로봇]  voice_chat.py ── STT ── HTTP ──▶ [DGX] llm_broker.py ─┬─ 대화: Ollama+EXAONE (무료·GPU)
+                 │                                                └─ 동작: Claude opus (JSON 생성)
+                 ├ 로컬 즉답·목 제스처·물체 주시 (LLM 없이)
                  └ 팔·머리 모션 + 3D 미러(브라우저 시뮬)
 ```
+
+운영(부팅·서비스·네트워크·트러블슈팅)은 **[02-Areas/robot-ops/README.md](02-Areas/robot-ops/README.md)**.
 
 ## 원본에 대하여
 
