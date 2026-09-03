@@ -999,6 +999,8 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_and_move, random, speak, vision=False, camera_side='left',
          camera_index=0, motion_handler=None, turn_logger=None, notes=None,
          hallway=None, objvis=None, music_player=None):
+    from threading import Event, Thread
+
     last_kind = None   # 직전 턴 종류 (motion/chat) — 문맥 라우팅용
     offline_mute_until = 0.0   # STT 불가 안내 백오프 (한 번 말하고 점점 조용히)
     offline_backoff = 60.0
@@ -1064,6 +1066,23 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                 head.acknowledge()
             except Exception:
                 logger.debug('acknowledge failed', exc_info=True)
+
+        # Bring the arms back up if they auto-settled. After SETTLE_AFTER (3
+        # min) idle the arms power down and _arms_held goes False - and nothing
+        # re-armed them, so every conversational gesture (talk_accent, idle
+        # breathing) was a silent no-op for the rest of the day. Raising them
+        # here runs in the background and overlaps the model wait, and the
+        # settle timer is re-armed so it cannot fire mid-conversation.
+        if motion_handler is not None:
+            ex = motion_handler.executor
+            try:
+                ex._cancel_settle()
+                if not ex._arms_held:
+                    Thread(target=ex.hold_ready).start()
+                else:
+                    ex._schedule_settle()
+            except Exception:
+                logger.debug('arm re-arm failed', exc_info=True)
         if motion_handler is not None:
             motion_handler.executor.stop_idle_arms()
 
@@ -1194,8 +1213,6 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         # Fill the whole wait with pondering sounds, not just one blip: after
         # ack_delay, play fillers back-to-back until the reply arrives, so a
         # slow (4-10s) CLI turn feels like the robot thinking, not lag.
-        from threading import Event, Thread
-
         filler_stop = Event()
         filler_started = Event()
         filler_thread = None
