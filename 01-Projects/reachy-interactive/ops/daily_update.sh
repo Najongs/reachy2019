@@ -9,8 +9,8 @@
 #   bash ops/daily_update.sh --purge-persons  # 사진을 옮긴 뒤 Pi 쪽 원본 삭제(SD 확보)
 #
 # 사람 데이터가 쌓이는 곳 (DGX):
-#   ~/reachy-data/persons/    원본 + persons.db  (모으는 곳, 건드리지 않는다)
-#   ~/reachy-data/dataset/    걸러서 뽑아 낸 것  (images/ faces/ persons/ index.csv)
+#   04-Archives/person-dataset/persons/   원본 + persons.db (모으는 곳)
+#   04-Archives/person-dataset/dataset/   걸러서 뽑아 낸 것 (images/ faces/ persons/)
 #
 # 로봇은 계속 켜져 있으니 logrotate 대신, 여기서 로그를 안전히 당겨온 뒤(=DGX 보관본
 # 갱신) Pi 의 커지는 voice_chat.log 만 비운다. 세션 events.jsonl 은 건드리지 않는다.
@@ -59,7 +59,7 @@ turns=$(cat "$PI_LOGS"/*/events.jsonl 2>/dev/null | wc -l)
 echo "   현재 총 턴 수: $turns"
 
 echo
-echo "── [2/4] 사람 사진 → 중앙 데이터셋 (~/reachy-data/persons)"
+echo "── [2/4] 사람 사진 → 04-Archives/person-dataset/persons"
 if [ "$PERSONS" = 1 ]; then
   python3 ops/sync_persons.py $PURGE || echo "   ! 사진 동기화 실패 (계속 진행)"
 else
@@ -75,9 +75,9 @@ echo "── [4/4] 노트 제안 (실제 로그 답변 재사용, 실행약속/�
 python3 broker/build_notes.py --logs "$PI_LOGS" $MERGE
 
 echo
-echo "── 사람 이미지 폴더 갱신 (~/reachy-data/dataset)"
+echo "── 사람 이미지 폴더 갱신 (04-Archives/person-dataset/dataset)"
 if [ "$PERSONS" = 1 ]; then
-  python3 ops/persons_export.py --out ~/reachy-data/dataset --crop-persons 2>&1 \
+  python3 ops/persons_export.py --out --crop-persons 2>&1 \
     | tail -4 || echo "   ! 추출 실패 (계속 진행)"
 else
   echo "   건너뜀 (--no-persons)"

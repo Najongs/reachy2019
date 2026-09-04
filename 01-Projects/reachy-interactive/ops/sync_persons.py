@@ -4,7 +4,7 @@
 오래 그리고 많이 모을수록 좋다. 그래서 사진은 Pi 에서 찍고, 이 스크립트가
 주기적으로 DGX 로 옮겨 중앙 DB에 합친다.
 
-중앙 저장소 (기본): ~/reachy-data/persons/
+중앙 저장소 (기본): 04-Archives/person-dataset/persons/
     persons.db                 합쳐진 메타데이터
     <robot>/YYYY-MM-DD/*.jpg   원본 사진 (로봇별로 분리)
 
@@ -25,7 +25,11 @@ import subprocess
 import sys
 import tempfile
 
-DEFAULT_LOCAL = os.path.expanduser('~/reachy-data/persons')
+# 저장소 안(04-Archives/person-dataset)에 둔다. 대화 로그와 같은 성격이라
+# 같은 자리에 모이는 편이 찾기 쉽다. .gitignore 에 들어 있어 커밋에는 안 섞인다.
+DEFAULT_LOCAL = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', '..', '..', '04-Archives', 'person-dataset', 'persons'))
 REMOTE_DIR = 'reachy_logs/persons'
 # ssh 는 포트가 -p, scp 는 -P 다. 섞어 쓰면 scp 가 -p 를 "시각 보존"으로 읽어
 # 엉뚱하게 실패한다.

@@ -243,15 +243,34 @@ Pi: presence.py --collect-people        DGX: sync_persons.py        persons_expo
     ~/reachy_logs/persons/                ~/reachy-data/persons/     ~/reachy-data/dataset/
 ```
 
-**DGX 에서 어디에 쌓이나**
+**DGX 에서 어디에 쌓이나** (저장소 안, `.gitignore` 에 들어 있어 커밋에는 안 섞인다)
 
 | 위치 | 무엇 | 성격 |
 |---|---|---|
-| `~/reachy-data/persons/` | `persons.db` + `reachy/YYYY-MM-DD/*.jpg` | **모으는 곳.** 원본, 지우지 않는다 |
-| `~/reachy-data/dataset/` | `images/` `faces/` `persons/` `index.csv` | **뽑아 낸 것.** 조건으로 거른 사본, 언제든 다시 만들 수 있다 |
+| `04-Archives/person-dataset/persons/` | `persons.db` + `reachy/YYYY-MM-DD/*.jpg` | **모으는 곳.** 원본, 지우지 않는다 |
+| `04-Archives/person-dataset/dataset/` | `images/` `faces/` `persons/` `index.csv` | **뽑아 낸 것.** 조건으로 거른 사본, 언제든 다시 만들 수 있다 |
+
+대화 로그(`04-Archives/conversation-logs/`)와 같은 성격(개인정보·계속 쌓임)이라
+같은 자리에 둔다.
 
 `persons/` 에는 사람 상자대로 자른 이미지가 들어간다(학습에 바로 쓰는 용도).
 `bash ops/daily_update.sh` 가 둘 다 갱신한다.
+
+**예전 사진에 상자 채우기.** 사람 위치를 저장하기 시작한 것은 나중이라 그 전
+사진은 상자가 비어 있다. `ops/backfill_person_boxes.py` 가 채운다. 로봇에서는
+armv7l 이라 가벼운 MobileNet-SSD 를 쓸 수밖에 없지만, DGX 에서는 그럴 이유가
+없어 torchvision 의 COCO 사전학습 Faster R-CNN 을 쓴다 - 실측으로 15장 중
+13장을 신뢰도 0.99~1.00 으로 잡았다(SSD 로는 4장뿐이었다). torch 는 학습용
+venv 에 있으므로 그 파이썬으로 돌린다:
+
+```bash
+/home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3 \
+    ops/backfill_person_boxes.py --write
+python3 ops/persons_export.py --out --crop-persons
+```
+
+GPU 는 기본으로 쓰지 않는다 - 이 DGX 는 다른 학습이 8장을 100% 로 쓰고 있어
+끼어들면 그쪽이 느려진다. 사진 수백 장은 CPU 로 충분하다.
 
 **언제 찍나** — **SSD 가 사람을 검출했을 때만** 찍는다(신뢰도 0.5 이상).
 Haar 얼굴 검출은 '찍을지'를 정하지 않고 **얼굴 상자만 얹는** 역할이다. 예전에는

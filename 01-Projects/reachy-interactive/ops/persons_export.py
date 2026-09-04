@@ -6,7 +6,7 @@
 
 사용:
     python3 ops/persons_export.py --list            # 어떤 게 걸러지는지 미리 보기
-    python3 ops/persons_export.py --out ~/ds/v1     # 실제로 내보내기
+    python3 ops/persons_export.py --out             # 기본 폴더로 내보내기
     python3 ops/persons_export.py --faces-only --min-face 80 --out ~/ds/faces
     python3 ops/persons_export.py --day 2026-09-04 --out ~/ds/oneday
 
@@ -22,8 +22,12 @@ import shutil
 import sqlite3
 import sys
 
-DEFAULT_DB = os.path.expanduser('~/reachy-data/persons/persons.db')
-DEFAULT_ROOT = os.path.expanduser('~/reachy-data/persons')
+_BASE = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', '..', '..', '04-Archives', 'person-dataset'))
+DEFAULT_DB = os.path.join(_BASE, 'persons', 'persons.db')
+DEFAULT_ROOT = os.path.join(_BASE, 'persons')
+DEFAULT_OUT = os.path.join(_BASE, 'dataset')
 
 
 def select(conn, args):
@@ -77,7 +81,8 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--db', default=DEFAULT_DB)
     ap.add_argument('--root', default=DEFAULT_ROOT, help='사진이 있는 폴더')
-    ap.add_argument('--out', help='내보낼 폴더 (없으면 목록만 보여 준다)')
+    ap.add_argument('--out', nargs='?', const=DEFAULT_OUT,
+                    help='내보낼 폴더 (기본: 04-Archives/person-dataset/dataset)')
     ap.add_argument('--list', action='store_true', help='목록만 출력')
     ap.add_argument('--faces-only', action='store_true',
                     help='얼굴이 잡힌 사진만 (움직임만으로 찍힌 것 제외)')
