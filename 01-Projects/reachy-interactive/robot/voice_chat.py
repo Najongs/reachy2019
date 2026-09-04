@@ -413,6 +413,36 @@ def wants_vision(text):
 
 _CAMERA_LOCK = None
 
+# Stable camera names from ops/99-reachy-cameras.rules. /dev/videoN numbering
+# swaps on boot and the two head cameras are NOT equivalent (one is sharply
+# focused, the other badly out of focus), so resolve the pinned symlink to an
+# index instead of trusting the number.
+CAMERA_ALIASES = {'main': '/dev/reachy-cam-main', 'sub': '/dev/reachy-cam-sub'}
+
+
+def resolve_camera(name_or_index, default=0):
+    """'main'/'sub'/'/dev/videoN'/int -> a V4L2 index OpenCV can open."""
+    if isinstance(name_or_index, int):
+        return name_or_index
+    value = str(name_or_index)
+    path = CAMERA_ALIASES.get(value, value)
+    if path.startswith('/dev/'):
+        try:
+            real = os.path.realpath(path)
+            digits = ''.join(c for c in os.path.basename(real) if c.isdigit())
+            if digits:
+                return int(digits)
+        except Exception:
+            pass
+        logger.warning('Camera %s not found - falling back to index %d',
+                       path, default)
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 
 def grab_frame(reachy, side='left', camera_index=0):
     """Return one BGR frame of the robot's view (ndarray), or None.
@@ -438,6 +468,23 @@ def _grab_frame_locked(cv, reachy, side, camera_index):
     head = reachy.head
     img = None
 
+    # The pinned USB camera comes FIRST: the SDK's left/right camera objects do
+    # not say which physical device they opened, and the two head cameras
+    # differ a lot in focus. Only fall back to the SDK objects if the pinned
+    # device cannot be opened.
+    idx = resolve_camera(camera_index, default=-1)
+    if idx >= 0:
+        capture = cv.VideoCapture(idx)
+        try:
+            frame = None
+            success = False
+            for _ in range(5):        # first frames are dark while AE settles
+                success, frame = capture.read()
+            if success and frame is not None:
+                return frame
+        finally:
+            capture.release()
+
     # 1) left_camera / right_camera attributes (this repo's head.py)
     other = 'right' if side == 'left' else 'left'
     for name in (side, other):
@@ -459,7 +506,7 @@ def _grab_frame_locked(cv, reachy, side, camera_index):
             logger.warning('head.get_image() failed', exc_info=True)
 
     # 3) open the device directly - always available while video0 works
-    capture = cv.VideoCapture(camera_index)
+    capture = cv.VideoCapture(resolve_camera(camera_index))
     try:
         frame = None
         success = False
@@ -1371,8 +1418,9 @@ def main():
                         help="don't attach camera frames to see-related questions")
     parser.add_argument('--camera-side', default='left', choices=['right', 'left'],
                         help='which head camera to try first (left = /dev/video0)')
-    parser.add_argument('--camera-index', type=int, default=0,
-                        help='V4L2 device index for the direct-OpenCV fallback')
+    parser.add_argument('--camera-index', default='main',
+                        help="which head camera: 'main' (the sharp one, pinned "
+                             "by udev), 'sub' (spare), or a raw V4L2 index")
     parser.add_argument('--no-presence', action='store_true',
                         help='disable the local face-detection people watcher')
     parser.add_argument('--attend', action='store_true',

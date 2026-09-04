@@ -1,0 +1,10 @@
+[Unit]
+Description=Logitech C270 tuning for the hallway demo (V4L2 resets on replug)
+
+[Service]
+Type=oneshot
+ExecStart=/home/pi/Documents/camera_tune.sh /dev/video0
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

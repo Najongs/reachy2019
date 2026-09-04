@@ -1,0 +1,21 @@
+# Stable names for the two head cameras.
+#
+# /dev/videoN numbering swaps depending on enumeration order at boot, and the
+# two C270s are NOT equivalent: measured focus sharpness was 212 (good) vs 62
+# (badly out of focus). Without pinning, a reboot could silently hand the robot
+# the blurry one. Match on the USB serial instead:
+#
+#   4F92B690 -> /dev/reachy-cam-main   the sharp one, used for vision
+#   047194D0 -> /dev/reachy-cam-sub    spare / future stereo
+#
+# Each camera exposes TWO nodes (capture + metadata) and udev reports
+# ID_V4L_CAPABILITIES=:capture: for BOTH, so that cannot separate them - the
+# symlink landed on the metadata node. ATTR{index}=="0" is the real
+# discriminator: index 0 is the capture node, index 1 the metadata one.
+#
+# Install (on the Pi):
+#   sudo cp ops/99-reachy-cameras.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+#   ls -l /dev/reachy-cam-*
+SUBSYSTEM=="video4linux", ATTRS{serial}=="4F92B690", ATTR{index}=="0", SYMLINK+="reachy-cam-main"
+SUBSYSTEM=="video4linux", ATTRS{serial}=="047194D0", ATTR{index}=="0", SYMLINK+="reachy-cam-sub"
