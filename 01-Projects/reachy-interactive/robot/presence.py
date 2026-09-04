@@ -141,11 +141,19 @@ class PresenceWatcher(object):
         return (x + fw / 2.0) / W, (y + fh / 2.0) / H
 
     def _update_motion(self, gray):
-        """Frame differencing: how much the scene changed, and where."""
+        """Frame differencing: how much the scene changed, and where.
+
+        카메라가 머리에 달려 있으므로, 목이 움직인 사이에 찍힌 두 프레임을 빼면
+        장면이 바뀐 게 아니라 카메라가 움직인 것이다. 그걸 '움직임'으로 세면
+        로봇은 자기가 고개를 돌린 것을 보고 사람이 지나갔다고 착각한다.
+        그래서 목이 멎어 있는 동안 연속으로 찍힌 두 프레임만 비교한다.
+        """
         cv = self._cv
+        still = self.head_still() > HEAD_SETTLE if self.head_still else True
         prev = self._prev_gray
-        self._prev_gray = gray
-        if prev is None or prev.shape != gray.shape:
+        # 목이 움직였으면 직전 프레임은 기준으로 못 쓴다. 버리고 다시 모은다.
+        self._prev_gray = gray if still else None
+        if prev is None or not still or prev.shape != gray.shape:
             return
 
         diff = cv.absdiff(gray, prev)
@@ -168,6 +176,12 @@ class PresenceWatcher(object):
             t0 = time.time()
             try:
                 frame = self.grab()
+                if frame is None:
+                    # 프레임이 안 오면 얼굴 검출도 수집도 전부 멈춘 것이다.
+                    # 조용히 지나가면 안 되므로 이따금 알린다.
+                    if time.time() - self._diag_at > DIAG_EVERY:
+                        self._diag_at = time.time()
+                        logger.warning('presence: 카메라 프레임을 못 받고 있습니다')
                 if frame is not None:
                     gray = self._to_gray(frame)
                     self._update_motion(gray)
@@ -212,18 +226,21 @@ class PresenceWatcher(object):
                             # 왜 안 찍혔는지 남겨 둔다. 이게 없으면 '조용해서'
                             # 안 찍힌 건지 '조건이 계속 막혀서'인지 알 수 없다.
                             self._diag_at = now
+                            since = now - self.motion_at if self.motion_at else -1
+                            still = self.head_still() if self.head_still else -1
                             logger.info(
-                                '수집 대기: 변화넓이 %.3f · 움직임 %.1fs 전 · '
+                                '수집 대기: 변화넓이 %.3f · 마지막 움직임 %s · '
                                 '목 멈춘 지 %.1fs',
-                                self.motion_area, now - self.motion_at,
-                                self.head_still() if self.head_still else -1)
+                                self.motion_area,
+                                ('%.1fs 전' % since) if since >= 0 else '없음',
+                                min(still, 999.0))
 
                     if self.person and now - self.last_seen > self.forget:
                         logger.info('Person gone')
                         self.person = False
                         self.left_at = now
             except Exception:
-                logger.debug('Presence detection failed', exc_info=True)
+                logger.exception('Presence detection failed')
 
             wait = self.interval - (time.time() - t0)
             if wait > 0:

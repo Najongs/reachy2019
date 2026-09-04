@@ -505,26 +505,53 @@ def grab_frame(reachy, side='left', camera_index=0):
         return _grab_frame_locked(cv, reachy, side, camera_index)
 
 
+SDK_CAMERA_WARMUP = 4.0   # 연결 직후 첫 프레임을 기다려 주는 최대 시간(초)
+
+
+def check_sdk_camera(camera_index='main'):
+    """SDK 가 여는 장치가 우리가 쓰려던 카메라와 같은지 확인하고 알린다.
+
+    SDK 는 /dev/video0 을 고정으로 연다(BackgroundVideoCapture(0)). udev 로
+    붙인 이름(reachy-cam-main)이 다른 노드를 가리키면, 로봇은 아무 말 없이
+    흐린 쪽 카메라로 보게 된다. 두 카메라의 선명도는 실측 212 대 62 로 차이가
+    크므로 조용히 넘어가면 안 된다.
+    """
+    link = '/dev/reachy-cam-%s' % camera_index if camera_index in ('main', 'sub') \
+        else None
+    if link is None or not os.path.exists(link):
+        return
+    target = os.path.realpath(link)
+    if target == '/dev/video0':
+        logger.info('카메라 확인: SDK 가 여는 video0 = %s (%s)', link, camera_index)
+    else:
+        logger.warning(
+            '카메라 불일치: SDK 는 /dev/video0 을 여는데 %s 는 %s 입니다. '
+            '로봇이 의도한 카메라로 보고 있지 않습니다 (USB 포트를 바꿔 꽂으세요).',
+            link, target)
+
+
 def _grab_frame_locked(cv, reachy, side, camera_index):
     head = reachy.head
     img = None
 
-    # The pinned USB camera comes FIRST: the SDK's left/right camera objects do
-    # not say which physical device they opened, and the two head cameras
-    # differ a lot in focus. Only fall back to the SDK objects if the pinned
-    # device cannot be opened.
-    idx = resolve_camera(camera_index, default=-1)
-    if idx >= 0:
-        capture = cv.VideoCapture(idx)
-        try:
-            frame = None
-            success = False
-            for _ in range(5):        # first frames are dark while AE settles
-                success, frame = capture.read()
+    # SDK 카메라가 먼저다. connect() 가 이미 /dev/video0 을 열어 백그라운드로
+    # 스트리밍하고 있어서, 같은 장치를 우리가 또 열면 open 이 영영 돌아오지
+    # 않는다(실측: VideoCapture 생성에서 무한 대기). 그러면 presence 스레드가
+    # 첫 프레임에서 멎어 얼굴 검출·복도 인사·사람 수집이 전부 조용히 죽는다.
+    # 이미 열려 있는 스트림을 그대로 쓰는 것이 유일하게 안전한 길이다.
+    camera = getattr(head, 'camera', None)
+    if camera is not None and hasattr(camera, 'read'):
+        success, frame = camera.read()
+        if success and frame is not None:
+            return frame
+        # 연결 직후에는 백그라운드 스레드가 아직 첫 프레임을 못 받았을 수 있다
+        # (실측 약 2.4초). 잠깐만 기다려 준다.
+        for _ in range(int(SDK_CAMERA_WARMUP / 0.3)):
+            time.sleep(0.3)
+            success, frame = camera.read()
             if success and frame is not None:
                 return frame
-        finally:
-            capture.release()
+        logger.warning('SDK 카메라에서 프레임을 못 받았습니다')
 
     # 1) left_camera / right_camera attributes (this repo's head.py)
     other = 'right' if side == 'left' else 'left'
@@ -546,7 +573,11 @@ def _grab_frame_locked(cv, reachy, side, camera_index):
         except Exception:
             logger.warning('head.get_image() failed', exc_info=True)
 
-    # 3) open the device directly - always available while video0 works
+    # 3) 장치를 직접 연다. SDK 카메라가 있으면 그 장치는 이미 SDK 것이므로
+    #    절대 열지 않는다 (열면 블록된다). camera_check.py 처럼 SDK 없이 쓰는
+    #    경우에만 여기까지 온다.
+    if camera is not None:
+        return img
     capture = cv.VideoCapture(resolve_camera(camera_index))
     try:
         frame = None
@@ -1634,6 +1665,7 @@ def main():
                 # 알려 주면, 화면이 안정된 순간에만 움직임을 사람으로 본다.
                 from say_and_move import head_still_for
                 watcher.head_still = head_still_for
+                check_sdk_camera(args.camera_index)
 
                 # 지나가는 사람을 데이터셋으로 모은다. 저장 여부(간격·장수·용량·
                 # 보관기간)는 PersonDB 가 스스로 판단하므로 여기서는 넘겨만 준다.
