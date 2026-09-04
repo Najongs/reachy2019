@@ -230,6 +230,8 @@ class PresenceWatcher(object):
         self.motion_at = time.time()
 
     def _loop(self):
+        # 참고: 찍는 판단은 '사람이 검출됐는가'로만 한다. 화면 변화는 사람
+        # 검출기를 언제 돌릴지 정하는 힌트로만 쓴다.
         while not self._stop.is_set():
             t0 = time.time()
             try:
@@ -289,23 +291,15 @@ class PresenceWatcher(object):
                             except Exception:
                                 logger.debug('on_person failed', exc_info=True)
                     else:
-                        # 얼굴은 안 보이지만 화면이 움직인다 - 옆모습이나 뒷모습으로
-                        # 지나가는 사람일 수 있다. 복도에서는 이쪽이 더 흔하다.
-                        # 단, 머리가 도는 중이면 화면 전체가 흐르므로 믿지 않는다.
-                        # '지금 움직이는가'가 아니라 '최근에 움직였는가'로 본다.
-                        # 사람이 지나가면 idle 모션이 그쪽으로 고개를 돌리는데,
-                        # 그 동안은 화면을 믿을 수 없다. 고개가 멎은 직후를 노려
-                        # 찍어야 그 사람을 놓치지 않는다. 멈춰 선 사람도 잡힌다.
-                        if (self.on_person is not None
-                                and self.head_pose is not None
-                                and MOTION_MIN < self.motion_area < MOTION_MAX
+                        # 화면이 움직였다는 것만으로는 찍지 않는다. 그렇게 했더니
+                        # 빈 복도 사진만 쌓였다(자동노출·머리 움직임·조명 변화가
+                        # 전부 '움직임'으로 보인다). 대신 움직임이 보이면 다음
+                        # 폴링에서 사람 검출기를 곧바로 한 번 더 돌린다.
+                        # 찍는 것은 사람이 실제로 검출됐을 때뿐이다.
+                        if (MOTION_MIN < self.motion_area < MOTION_MAX
                                 and now - self.motion_at < MOTION_RECENT
                                 and self._still):
-                            try:
-                                self.on_person(frame, None)
-                            except Exception:
-                                logger.debug('on_person(motion) failed',
-                                             exc_info=True)
+                            self._net_at = 0.0     # 다음 바퀴에 바로 확인
                         elif (self.on_person is not None
                                 and now - self._diag_at > DIAG_EVERY):
                             # 왜 안 찍혔는지 남겨 둔다. 이게 없으면 '조용해서'
