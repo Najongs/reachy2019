@@ -18,6 +18,53 @@ robot/voice_chat.py                                broker/llm_broker.py
 
 **설계 원칙**: 인터넷·LLM 없이도 되는 건 전부 로컬에서 (인사·FAQ·목·물체주시·오프라인 STT). LLM 은 열린 대화(무료 로컬)와 새 동작 생성(opus)에만.
 
+## 빠른 확인 (나중에 돌려볼 때 여기부터)
+
+```bash
+# [DGX] 전부 한 화면에 — 이거 하나면 대개 끝난다
+bash ops/status.sh              # 요약    ●=정상 ✗=문제
+bash ops/status.sh -v           # 최근 로그·워치독 기록까지
+
+# [DGX] 로봇에게 직접 말 걸어 보기 (스피커로 나온다)
+curl -s -H 'X-Auth-Token: reachy2019' -H 'Content-Type: application/json' \
+     http://127.0.0.1:8080/reply -d '{"text":"너 이름이 뭐야?"}'
+# -> {"reply": "저는 리치예요. ..."}   'EXAONE' 이라고 하면 페르소나가 잘린 것
+
+# [DGX] 얼마나 쓰였고 얼마나 실패했나
+curl -s http://127.0.0.1:8080/stats | python3 -m json.tool
+
+# [DGX] 로봇에 들어가기 / 코드 배포
+ssh -p 2222 pi@localhost
+bash ops/deploy.sh              # 파일 보내고 md5 대조까지
+
+# [로봇] 지금 뭐 하고 있나
+tail -f ~/reachy_logs/voice_chat.log
+grep -a 심장박동 ~/reachy_logs/voice_chat.log | tail -3
+bash ~/Documents/brightness_report.sh    # 시간대별 화면 밝기(수면 문턱값 정할 때)
+```
+
+**뭔가 이상할 때 보는 순서**
+
+| 증상 | 먼저 볼 것 |
+|---|---|
+| 대답을 아예 안 한다 | `ops/status.sh` → `voice_chat` 과 `pi_tunnel` 이 ● 인가 |
+| "음, 잘 모르겠어요" 만 한다 | `/health` 가 503 인가 → Ollama 문제. 워치독이 2분 안에 고친다 |
+| 자기를 EXAONE 이라고 한다 | 페르소나가 잘렸다 → 브로커의 `--ollama-ctx` |
+| 움직이지 않는다 | 모터 전원. 로그에 `움직임 없이 소리만 내는 모드` 가 있나 |
+| 밤인데 소리를 낸다 | `--quiet-hours` / `--dark-below` (`voice_chat.service`) |
+| 낮인데 조용하다 | 잠들었나 → `심장박동:` 줄이 `자는 중` 인지 |
+
+**서비스 다시 올리기**
+
+```bash
+systemctl --user restart reachy-broker      # [DGX] 브로커
+systemctl --user restart ollama             # [DGX] 모델 서버 (재적재 ~40초)
+ssh -p 2222 pi@localhost 'sudo systemctl restart voice_chat'   # [로봇]
+ssh -p 2222 pi@localhost 'sudo systemctl restart pi_tunnel'    # [로봇] 터널
+```
+
+손대지 않아도 워치독이 2분(DGX)·5분(로봇)마다 확인하고 스스로 되살린다.
+
 ## 전체 구조 (무엇이 어디서 도는가)
 
 ```
@@ -271,6 +318,45 @@ edge 를 못 찾은 것이다.
 **머리 움직임**
 - 목은 Orbita 3디스크 병렬 로봇 — 시선으로 제어하므로 팔 키프레임 파이프라인 밖. `run_head_gesture` 로 끄덕임/도리도리/상하좌우/젖히기/한바퀴를 로컬 실행
 - **속도 상한 설정이 없다** → 글라이드 시간이 유일한 제어(begin_ramp 1.3s, home 1.8s, 핸드팔로우 램프 1.2s·τ0.35)
+
+## 프로세스 관리 (두 대를 어떻게 살려 두는가)
+
+```
+bash ops/status.sh        # DGX + 로봇 전체 상태 한 화면
+bash ops/status.sh -v     # 최근 로그·워치독 기록까지
+```
+
+| | DGX | 로봇(Pi) |
+|---|---|---|
+| 서비스 | `ollama.service`, `reachy-broker.service` (`--user` + linger) | `voice_chat`, `pi_tunnel`, `pi_viewer`, `respeaker_gain` |
+| 죽으면 | systemd `Restart=always` | systemd `Restart=always` |
+| 멎으면 | `ops/broker_watchdog.sh` (cron 2분) | `ops/pi_watchdog.sh` (cron 5분) |
+| 로그 회전 | 워치독이 스스로 자름 | `ops/logrotate-reachy` → `/etc/logrotate.d/reachy` |
+
+**'죽는 것'과 '멎는 것'은 다르다.** systemd 는 프로세스가 사라져야 반응한다.
+실제로 겪은 고장은 대부분 떠 있는데 멎은 쪽이었다 — 그래서 감시가 따로 있다.
+
+**`/health` 는 진짜로 확인한다.** 예전에는 브로커가 떠 있으면 무조건 200 이라,
+Ollama 가 죽어도 워치독이 아무것도 하지 않고 로봇은 하루 종일 캔 답변만 했다.
+지금은 Ollama 연결·모델 설치·모델 적재까지 보고 실패하면 **503** 을 준다. 워치독은
+그 내용을 읽고 브로커를 살릴지 Ollama 를 살릴지 고른다. 모델이 내려가 있으면
+미리 데워 둔다(안 그러면 다음 방문객이 40초 적재를 기다린다).
+
+```
+GET /health   {"ok":true,"backend":"OllamaBackend","model":"exaone3.5:7.8b","loaded":true}
+GET /stats    {"counts":{"stream":212,"stream_error":3},
+               "latency_s":{"stream":{"p50":0.41,"p90":0.68}}}
+```
+
+**`/stats` 는 로그를 안 뒤져도 문제를 보이게 한다.** 대화 8.7%가 통째로 실패하던
+시절, 그 사실은 나중에 로그를 파고 나서야 드러났다. 이제 `status.sh` 가 건수와
+실패율과 첫소리 지연을 바로 보여 준다.
+
+**로봇의 심장박동.** `voice_chat` 이 5분마다 `심장박동:` 줄을 남긴다. 마이크
+스트림이 물리거나 카메라가 프레임을 안 주면 프로세스는 살아 있어도 이 줄이
+끊긴다 — `pi_watchdog.sh` 가 15분 침묵을 보고 서비스를 다시 올린다. 두 워치독 다
+**쿨다운(10분)** 이 있다: 재시작으로 안 낫는 고장을 2분마다 영원히 흔드는 것이 더
+나쁘다.
 
 ## 밤에는 잔다 (수면 모드)
 
@@ -602,6 +688,27 @@ presence 스레드가 첫 프레임에서 멎고, 얼굴 검출·복도 인사·
 
 군집 결과를 적을 자리로 `person_boxes.identity_id` 를 비워 두었다. 나중에
 군집 도구가 채우면 된다.
+
+**수집이 조용히 멈추는 것을 막는다.** 이번 여름에 여러 번 그런 일이 있었다 —
+카메라가 걸려 감시 스레드가 통째로 멈췄고, 시험하다 서비스를 멈춰 놓고
+되살리지 않았고, 얼굴 검출기가 사람을 못 잡았다. **어느 경우에도 겉으로는 아무
+일 없어 보였다.**
+
+- 로봇 쪽: 감시가 한 바퀴 돌 때마다 시각을 남기고, 45초 넘게 멎으면
+  `ERROR 사람 감시가 N초째 멈춰 있습니다` 를 로그에 찍는다. 돌아오면 회복도 알린다.
+- 여기 쪽: `ops/collect_health.py` 가 서비스·수집 설정·마지막 촬영 시각·SD 여유를
+  한 번에 확인하고, 문제가 있으면 무엇을 보라고 알려 준다.
+  `daily_update.sh` 가 맨 처음에 돌린다.
+
+```
+로봇: active · 가동 3시간 12분 · 재시작 0회
+사진: 모두 41장 · 오늘 41장 · SD 여유 8822MB
+마지막 촬영: 2026-09-04 18:01:33 (1.6시간 전)
+수집 정상.
+```
+
+경과 시간은 **로봇에서 잰다**. 이 DGX 는 UTC, 로봇은 KST 라 여기서 계산하면
+9시간이 어긋난다(처음에 -7.4시간으로 나왔다).
 
 **사진과 DB 는 항상 같이 간다.** 사진 저장에 실패하면 행을 넣지 않는다
 (`cv2.imwrite` 는 실패해도 예외를 던지지 않는다 — 실제로 18행 중 3행이 파일 없이

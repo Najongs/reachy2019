@@ -71,11 +71,18 @@ $PI 'for u in voice_chat pi_tunnel pi_viewer respeaker_gain; do
          "$u" "$(systemctl is-active $u)" "$(systemctl show $u -p NRestarts --value)"
      done
      echo "  · 가동 $(uptime -p 2>/dev/null | sed "s/up //"), 메모리 $(free -m | awk "/^Mem/{print \$3\"/\"\$2\"MB\"}"), 디스크 $(df -h / | awk "NR==2{print \$5}")"
-     B=$(grep -a "화면 밝기" ~/reachy_logs/voice_chat.log 2>/dev/null | tail -1 | awk "{for(i=1;i<=NF;i++) if(\$i==\"밝기\") print \$(i+1)}")
      S=$(cd ~/Documents && python3 -c "
 from sleep_mode import SleepWatcher
 print(\"근무시간 밖(잘 시간)\" if SleepWatcher(None).in_quiet_hours() else \"근무시간\")" 2>/dev/null)
-     echo "  · 지금 $S, 마지막 화면 밝기 ${B:-(아직 없음)}"
+     # 심장박동 줄이 지금 상태다. 로그 전체에서 밝기를 긁으면 모터가 꺼져
+     # 카메라가 없어진 뒤에도 어제 낮 값을 보여 준다.
+     HB=$(grep -a "심장박동" ~/reachy_logs/voice_chat.log 2>/dev/null | tail -1)
+     if [ -n "$HB" ]; then
+       AGE=$(( $(date +%s) - $(stat -c %Y ~/reachy_logs/voice_chat.log) ))
+       echo "  · 지금 $S | ${HB#*심장박동: } (로그 ${AGE}초 전)"
+     else
+       echo "  · 지금 $S | 심장박동 아직 없음 (기동 직후)"
+     fi
      M=$(grep -ac "연결하지 못했습니다" ~/reachy_logs/voice_chat.log 2>/dev/null)
      tail -n 200 ~/reachy_logs/voice_chat.log 2>/dev/null | grep -q "움직임 없이 소리만" \
        && echo "  · 모터: 꺼져 있음 (소리만 내는 모드)" || echo "  · 모터: 연결됨"

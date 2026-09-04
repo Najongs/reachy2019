@@ -12,7 +12,7 @@ $SIM/sim_play.py $SIM/sim_viewer.html \
 $CFG/quick_notes.json $CFG/stt_corrections.json $CFG/cached_lines.json \
 $CFG/campaign_lines.json \
 $OPS/pi_tunnel.service $OPS/pi_viewer.service $OPS/respeaker_gain.py \
-$OPS/brightness_report.sh $OPS/logrotate-reachy"
+$OPS/brightness_report.sh $OPS/logrotate-reachy $OPS/pi_watchdog.sh"
 # reachy.glb 는 대용량 → 03-Resources 에서 별도(있을 때만)
 GLB=../../03-Resources/3d-models/reachy.glb
 

@@ -32,6 +32,10 @@ done
 
 mkdir -p "$PI_LOGS"
 
+echo "── [0/4] 수집이 살아 있나"
+python3 ops/collect_health.py || true      # 문제가 있어도 나머지는 계속 돈다
+
+echo
 echo "── [1/4] Pi 로그 당겨오기 (역터널 2222)"
 PULLED=0
 if ssh -p 2222 -o BatchMode=yes -o ConnectTimeout=10 pi@localhost true 2>/dev/null; then
