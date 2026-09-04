@@ -777,13 +777,33 @@ class TalkingHead(object):
             self.step(t)
             time.sleep(1 / self.freq)
 
+    # 중립 자세의 시선. point_head 와 같은 좌표계(거리 0.5)로 적어 둔다.
+    HOME_GAZE = (0.0, -0.05)
+
     def home(self, duration=1.8):
-        """Bring the head back to its neutral pose, slowly and gently."""
+        """Bring the head back to its neutral pose, slowly and gently.
+
+        예전에는 look_at 으로 돌아갔는데, look_at 은 head._soft_gaze 를 갱신하지
+        않는다. 그래서 말이 끝날 때마다 '로봇이 기억하는 시선'과 실제 자세가
+        어긋났고, 다음에 idle 이 그 어긋난 지점에서 출발하면서 첫 프레임에
+        확 튀었다 - 대기 중에 이따금 '팍' 하고 움직이는 원인 중 하나다.
+        point_head 로 부드럽게 미끄러지면 기억과 실제가 항상 같이 간다.
+        """
         self.reachy.head.left_antenna.goto(0, duration, interpolation_mode='minjerk')
         self.reachy.head.right_antenna.goto(0, duration, interpolation_mode='minjerk')
-        # Gentle forward-and-slightly-down; NOT GAZE_TILT*2 (that bowed the
-        # head ~31 deg and it looked stuck).
-        self.reachy.head.look_at(1, 0, -0.1, duration=duration, wait=True)
+
+        y0, z0 = getattr(self.reachy.head, '_soft_gaze', (0.0, 0.0))
+        ty, tz = self.HOME_GAZE
+        t0 = time.time()
+        while True:
+            t = (time.time() - t0) / duration
+            if t >= 1:
+                break
+            k = 0.5 - 0.5 * np.cos(np.pi * t)      # 부드러운 가감속
+            point_head(self.reachy, 0.5,
+                       y0 + (ty - y0) * k, z0 + (tz - z0) * k)
+            time.sleep(1 / self.freq)
+        point_head(self.reachy, 0.5, ty, tz)
 
 
 class IdleMotion(object):
