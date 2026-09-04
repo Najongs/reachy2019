@@ -1196,14 +1196,61 @@ def say_and_move(reachy, text=None, wav=None, speech=None, head=None, timeout=60
     speech = speech if speech is not None else Speech()
     head = head if head is not None else TalkingHead(reachy)
 
-    head.setup()
+    if not head_ready(head):
+        # 모터가 꺼져 있어도 말은 한다 (퇴근 뒤 모터를 내려 두는 운용).
+        _speak_only(speech, text=text, wav=wav, timeout=timeout)
+        return
+
     speech.start(text=text, wav=wav)
 
     try:
         head.run_while(lambda: speech.is_playing, timeout=timeout)
     finally:
         speech.stop()
-        head.home()
+        try:
+            head.home()
+        except Exception:
+            logger.debug('머리 제자리 복귀 실패', exc_info=True)
+
+
+# 모터가 꺼져 있다고 한 번만 알린다. 말할 때마다 경고를 쌓으면 밤새 로그가
+# 그것으로 찬다.
+_MOTORS_WARNED = [False]
+
+
+def head_ready(head):
+    """머리를 움직일 수 있으면 True. 모터가 꺼져 있으면 조용히 False.
+
+    퇴근할 때 모터를 내려 두는 운용이라, 밤에 누가 말을 걸면 head.setup() 이
+    죽은 버스에 쓰다가 예외를 던진다. 예전에는 그 예외가 대화 루프까지 올라가
+    서비스가 재시작을 되풀이했다. 목이 안 움직이는 것과 말을 못 하는 것은
+    다른 문제다 - 움직임만 포기하고 말은 계속한다.
+    """
+    if head is None:
+        return False        # 로봇에 아예 연결되지 않은 모드
+    try:
+        head.setup()
+        if _MOTORS_WARNED[0]:
+            _MOTORS_WARNED[0] = False
+            logger.info('머리를 다시 움직일 수 있습니다 (모터가 켜졌습니다)')
+        return True
+    except Exception:
+        if not _MOTORS_WARNED[0]:
+            _MOTORS_WARNED[0] = True
+            logger.warning('머리를 움직일 수 없습니다 (모터가 꺼져 있나요?) - '
+                           '말은 그대로 합니다')
+        else:
+            logger.debug('머리 준비 실패', exc_info=True)
+        return False
+
+
+def _speak_only(speech, text=None, wav=None, timeout=60):
+    """머리 없이 소리만 낸다. 모터가 꺼져 있을 때의 대체 경로."""
+    speech.start(text=text, wav=wav)
+    t0 = time.time()
+    while speech.is_playing and time.time() - t0 < timeout:
+        time.sleep(0.05)
+    speech.stop()
 
 
 def say_sentences_and_move(reachy, sentences, speech=None, head=None,
@@ -1230,7 +1277,9 @@ def say_sentences_and_move(reachy, sentences, speech=None, head=None,
     from threading import Event, Thread
 
     speech = speech if speech is not None else Speech()
-    head = head if head is not None else TalkingHead(reachy)
+    # 로봇에 연결되지 않았으면(모터 전원 내림) 머리는 없다. 말만 한다.
+    if head is None and reachy is not None:
+        head = TalkingHead(reachy)
 
     done = Event()
     spoken = []
@@ -1268,13 +1317,20 @@ def say_sentences_and_move(reachy, sentences, speech=None, head=None,
     thread.daemon = True
     thread.start()
 
-    head.setup()
-    try:
-        head.run_while(lambda: not done.is_set(), timeout=timeout)
-    finally:
-        done.set()
+    if head_ready(head):
+        try:
+            head.run_while(lambda: not done.is_set(), timeout=timeout)
+        finally:
+            done.set()
+            speech.stop()
+            try:
+                head.home()
+            except Exception:
+                logger.debug('머리 제자리 복귀 실패', exc_info=True)
+    else:
+        # 모터가 꺼져 있다. 말이 끝날 때까지 기다리기만 한다.
+        done.wait(timeout)
         speech.stop()
-        head.home()
 
     return spoken
 

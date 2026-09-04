@@ -85,7 +85,7 @@ def all_spoken_lines():
     tags = _interleave(lines, invite)
     out = (list(HallwayGreeter.GREETINGS) + list(HallwayGreeter.PROMPTS)
            + list(lines) + list(invite))
-    for greeting in HallwayGreeter.GREETINGS:
+    for greeting in HallwayGreeter.SHORT_GREETINGS:
         for tag in tags:
             out.append(greeting + ' ' + tag)
     return list(dict.fromkeys(out))
@@ -125,6 +125,14 @@ class HallwayGreeter(object):
         '안녕하세요, 반가워요! 궁금한 게 있으면 뭐든 물어보세요!',
         '안녕하세요! 인사해봐 하고 말하면 제가 인사해드려요!',
     ]
+    # 캠페인 멘트를 덧붙일 때 쓰는 짧은 인사. 평소 인사말(44자)에 멘트까지
+    # 붙이면 15초가 넘어가는데, 복도를 지나가는 사람은 그 말을 끝까지 듣지
+    # 않는다. 붙일 때는 인사를 줄여서 전체가 한 호흡에 끝나게 한다.
+    SHORT_GREETINGS = [
+        '안녕하세요!',
+        '어서 오세요!',
+        '안녕하세요, 반가워요!',
+    ]
     PROMPTS = [
         '혹시 궁금한 거 있으세요? 편하게 말 걸어주세요!',
         '만세 해봐, 박수 쳐봐 처럼 말하면 제가 움직여요!',
@@ -138,7 +146,7 @@ class HallwayGreeter(object):
                  gesture_cooldown=300.0, max_prompts=1,
                  snap=None, snap_interval=90.0, snap_budget=200,
                  person_db=None, campaign=None, campaign_every=None,
-                 invite=None):
+                 invite=None, sleeper=None):
         self.watcher = watcher
         self.speech = speech
         self.head = head
@@ -146,6 +154,10 @@ class HallwayGreeter(object):
         self.executor = executor
         self.wave_segments = wave_segments
         self.turn_logger = turn_logger
+        # 밤에 불이 꺼지고 사람도 없으면 아예 말을 걸지 않는다. 인사는 이
+        # 로봇이 '스스로 시작하는' 유일한 소리라, 빈 사무실에서 가장 무서운
+        # 부분이다. (sleep_mode.SleepWatcher, 없으면 늘 깨어 있는 셈)
+        self.sleeper = sleeper
 
         self.greet_cooldown = greet_cooldown
         self.absence_reset = absence_reset
@@ -343,6 +355,12 @@ class HallwayGreeter(object):
 
                 prev_person = person
 
+                # 자는 중에는 인사도 손짓도 하지 않는다. 사람 검출과 방문
+                # 기록(appeared/left)은 위에서 그대로 남는다 - 밤에 누가
+                # 지나갔는지는 기록해 두되, 소리와 동작만 멈춘다.
+                if self.sleeper is not None and self.sleeper.asleep:
+                    continue
+
                 if person and not self._conversation_active():
                     if (not self._greeted_this_visit
                             and now - w.appeared_at >= 1.0):
@@ -381,10 +399,11 @@ class HallwayGreeter(object):
         return line
 
     def _greet(self):
-        line = random.choice(self.GREETINGS)
         tag = self._next_campaign_line()
         if tag:
-            line = line + ' ' + tag
+            line = random.choice(self.SHORT_GREETINGS) + ' ' + tag
+        else:
+            line = random.choice(self.GREETINGS)
         self._last_greet = time.time()
         self._greeted_this_visit = True
         # 인사 시각은 _last_prompt 가 아니라 여기에 남긴다. 예전에는 인사할 때

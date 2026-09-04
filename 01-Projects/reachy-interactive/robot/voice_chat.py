@@ -1184,6 +1184,10 @@ def precache_common_lines(speech, notes=None):
 STREAM_FIRST_WAIT = 25.0
 STREAM_NEXT_WAIT = 20.0
 
+# 살아 있다는 줄을 이만큼마다 남긴다. 감시 쪽(ops/pi_watchdog.sh)은 이보다
+# 넉넉히 기다렸다가 판단한다.
+HEARTBEAT_EVERY = 300.0
+
 
 def stream_reply(client, text, image=None):
     """브로커에 스트리밍으로 묻는다. (첫 문장, 나머지 이터레이터, 결과칸).
@@ -1248,7 +1252,7 @@ def _sentence_stream(first, rest):
 def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
              ack_delay=0.8, idle=None, vision=False, camera_side='left',
              camera_index=0, motion_handler=None, turn_logger=None, notes=None,
-             hallway=None, objvis=None, music_player=None):
+             hallway=None, objvis=None, music_player=None, sleeper=None):
     """Main conversation loop. Blocks until a stop word or Ctrl-C."""
     import random
 
@@ -1267,7 +1271,7 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
         _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
              say_and_move, random, speak, vision, camera_side, camera_index,
              motion_handler, turn_logger, notes, hallway, objvis,
-             music_player, say_sentences_and_move)
+             music_player, say_sentences_and_move, sleeper)
     finally:
         # Order matters: silence the greeter FIRST so its finally-block can't
         # restart idle after we stop it (then throw against a closed robot).
@@ -1282,13 +1286,28 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_and_move, random, speak, vision=False, camera_side='left',
          camera_index=0, motion_handler=None, turn_logger=None, notes=None,
          hallway=None, objvis=None, music_player=None,
-         say_sentences_and_move=None):
+         say_sentences_and_move=None, sleeper=None):
     from threading import Event, Thread
 
     last_kind = None   # 직전 턴 종류 (motion/chat) — 문맥 라우팅용
     offline_mute_until = 0.0   # STT 불가 안내 백오프 (한 번 말하고 점점 조용히)
     offline_backoff = 60.0
+    was_asleep = False   # 잠드는 '순간'을 알아야 팔을 한 번만 내린다
+    # 살아 있다는 표시를 이따금 남긴다. 프로세스가 떠 있는 것과 대화 루프가
+    # 실제로 돌고 있는 것은 다른 얘기다 - 마이크나 카메라에서 멎으면 systemd
+    # 는 아무것도 알아채지 못한다. ops/pi_watchdog.sh 가 이 줄이 끊기면
+    # 서비스를 다시 올린다.
+    heartbeat_at = 0.0
+    turns = 0
     while True:
+        if time.time() - heartbeat_at >= HEARTBEAT_EVERY:
+            heartbeat_at = time.time()
+            logger.info('심장박동: %s, 턴 %d건, 마지막 밝기 %s',
+                        '자는 중' if (sleeper is not None and sleeper.asleep)
+                        else '깨어 있음', turns,
+                        '%.3f' % sleeper.brightness()
+                        if sleeper is not None and sleeper.brightness() is not None
+                        else '없음')
         # Re-assert neck stiffness each loop: the Orbita disks can thermally
         # cut torque while holding the head, and go limp until re-gripped.
         if reachy is not None and getattr(reachy, 'head', None) is not None:
@@ -1301,15 +1320,35 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         if hallway is not None:
             hallway.end_turn()
 
-        # Small random motions while waiting keep the robot looking alive:
-        # the head glances/breathes and (with arms) the held pose breathes too,
-        # so the robot looks relaxed and welcoming rather than frozen.
-        # (While the hallway greeter is mid-speech it owns the head - skip.)
-        if idle is not None and not (hallway is not None and hallway.busy):
-            idle.start()
-        if motion_handler is not None:
-            motion_handler.executor.start_idle_arms()
+        # 불이 꺼지고 사람도 없으면 잔다. 빈 사무실에서 로봇이 혼자 움직이고
+        # 소리를 내면 무섭다. 자는 동안에도 마이크·카메라·터널·브로커는 그대로
+        # 살아 있다 - 멈추는 것은 '스스로 시작하는' 움직임과 소리뿐이다.
+        asleep = sleeper.update() if sleeper is not None else False
+        if asleep:
+            if idle is not None:
+                idle.stop()
+            if motion_handler is not None:
+                # 팔을 내리는 것은 '잠드는 순간' 한 번뿐이다. 자는 동안 매
+                # 바퀴 부르면 이미 내려간 팔에 대고 모터를 켰다 껐다 하며
+                # 밤새 소리를 낸다 - 없애려던 바로 그 소리다.
+                try:
+                    motion_handler.executor.stop_idle_arms()
+                    if not was_asleep:
+                        motion_handler.executor._cancel_settle()
+                        motion_handler.executor._settle_quietly()
+                except Exception:
+                    logger.debug('자는 동안 팔 내리기 실패', exc_info=True)
+        else:
+            # Small random motions while waiting keep the robot looking alive:
+            # the head glances/breathes and (with arms) the held pose breathes
+            # too, so the robot looks relaxed and welcoming rather than frozen.
+            # (While the hallway greeter is mid-speech it owns the head - skip.)
+            if idle is not None and not (hallway is not None and hallway.busy):
+                idle.start()
+            if motion_handler is not None:
+                motion_handler.executor.start_idle_arms()
 
+        was_asleep = asleep
         text = listener.listen()
 
         if text is None:
@@ -1321,6 +1360,11 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             # every captured noise - announce once, then back off (60s
             # doubling to 10min) instead of repeating the line all hour.
             now = time.time()
+            if asleep:
+                # 자는 중에는 이 안내도 하지 않는다. 아무도 없는 캄캄한
+                # 복도에서 로봇이 혼자 말하는 것이 바로 피하려던 일이다.
+                time.sleep(2)
+                continue
             if now >= offline_mute_until:
                 speak('지금 인터넷이 불안정한 것 같아요.')
                 offline_mute_until = now + offline_backoff
@@ -1335,6 +1379,16 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         if hallway is not None and hallway.is_echo(text):
             logger.info('Dropping self-echo: %r', text)
             continue
+
+        if asleep:
+            # 자는 중에 들린 소리. 사람이 정말 말을 건 것만 깨우고, 잡음은
+            # 못 들은 척한다 - 어두운 복도에서 로봇이 잡음에 반응해 혼자
+            # 말하기 시작하는 것이 무서운 부분이다.
+            if looks_like_noise(text, getattr(listener, 'last_engine', None)):
+                logger.info('자는 중 잡음은 지나칩니다: %r', text)
+                continue
+            sleeper.wake('말을 걸었습니다')
+            asleep = False
 
         if hallway is not None:
             hallway.begin_turn()   # hard-mute proactive greeting for this turn
@@ -1370,6 +1424,7 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         if motion_handler is not None:
             motion_handler.executor.stop_idle_arms()
 
+        turns += 1
         print('나:', text)
 
         # Music: play a short clip and dance to it (offline, local mp3s).
@@ -1588,9 +1643,10 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         # 문장이 완성되는 대로 받아 바로 말한다. 답을 다 기다렸다 합성하면
         # 생성(1.2초)과 음성 합성(1.5초)이 통째로 직렬이 되는데, 첫 문장은
         # 0.4초면 나오므로 첫 소리까지가 1초쯤 빨라진다.
+        # 로봇에 연결되지 않았어도(모터 전원 내림) 스트리밍은 쓴다 -
+        # say_sentences_and_move 가 머리 없이 말만 하는 길을 안다.
         first = rest = box = None
-        if (reachy is not None and speech is not None
-                and say_sentences_and_move is not None):
+        if speech is not None and say_sentences_and_move is not None:
             first, rest, box = stream_reply(client, text, image=image)
 
         if first is not None:
@@ -1643,11 +1699,13 @@ def startup_greeting(reachy, speech, head):
 
     The arms stay compliant (hanging); only the head and antennas move.
     """
-    from say_and_move import say_and_move
+    from say_and_move import head_ready, say_and_move
 
     try:
-        head.setup()
-        head.home(duration=1.5)
+        # 모터가 꺼져 있으면 자세를 잡는 건 건너뛰고 인사말만 한다.
+        # say_and_move 가 안에서 같은 판단을 한 번 더 한다.
+        if head_ready(head):
+            head.home(duration=1.5)
         say_and_move(reachy, text='안녕하세요, 리치예요! 편하게 말 걸어주세요.',
                      speech=speech, head=head)
     except Exception:
@@ -1713,6 +1771,19 @@ def main():
                         help='사람 사진 보관 기간(일). 0이면 삭제 안 함')
     parser.add_argument('--no-presence', action='store_true',
                         help='disable the local face-detection people watcher')
+    parser.add_argument('--no-sleep', action='store_true',
+                        help='밤에 불이 꺼져도 재우지 않는다 (기본은 재운다)')
+    parser.add_argument('--dark-below', type=float, default=0.15,
+                        help='이보다 어두우면 불이 꺼진 것으로 본다 (0~1)')
+    parser.add_argument('--light-above', type=float, default=0.25,
+                        help='이보다 밝으면 불이 켜진 것으로 본다 (0~1)')
+    parser.add_argument('--sleep-after', type=float, default=180.0,
+                        help='어둡고 사람도 없는 상태가 이만큼 이어지면 잠든다(초)')
+    parser.add_argument('--quiet-hours', default='20-8',
+                        help="사람이 없으면 밝기와 무관하게 자는 시간대 '시작-끝' "
+                             "(기본 20-8 = 근무시간 8~20시 밖). 'off' 면 밝기만 "
+                             '본다. 모터를 내려 두면 카메라도 없으므로 이때는 '
+                             '이 규칙만 남는다')
     parser.add_argument('--attend', action='store_true',
                         help='turn the head to face detected people while idle '
                              '(needs the presence watcher; check ATTEND_SIGN)')
@@ -1817,6 +1888,7 @@ def main():
     idle = None
     neck_hold = None
     watcher = None
+    sleeper = None
     hallway = None
     objvis = None
     music_player = None
@@ -1829,6 +1901,28 @@ def main():
         turn_logger = TurnLogger(args.log_dir)
         logger.info('Turn log: %s', turn_logger.path)
 
+    # 밤에는 재운다. 빈 사무실에서 로봇이 혼자 인사하고 팔을 움직이면 무섭다.
+    # 통신(터널·브로커·ssh·뷰어·로그)은 자는 동안에도 그대로 열려 있다.
+    #
+    # 카메라(watcher)는 나중에 붙인다. 모터 전원을 내려 두면 로봇 연결이
+    # 통째로 실패해 카메라도 없는데, 그때가 바로 재워야 할 밤이다. 그래서
+    # 눈이 없어도 시간대만으로 잘 수 있게 먼저 만들어 둔다.
+    if not args.no_sleep:
+        from sleep_mode import SleepWatcher
+        quiet_hours = None if args.quiet_hours == 'off' else tuple(
+            int(x) for x in args.quiet_hours.split('-'))
+        sleeper = SleepWatcher(None,
+                               dark_below=args.dark_below,
+                               light_above=args.light_above,
+                               quiet_for=args.sleep_after,
+                               quiet_hours=quiet_hours)
+        logger.info('수면 모드 켬 (근무시간 %s. 그 밖이거나 밝기 %.2f 아래인데 '
+                    '사람이 %.0f분 없으면 잠들고, 불이 켜지거나 사람이 보이거나 '
+                    '말을 걸면 깹니다. 통신은 자는 동안에도 그대로입니다)',
+                    '%d~%d시' % (quiet_hours[1], quiet_hours[0])
+                    if quiet_hours else '(시간대 안 씀)',
+                    args.dark_below, args.sleep_after / 60.0)
+
     if not args.no_robot:
         from reachy import Reachy, parts
 
@@ -1838,14 +1932,26 @@ def main():
         if args.gaze_tilt is not None:
             say_and_move.GAZE_TILT = args.gaze_tilt
 
-        if args.motions:
-            # Arms + head, with this robot's custom hands. The arms stay
-            # compliant; the executor powers them per-gesture.
-            from base_pose import connect
-            reachy = connect(io=args.io, with_head=True)
-        else:
-            reachy = Reachy(head=parts.Head(io=args.io))
+        # 모터 전원을 내린 채로 두는 운용이라(퇴근 시), 이 연결은 실패할 수
+        # 있다. Luos 게이트(USB)는 살아 있어도 다이나믹셀이 응답하지 않으면
+        # LuosModuleNotFoundError 가 난다. 예전에는 그대로 main() 을 뚫고
+        # 나가 서비스가 12초마다 재시작을 되풀이했다(밤새 로그가 그것으로
+        # 찼다). 이제는 소리만 내는 모드로 내려가 조용히 계속 돈다.
+        try:
+            if args.motions:
+                # Arms + head, with this robot's custom hands. The arms stay
+                # compliant; the executor powers them per-gesture.
+                from base_pose import connect
+                reachy = connect(io=args.io, with_head=True)
+            else:
+                reachy = Reachy(head=parts.Head(io=args.io))
+        except Exception as e:
+            logger.warning('로봇에 연결하지 못했습니다 (%s: %s). 모터가 꺼져 '
+                           '있는 것으로 보고, 움직임 없이 소리만 내는 모드로 '
+                           '계속합니다.', type(e).__name__, e)
+            reachy = None
 
+    if reachy is not None:
         head = TalkingHead(reachy)
         head.setup()
         idle = IdleMotion(reachy)
@@ -1874,6 +1980,8 @@ def main():
                 watcher.start()
                 if args.attend or args.hallway:
                     idle.watcher = watcher
+                if sleeper is not None:
+                    sleeper.watcher = watcher   # 이제 밝기와 사람을 볼 수 있다
                     logger.info('Head will attend to detected people')
 
                 # 카메라가 머리에 달려 있어서, 목이 도는 동안에는 화면 전체가
@@ -1993,7 +2101,11 @@ def main():
             except Exception:
                 logger.exception('State mirror failed to start (viewer only)')
 
-        startup_greeting(reachy, speech, head)
+        # 이미 캄캄한 사무실에서 부팅했다면 켜자마자 인사하지 않는다.
+        if sleeper is not None and sleeper.update():
+            logger.info('조용히 기동합니다 (기동 인사 생략)')
+        else:
+            startup_greeting(reachy, speech, head)
 
         if motion_handler is not None:
             # Arms rise into the ready stance (slightly forward, soft elbow
@@ -2028,6 +2140,7 @@ def main():
                 turn_logger=turn_logger,
                 # Photograph visitors as they arrive so the logs accumulate
                 # real scenes for later analysis/improvement.
+                sleeper=sleeper,
                 snap=(lambda: capture_view(reachy, side=args.camera_side,
                                            camera_index=args.camera_index))
                 if not args.no_vision else None)
@@ -2040,7 +2153,7 @@ def main():
                  vision=not args.no_vision, camera_side=args.camera_side,
                  camera_index=args.camera_index, motion_handler=motion_handler,
                  turn_logger=turn_logger, notes=notes, hallway=hallway,
-                 objvis=objvis, music_player=music_player)
+                 objvis=objvis, music_player=music_player, sleeper=sleeper)
     except KeyboardInterrupt:
         print()
     finally:

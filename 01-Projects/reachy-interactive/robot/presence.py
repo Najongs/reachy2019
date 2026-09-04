@@ -33,6 +33,8 @@ HEAD_MOVE_TOL = 0.3    # 목 디스크가 이보다 움직였으면 '움직인 �
                        # 실측: 정지 상태로 20회 읽었을 때 변동폭 최대 0.081도.
 MOTION_RECENT = 4.0    # 최근 이 시간 안에 움직임이 있었으면 아직 사람이 있다고 본다
 DIAG_EVERY = 30.0      # 수집 조건이 왜 막혔는지 이따금 남긴다(튜닝용)
+STALL_AFTER = 45.0     # 감시가 이만큼 한 바퀴도 못 돌면 멈춘 것으로 본다(초)
+BRIGHTNESS_LOG_EVERY = 300.0   # 화면 밝기를 5분마다 남긴다(밤낮 문턱값 튜닝용)
 
 # 얼굴로 인정하려면 이웃 검출이 몇 개나 겹쳐야 하는지.
 #
@@ -101,6 +103,11 @@ class PresenceWatcher(object):
         # 돌면 화면 전체가 변한다(≈1.0). 사람 하나가 지나가는 것은 화면의 일부만
         # 바꾼다. 이 값으로 둘을 가른다 - 없으면 빈 복도 사진만 잔뜩 쌓인다.
         self.motion_area = 0.0
+        # 화면 평균 밝기 0~1. 밤에 불이 꺼졌는지 보는 데 쓴다(sleep_mode).
+        # 이미 흑백으로 줄인 프레임이 있으니 평균 한 번이면 되고, 따로
+        # 카메라를 열지 않는다 - 카메라는 한 번에 하나만 열 수 있다.
+        self.brightness = None
+        self._bright_log_at = 0.0
         self._prev_gray = None
         # 마지막으로 검출한 얼굴 박스(비율 좌표)와, 사람이 보일 때마다 호출할 콜백.
         # 콜백은 person_db 로 사진을 모으는 데 쓴다 (voice_chat 에서 연결).
@@ -123,6 +130,10 @@ class PresenceWatcher(object):
         self._still = False
         self._diag_at = 0.0
 
+        # 마지막으로 한 바퀴 돈 시각. 이 값이 멎으면 감시가 죽은 것이다.
+        # 이번 여름에 카메라가 걸려 감시 스레드가 통째로 멈췄는데도 아무 로그가
+        # 남지 않아 며칠을 모르고 지나간 적이 있다. 그런 일이 다시 없도록 한다.
+        self.last_tick = 0.0
         self._stop = None
         self._thread = None
 
@@ -135,9 +146,27 @@ class PresenceWatcher(object):
             return self
 
         self._stop = Event()
+        self.last_tick = time.time()
         self._thread = Thread(target=self._loop)
         self._thread.daemon = True
         self._thread.start()
+
+        def _watchdog():
+            warned = False
+            while not self._stop.wait(STALL_AFTER / 3.0):
+                behind = time.time() - self.last_tick
+                if behind > STALL_AFTER:
+                    if not warned:
+                        logger.error('사람 감시가 %.0f초째 멈춰 있습니다 - '
+                                     '사진 수집도 함께 멎습니다', behind)
+                        warned = True
+                elif warned:
+                    logger.info('사람 감시가 다시 돕니다')
+                    warned = False
+
+        wd = Thread(target=_watchdog)
+        wd.daemon = True
+        wd.start()
         logger.info('Presence watcher started (every %.1fs)', self.interval)
         return self
 
@@ -219,6 +248,19 @@ class PresenceWatcher(object):
                              fw / float(W), fh / float(H))
         return (x + fw / 2.0) / W, (y + fh / 2.0) / H
 
+    def _update_brightness(self, gray):
+        """화면 평균 밝기를 0~1 로 기록한다. 값을 이따금 로그에 남긴다.
+
+        복도 조명이 실제로 어느 값인지는 현장마다 다르므로, 문턱값을 정하려면
+        실측이 필요하다. 그래서 주기적으로 남긴다 - 밤낮 로그를 보고 맞추면
+        된다.
+        """
+        self.brightness = float(gray.mean()) / 255.0
+        now = time.time()
+        if now - self._bright_log_at > BRIGHTNESS_LOG_EVERY:
+            self._bright_log_at = now
+            logger.info('화면 밝기 %.3f', self.brightness)
+
     def _update_motion(self, gray):
         """Frame differencing: how much the scene changed, and where.
 
@@ -263,6 +305,7 @@ class PresenceWatcher(object):
         # 검출기를 언제 돌릴지 정하는 힌트로만 쓴다.
         while not self._stop.is_set():
             t0 = time.time()
+            self.last_tick = t0
             try:
                 self._update_head_state()
                 frame = self.grab()
@@ -274,6 +317,7 @@ class PresenceWatcher(object):
                         logger.warning('presence: 카메라 프레임을 못 받고 있습니다')
                 if frame is not None:
                     gray = self._to_gray(frame)
+                    self._update_brightness(gray)
                     self._update_motion(gray)
                     res = self._detect_gray(gray)
                     now = time.time()
