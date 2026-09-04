@@ -256,12 +256,19 @@ Pi: presence.py --collect-people        DGX: sync_persons.py        persons_expo
 `persons/` 에는 사람 상자대로 자른 이미지가 들어간다(학습에 바로 쓰는 용도).
 `bash ops/daily_update.sh` 가 둘 다 갱신한다.
 
-**예전 사진에 상자 채우기.** 사람 위치를 저장하기 시작한 것은 나중이라 그 전
-사진은 상자가 비어 있다. `ops/backfill_person_boxes.py` 가 채운다. 로봇에서는
-armv7l 이라 가벼운 MobileNet-SSD 를 쓸 수밖에 없지만, DGX 에서는 그럴 이유가
-없어 torchvision 의 COCO 사전학습 Faster R-CNN 을 쓴다 - 실측으로 15장 중
-13장을 신뢰도 0.99~1.00 으로 잡았다(SSD 로는 4장뿐이었다). torch 는 학습용
-venv 에 있으므로 그 파이썬으로 돌린다:
+### 역할을 나눈다 — 로봇은 모으고, 인식 DB 는 여기서 만든다
+
+| | 하는 일 | 쓰는 모델 | 상자 표시 |
+|---|---|---|---|
+| **로봇(Pi)** | '사람이 있다'만 판단해 사진을 모은다 | MobileNet-SSD (armv7l 이라 이게 한계) | `pi-ssd` |
+| **여기(DGX)** | 가져온 사진에서 사람 위치를 제대로 잡는다 | COCO 사전학습 Faster R-CNN | `dgx-frcnn` |
+
+같은 사진 15장으로 실측하면 SSD 는 4장, Faster R-CNN 은 **13장**을 신뢰도
+0.99~1.00 으로 잡는다. 그래서 로봇이 잡은 상자도 여기서 다시 잡는다.
+`box_source` 칼럼이 어느 쪽이 잡은 것인지 기록하므로, 다시 돌려도 이미 처리한
+사진은 건너뛴다(사람을 못 찾은 사진도 표시해 두어 매번 재검사하지 않는다).
+
+`daily_update.sh` 가 자동으로 실행한다. 손으로 돌린다면:
 
 ```bash
 /home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3 \
@@ -269,8 +276,9 @@ venv 에 있으므로 그 파이썬으로 돌린다:
 python3 ops/persons_export.py --out --crop-persons
 ```
 
-GPU 는 기본으로 쓰지 않는다 - 이 DGX 는 다른 학습이 8장을 100% 로 쓰고 있어
-끼어들면 그쪽이 느려진다. 사진 수백 장은 CPU 로 충분하다.
+torch 는 학습용 venv 에 있어 그 파이썬을 쓴다. GPU 는 기본으로 쓰지 않는다 -
+이 DGX 는 다른 학습이 8장을 100% 로 쓰고 있어 끼어들면 그쪽이 느려진다.
+사진 수백 장은 CPU 로 충분하다(급하면 `--device cuda`).
 
 **언제 찍나** — **SSD 가 사람을 검출했을 때만** 찍는다(신뢰도 0.5 이상).
 Haar 얼굴 검출은 '찍을지'를 정하지 않고 **얼굴 상자만 얹는** 역할이다. 예전에는

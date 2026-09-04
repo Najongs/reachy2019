@@ -58,11 +58,15 @@ def ensure_db(path):
             person_x    INTEGER, person_y INTEGER,
             person_w    INTEGER, person_h INTEGER,
             person_conf REAL,
+            -- 이 상자를 누가 찍었나. 'pi-ssd' 는 로봇이 실시간으로 쓴 가벼운
+            -- 검출기, 'dgx-frcnn' 은 여기서 제대로 된 모델로 다시 잡은 것.
+            -- 로봇은 '사람이 있다'만 판단하면 되고, 인식 DB 는 여기서 만든다.
+            box_source  TEXT,
             UNIQUE(robot, src_id)           -- 같은 사진을 두 번 넣지 않는다
         )''')
     for col, typ in (('person_x', 'INTEGER'), ('person_y', 'INTEGER'),
                      ('person_w', 'INTEGER'), ('person_h', 'INTEGER'),
-                     ('person_conf', 'REAL')):
+                     ('person_conf', 'REAL'), ('box_source', 'TEXT')):
         try:
             conn.execute('ALTER TABLE persons ADD COLUMN %s %s' % (col, typ))
         except Exception:
@@ -129,7 +133,12 @@ def merge(conn, remote_db, robot, img_dir=None):
             continue
         try:
             conn.execute(sql, (robot,) + tuple(r[:n_base]) + tuple(r[n_base:]))
-            added += conn.total_changes and 1 or 0
+            if conn.total_changes:
+                added += 1
+                conn.execute(
+                    '''UPDATE persons SET box_source='pi-ssd'
+                       WHERE robot=? AND src_id=? AND box_source IS NULL''',
+                    (robot, r[0]))
         except Exception:
             pass
     # interacted 는 나중에 갱신될 수 있으므로 항상 최신값으로 맞춰 준다
@@ -185,8 +194,12 @@ def stats(conn, local_root):
     print('  선명도 200 이상: %d장 (학습에 쓸 만한 것)' % sharp)
     try:
         pb = q('SELECT COUNT(*) FROM persons WHERE person_w IS NOT NULL')
-        big = q('SELECT COUNT(*) FROM persons WHERE person_w >= 150')
-        print('  사람 위치가 기록된 것: %d장 (그중 크게 찍힌 것 %d장)' % (pb, big))
+        good = q("SELECT COUNT(*) FROM persons WHERE box_source='dgx-frcnn'")
+        todo = q("SELECT COUNT(*) FROM persons "
+                 "WHERE box_source IS NULL OR box_source<>'dgx-frcnn'")
+        print('  사람 위치가 기록된 것: %d장 (여기서 제대로 잡은 것 %d장)' % (pb, good))
+        if todo:
+            print('  아직 여기서 안 잡은 것: %d장 (다음 업데이트에서 처리)' % todo)
     except Exception:
         pass
     for day, n in conn.execute(

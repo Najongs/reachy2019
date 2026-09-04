@@ -75,6 +75,21 @@ echo "── [4/4] 노트 제안 (실제 로그 답변 재사용, 실행약속/�
 python3 broker/build_notes.py --logs "$PI_LOGS" $MERGE
 
 echo
+echo "── 사람 인식 DB 생성 (여기서 제대로 된 모델로)"
+# 로봇은 '사람이 있다'만 판단해 사진을 모으고, 사람 위치는 여기서 다시 잡는다.
+# torch 는 학습용 venv 에 있다. GPU 는 쓰지 않는다 - 다른 학습이 8장을 100% 로
+# 쓰고 있어 끼어들면 그쪽이 느려진다.
+VENV_PY=/home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3
+if [ "$PERSONS" = 1 ] && [ -x "$VENV_PY" ]; then
+  "$VENV_PY" ops/backfill_person_boxes.py --write 2>&1 | tail -3 \
+    || echo "   ! 사람 인식 실패 (계속 진행)"
+elif [ "$PERSONS" = 1 ]; then
+  echo "   건너뜀 (torch 가 있는 venv 를 찾지 못함: $VENV_PY)"
+else
+  echo "   건너뜀 (--no-persons)"
+fi
+
+echo
 echo "── 사람 이미지 폴더 갱신 (04-Archives/person-dataset/dataset)"
 if [ "$PERSONS" = 1 ]; then
   python3 ops/persons_export.py --out --crop-persons 2>&1 \

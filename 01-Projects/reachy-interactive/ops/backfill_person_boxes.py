@@ -1,11 +1,13 @@
-"""이미 모아 둔 사진에 사람 위치를 채워 넣는다 (DGX 에서 제대로 된 모델로).
+"""가져온 사진에서 사람 인식 DB 를 만든다 (DGX 에서 제대로 된 모델로).
 
-사람 위치(person_x/y/w/h)를 저장하기 시작한 것은 나중이라, 그 전에 찍힌 사진은
-상자가 비어 있다. 상자가 없으면 사람만 잘라 낼 수 없다.
+역할을 나눈다.
+  로봇(Pi)  - '사람이 있다'만 판단해서 사진을 모은다. armv7l 이라 가벼운
+              MobileNet-SSD 밖에 못 쓴다. 상자는 대충 잡힌다(box_source='pi-ssd').
+  여기(DGX) - 가져온 사진을 torchvision 의 COCO 사전학습 Faster R-CNN 으로 다시
+              훑어 사람 위치를 제대로 잡는다(box_source='dgx-frcnn').
 
-로봇(Pi, armv7l)에서는 가벼운 MobileNet-SSD 를 쓸 수밖에 없지만, 여기서는 그럴
-이유가 없다. torchvision 의 COCO 사전학습 Faster R-CNN 을 쓴다 - 멀리 있거나
-일부만 보이는 사람도 훨씬 잘 잡는다.
+실측으로 같은 사진 15장에서 SSD 는 4장, Faster R-CNN 은 13장을 신뢰도
+0.99~1.00 으로 잡았다. 멀리 있거나 일부만 보이는 사람도 훨씬 잘 잡는다.
 
 torch 는 학습용 venv 에 들어 있으므로 그 파이썬으로 돌린다:
 
@@ -79,7 +81,7 @@ def main():
     ap.add_argument('--root', default=DEFAULT_ROOT, help='사진이 있는 폴더')
     ap.add_argument('--write', action='store_true', help='실제로 DB 에 기록')
     ap.add_argument('--all', action='store_true',
-                    help='이미 상자가 있는 것까지 다시 검사')
+                    help='여기서 이미 잡은 것까지 전부 다시 검사')
     ap.add_argument('--device', default='cpu',
                     help="'cpu'(기본) 또는 'cuda'. 이 DGX 는 다른 학습이 GPU 를 "
                          '꽉 채우고 있어 기본은 cpu 다')
@@ -102,7 +104,10 @@ def main():
         return 1
 
     conn = sqlite3.connect(args.db)
-    where = '' if args.all else 'WHERE person_w IS NULL'
+    # 로봇이 잡은 상자(pi-ssd)도 다시 잡는다. 인식 DB 는 여기서 만드는 것이
+    # 원칙이고, 실측 차이가 크다(15장 중 4장 대 13장).
+    where = ('' if args.all else
+             "WHERE box_source IS NULL OR box_source <> 'dgx-frcnn'")
     rows = conn.execute(
         'SELECT id, robot, image FROM persons %s ORDER BY id' % where).fetchall()
     if not rows:
@@ -127,6 +132,12 @@ def main():
             continue
         if got is None:
             empty += 1
+            # 사람을 못 찾았어도 '여기서 봤다'고 남긴다. 안 그러면 매번 다시
+            # 검사하게 된다.
+            if args.write:
+                conn.execute(
+                    "UPDATE persons SET box_source='dgx-frcnn' WHERE id=?",
+                    (rid,))
             continue
         conf, x, y, w, h = got
         found += 1
@@ -134,7 +145,8 @@ def main():
         if args.write:
             conn.execute(
                 '''UPDATE persons SET person_x=?, person_y=?, person_w=?,
-                   person_h=?, person_conf=? WHERE id=?''',
+                   person_h=?, person_conf=?, box_source='dgx-frcnn'
+                   WHERE id=?''',
                 (x, y, w, h, conf, rid))
 
     if args.write:
