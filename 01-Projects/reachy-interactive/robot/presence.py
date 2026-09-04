@@ -52,6 +52,12 @@ FACE_MIN_NEIGHBORS = 10
 # 매 폴링마다 돌리면 코어 하나를 절반쯤 먹는다.
 PERSON_NET_INTERVAL = 1.6
 PERSON_NET_CONF = 0.5
+# 사람 상자에서 머리(코)는 위에서 이만큼 지점에 있다. 얼굴이 안 잡혀도 고개를
+# 그쪽으로 돌릴 수 있어야 한다 - 이 복도에서 Haar 는 거의 안 잡히므로, 얼굴
+# 위치에만 의지하면 사람이 앞에 있어도 로봇이 쳐다보지 않는다.
+# 실측: 이 복도에서 찍힌 사람 19명의 코 위치 중앙값이 23% 였다(범위 9~51%).
+# 처음에 12% 로 잡았더니 머리 위 허공을 겨냥했다.
+HEAD_IN_BODY = 0.23
 
 
 class PresenceWatcher(object):
@@ -144,6 +150,14 @@ class PresenceWatcher(object):
     def seen_within(self, seconds):
         """True if a face was detected within the last `seconds`."""
         return self.person and (time.time() - self.last_seen) <= seconds
+
+    def _aim_from_body(self):
+        """사람 상자에서 고개를 향할 지점 (비율 좌표). 모르면 (None, None)."""
+        box = self.person_box
+        if box is None:
+            return (None, None)
+        x1, y1, x2, y2 = box
+        return ((x1 + x2) / 2.0, y1 + HEAD_IN_BODY * (y2 - y1))
 
     def _face_on_person(self, face_center):
         """얼굴 상자가 검출된 사람 위에 있나 (비율 좌표).
@@ -289,13 +303,19 @@ class PresenceWatcher(object):
 
                     if body:
                         if res is not None and self._face_on_person(res):
-                            cx, cy = res
-                            self.face_error = (cx - 0.5) * 2.0
-                            self.face_yerr = (cy - 0.5) * 2.0
+                            aim = res
                         else:
                             # 얼굴 상자가 사람 위가 아니면(문틀 등) 크롭을 남기지
                             # 않는다. 사진은 그대로 저장된다.
                             self.face_box_rel = None
+                            # 얼굴을 못 잡았어도 사람은 보인다. 고개는 사람 상자의
+                            # 머리 쯤을 향한다. 이게 없으면 조준값이 예전 것으로
+                            # 남아, 로봇이 엉뚱한 곳을 보거나 아예 안 움직인다.
+                            aim = self._aim_from_body()
+                        if aim[0] is not None:
+                            cx, cy = aim
+                            self.face_error = (cx - 0.5) * 2.0
+                            self.face_yerr = (cy - 0.5) * 2.0
                         if not self.person:
                             logger.info('사람 검출 (몸 %.2f, 얼굴 %s)',
                                         self.person_conf,
