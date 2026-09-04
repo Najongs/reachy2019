@@ -48,6 +48,11 @@ DIAG_EVERY = 30.0      # 수집 조건이 왜 막혔는지 이따금 남긴다(�
 # 않는 선인 8 로 둔다. 사람 앞에서 확인한 뒤 조정할 것.
 FACE_MIN_NEIGHBORS = 8
 
+# 사람 검출(MobileNet-SSD)을 얼마나 자주 돌릴지(초). Pi 4 에서 한 번에 ~350ms 라
+# 매 폴링마다 돌리면 코어 하나를 절반쯤 먹는다.
+PERSON_NET_INTERVAL = 1.6
+PERSON_NET_CONF = 0.5
+
 
 class PresenceWatcher(object):
     """Watch the camera for faces on a background thread.
@@ -99,6 +104,12 @@ class PresenceWatcher(object):
         # 쫓아다니는 대신, 카메라가 실제로 움직였는지를 본다. 명령 경로를
         # 계측하는 방식은 한 군데만 놓쳐도 조용히 틀린다(실제로 그랬다).
         # 없으면 얼굴이 보일 때만 촬영한다 - 오탐보다 놓치는 편이 낫다.
+        # 사람 검출기(MobileNet-SSD). 복도에서는 얼굴 검출보다 훨씬 잘 맞는다.
+        # 실측: 크게 찍힌 정면 얼굴을 Haar 는 어떤 설정으로도 못 잡았는데
+        # (역광·안경·화면 기울기 13도), SSD 는 같은 사진을 0.98 로 잡았다.
+        self.detect_person = None
+        self._net_at = 0.0
+        self.person_conf = 0.0
         self.head_pose = None
         self._pose_prev = None
         self._head_moved_at = 0.0
@@ -235,7 +246,33 @@ class PresenceWatcher(object):
                     self._update_motion(gray)
                     res = self._detect_gray(gray)
                     now = time.time()
-                    if res is not None:
+
+                    # 얼굴이 안 잡혀도 사람일 수 있다. 무거운 검출기라 간격을 둔다.
+                    body = False
+                    if (res is None and self.detect_person is not None
+                            and now - self._net_at > PERSON_NET_INTERVAL):
+                        self._net_at = now
+                        try:
+                            conf = self.detect_person(frame)
+                        except Exception:
+                            conf = 0.0
+                            logger.debug('사람 검출 실패', exc_info=True)
+                        self.person_conf = conf
+                        body = conf >= PERSON_NET_CONF
+
+                    if body:
+                        if not self.person:
+                            logger.info('사람 검출 (몸 %.2f)', self.person_conf)
+                            self.appeared_at = now
+                        self.person = True
+                        self.last_seen = now
+                        self.face_box_rel = None
+                        if self.on_person is not None:
+                            try:
+                                self.on_person(frame, None)
+                            except Exception:
+                                logger.debug('on_person(body) failed', exc_info=True)
+                    elif res is not None:
                         cx, cy = res
                         self.face_error = (cx - 0.5) * 2.0
                         self.face_yerr = (cy - 0.5) * 2.0

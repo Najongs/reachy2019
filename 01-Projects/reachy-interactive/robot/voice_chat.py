@@ -1716,6 +1716,22 @@ def main():
                 if ov.available():
                     objvis = ov
                     logger.info('Object vision enabled')
+
+                    # 복도에서는 얼굴 검출보다 사람 전체 검출이 훨씬 잘 맞는다.
+                    # 실측: 크게 찍힌 정면 얼굴을 Haar 는 어떤 설정으로도 못
+                    # 잡았는데(역광·안경·화면 기울기 13도), 같은 사진을 SSD 는
+                    # 0.98 로 잡았다. 모델은 이미 물체 인식용으로 올라와 있으니
+                    # 그대로 나눠 쓴다.
+                    if watcher is not None and (args.collect_people or args.hallway):
+                        def _person_conf(frame, _ov=ov):
+                            best = 0.0
+                            for d in _ov.detect(frame):
+                                if d['label'] == 'person' and d['conf'] > best:
+                                    best = d['conf']
+                            return best
+
+                        watcher.detect_person = _person_conf
+                        logger.info('사람 검출(SSD)을 감시에 연결했습니다')
                 else:
                     logger.info('Object vision model not found - skipping '
                                 '(install with ops/install_object_vision.sh)')
