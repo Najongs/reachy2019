@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import re
+import time
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -50,6 +51,25 @@ class Backend(object):
 
     def reset(self, session):
         """Forget a conversation. Most backends keep no state of their own."""
+
+    def health(self):
+        """이 백엔드가 정말 답할 수 있는 상태인가. {'ok': bool, ...}
+
+        기본값은 '살아 있다'. 밖으로 나가는 백엔드는 실제로 확인한다 -
+        브로커 프로세스가 떠 있다는 것과 모델이 답한다는 것은 다른 얘기다.
+        """
+        return {'ok': True}
+
+    def reply_stream(self, text, history, session='default', image=None):
+        """Yield the reply one spoken sentence at a time.
+
+        The default just runs the blocking path and hands back a single
+        chunk, so a backend that cannot stream still works over the streaming
+        endpoint - it simply gains nothing.
+        """
+        out = self.reply(text, history, session=session, image=image)
+        if out:
+            yield out
 
 
 class EchoBackend(Backend):
@@ -145,6 +165,32 @@ class ClaudeCliBackend(Backend):
         self._lock = threading.Lock()
         self._procs = {}   # session -> Popen
         self._last_use = {}   # session -> time.time() of last turn
+
+        # 놀고 있는 CLI 프로세스를 스스로 거둔다. 예전에는 '다음 요청이 올 때'
+        # 만 나이를 봤기 때문에, 동작 요청이 하루에 몇 번뿐인 복도에서는
+        # 300~500MB 짜리 프로세스가 밤새 그대로 떠 있었다. 다음 요청이 영영
+        # 안 오면 영영 안 죽는다.
+        self._reaper = threading.Thread(target=self._reap_loop)
+        self._reaper.daemon = True
+        self._reaper.start()
+
+    def _reap_loop(self):
+        import time as _time
+
+        while True:
+            _time.sleep(60)
+            try:
+                with self._lock:
+                    stale = [name for name, last in list(self._last_use.items())
+                             if _time.time() - last > self.IDLE_RESET
+                             and name in self._procs]
+                    for name in stale:
+                        logger.info('%r 세션이 %.0f분째 놀고 있어 정리합니다',
+                                    name, self.IDLE_RESET / 60.0)
+                        self._kill(name)
+                        self._last_use.pop(name, None)
+            except Exception:
+                logger.debug('CLI 세션 정리 실패', exc_info=True)
 
     def _spawn(self):
         import subprocess
@@ -275,14 +321,18 @@ _EMOJI = re.compile(
 # Small models keep describing the robot in the third person ("리치는 ~해요")
 # even when told to speak as itself, so rewrite it deterministically. Also fix
 # spellings the TTS mispronounces.
+#
+# Only SUBJECT/OBJECT particles are rewritten. Predicate forms ("리치예요",
+# "리치입니다") must be left alone: they are how the robot says its own NAME,
+# and rewriting them turned "저는 리치예요" into "저는 저예요" - the robot
+# could not introduce itself at all.
 _THIRD_PERSON = [
     ('리치는 ', '저는 '), ('리치가 ', '제가 '), ('리치도 ', '저도 '),
     ('리치를 ', '저를 '), ('리치의 ', '제 '), ('리치에게 ', '저에게 '),
-    ('리치와 ', '저와 '), ('리치한테 ', '저한테 '), ('리치입니다', '저예요'),
-    ('리치예요', '저예요'), ('리치라고 해요', '리치라고 해요'),
+    ('리치와 ', '저와 '), ('리치한테 ', '저한테 '),
 ]
 _SPELLING = [('KIRO', '키로'), ('Kiro', '키로'), ('kiro', '키로'),
-             ('Reachy', '리치'), ('reachy', '리치')]
+             ('Reachy', '리치'), ('reachy', '리치'), ('QR', '큐알')]
 
 
 def speakable_reply(text):
@@ -300,6 +350,8 @@ def speakable_reply(text):
     # Markdown the model sprinkles in despite the persona - the TTS would read
     # "dash dash dash" / "star star".
     text = re.sub(r'(?m)^\s*[-*#>]{1,4}\s*', ' ', text)
+    # 번호 매기기도 마찬가지 - TTS 가 "일 점" 하고 읽는다.
+    text = re.sub(r'(?m)^\s*\d{1,2}[.)]\s+', ' ', text)
     text = text.replace('**', '').replace('---', ' ').replace('__', '')
     return ' '.join(text.split())
 
@@ -370,6 +422,67 @@ def spoken_trim(text, max_sentences=3, max_chars=170):
     return result
 
 
+_SENTENCE_END = '.!?。'
+
+
+def clean_sentence(text):
+    """말할 수 있는 한 문장으로 다듬는다. 남길 게 없으면 빈 문자열."""
+    return speakable_reply(_EMOJI.sub('', text or '')).strip()
+
+
+def stream_sentences(pieces, max_sentences=3, max_chars=170):
+    """토큰 조각들을 받아 완성된 문장이 나올 때마다 하나씩 내보낸다.
+
+    로봇이 답을 다 만들 때까지 기다렸다가 말하면, 생성(1.2초)과 음성 합성
+    (1.5초)이 통째로 직렬이 된다. 첫 문장은 0.4초면 나오므로, 나오는 대로
+    말하기 시작하면 첫 소리까지가 그만큼 빨라지고 나머지 문장은 앞 문장이
+    재생되는 동안 합성된다.
+
+    spoken_trim 과 같은 예산(문장 수·글자 수)을 스트리밍에서도 지킨다.
+    """
+    buffer = ''
+    said = 0
+    chars = 0
+
+    def budget_left():
+        return said < max_sentences and chars < max_chars
+
+    for piece in pieces:
+        if not piece:
+            continue
+        buffer += piece
+        while budget_left():
+            # 따옴표 안에서는 자르지 않는다. 인용문을 그냥 마침표로 쪼개면
+            # 로봇이 '"라고 물어보셨어요.' 같은 조각을 따로 말하게 된다.
+            quoted = False
+            cut = -1
+            for i, ch in enumerate(buffer):
+                if ch in '"\u201c\u201d\'':
+                    quoted = not quoted
+                elif ch in _SENTENCE_END and not quoted:
+                    # "1." 같은 목록 번호나 "3.5" 의 소수점은 문장 끝이
+                    # 아니다. 여기서 자르면 로봇이 "일." 하고 끊어 말한다.
+                    if ch == '.' and i and buffer[i - 1].isdigit():
+                        continue
+                    cut = i + 1
+                    break
+            if cut < 0:
+                break
+            sentence, buffer = buffer[:cut], buffer[cut:]
+            out = clean_sentence(sentence)
+            if not out:
+                continue
+            yield out
+            said += 1
+            chars += len(out)
+        if not budget_left():
+            return
+
+    tail = clean_sentence(buffer)
+    if tail and budget_left():
+        yield tail
+
+
 class OllamaBackend(Backend):
     """Local LLM via an Ollama server (free, on the DGX GPUs/CPU, no API cost).
 
@@ -377,51 +490,179 @@ class OllamaBackend(Backend):
     itself. Replies are cleaned for speech: emojis stripped, length capped.
     """
 
+    # Ollama's default context is 2048 tokens and it truncates from the FRONT,
+    # which is exactly where the system prompt sits. config/persona.txt is
+    # ~2.4k tokens, so with the default the persona was silently cut away and
+    # the robot introduced itself as "EXAONE 3.5, LG AI 연구원" instead of as
+    # 리치. Costs nothing to fix: the prefix is KV-cached, so prompt_eval stays
+    # at ~0.03s and generation time is unchanged.
+    #
+    # Keep this value STABLE. Ollama reloads the model whenever num_ctx changes
+    # (~40s stall), so a broker that sends a different value than the loaded
+    # one thrashes the GPU on every turn.
+    NUM_CTX = 8192
+
     def __init__(self, model='exaone3.5:7.8b', host='127.0.0.1:11434',
-                 timeout=90, num_predict=90, temperature=0.7):
+                 timeout=90, num_predict=90, temperature=0.7, num_ctx=None):
         self.model = model
         self.url = 'http://{}/api/chat'.format(host)
         self.timeout = timeout
         self.num_predict = num_predict
         self.temperature = temperature
+        self.num_ctx = num_ctx or self.NUM_CTX
 
     def reply(self, text, history, session='default', image=None):
-        import json
+        # A story/explanation request gets room to finish; a normal turn stays
+        # short so the robot does not monologue at someone passing by.
+        num_predict, max_sentences, max_chars = self._budget(text)
+
+        with self._post(text, history, num_predict, False) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+
+        out = (data.get('message', {}).get('content') or '').strip()
+        out = _EMOJI.sub('', out).strip()
+        return spoken_trim(speakable_reply(out),
+                           max_sentences=max_sentences, max_chars=max_chars)
+
+    def _budget(self, text):
+        """(num_predict, 최대 문장 수, 최대 글자 수) - 일반 턴과 긴 답을 가른다."""
+        if wants_long_answer(text):
+            return 260, 6, 420
+        return self.num_predict, 3, 170
+
+    def _post(self, text, history, num_predict, stream):
         import urllib.request
 
         messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
         messages += list(history)
         messages.append({'role': 'user', 'content': text})
 
-        # A story/explanation request gets room to finish; a normal turn stays
-        # short so the robot does not monologue at someone passing by.
-        long_form = wants_long_answer(text)
-        num_predict = 260 if long_form else self.num_predict
-
         body = json.dumps({
             'model': self.model,
             'messages': messages,
-            'stream': False,
+            'stream': stream,
             'options': {'num_predict': num_predict,
+                        'num_ctx': self.num_ctx,
                         'temperature': self.temperature},
         }).encode('utf-8')
 
         req = urllib.request.Request(
             self.url, data=body, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
+        return urllib.request.urlopen(req, timeout=self.timeout)
 
-        out = (data.get('message', {}).get('content') or '').strip()
-        out = _EMOJI.sub('', out).strip()
-        if long_form:
-            # Long-form still means "a few sentences", not a monologue - the
-            # persona offers to continue instead of saying everything at once.
-            return spoken_trim(speakable_reply(out),
-                               max_sentences=6, max_chars=420)
-        return spoken_trim(speakable_reply(out))
+    def reply_stream(self, text, history, session='default', image=None):
+        """Yield spoken sentences as Ollama produces them."""
+        num_predict, max_sentences, max_chars = self._budget(text)
+
+        def pieces(response):
+            try:
+                for line in response:
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line.decode('utf-8'))
+                    except ValueError:
+                        continue
+                    yield event.get('message', {}).get('content') or ''
+                    if event.get('done'):
+                        return
+            finally:
+                response.close()
+
+        response = self._post(text, history, num_predict, True)
+        for sentence in stream_sentences(pieces(response),
+                                         max_sentences=max_sentences,
+                                         max_chars=max_chars):
+            yield sentence
+
+    def health(self):
+        """Ollama 가 살아 있고 모델이 올라와 있는지 실제로 물어본다.
+
+        예전 /health 는 브로커가 떠 있다는 것만 알려 줬다. 그래서 Ollama 가
+        죽어도 워치독은 '정상'을 보고 아무것도 하지 않았고, 로봇은 하루 종일
+        "음, 잘 모르겠어요" 만 했다. 프로세스가 살아 있는 것과 답할 수 있는
+        것은 다른 얘기다.
+        """
+        import urllib.request
+
+        base = self.url.rsplit('/api/', 1)[0]
+        out = {'ok': False, 'model': self.model}
+        try:
+            with urllib.request.urlopen(base + '/api/tags', timeout=5) as r:
+                tags = json.loads(r.read().decode('utf-8'))
+            names = [m.get('name') for m in (tags.get('models') or [])]
+            out['ok'] = self.model in names
+            if not out['ok']:
+                out['error'] = '모델이 설치돼 있지 않습니다'
+                return out
+        except Exception as e:
+            out['error'] = 'ollama 에 닿지 못했습니다: {}'.format(e)
+            return out
+
+        # 올라와 있는지(=첫 요청이 40초짜리 적재가 되지 않는지)까지 본다.
+        try:
+            with urllib.request.urlopen(base + '/api/ps', timeout=5) as r:
+                ps = json.loads(r.read().decode('utf-8'))
+            loaded = [m.get('name') for m in (ps.get('models') or [])]
+            out['loaded'] = self.model in loaded
+        except Exception:
+            out['loaded'] = None    # 예전 버전에는 /api/ps 가 없다
+        return out
 
     def reset(self, session):
         pass   # history lives in the broker's Conversations
+
+
+class Stats(object):
+    """브로커가 실제로 무슨 일을 했는지 센다.
+
+    로그를 뒤지지 않고도 "오늘 대화 몇 건, 실패 몇 건, 얼마나 걸렸나" 를 볼 수
+    있어야 문제가 생겼을 때 알아차린다. 예전에 대화 8.7%가 통째로 실패하고
+    있었는데, 그건 나중에 로그를 파고 나서야 드러났다.
+    """
+
+    KEEP = 200      # 최근 몇 턴의 소요 시간을 들고 있을지
+
+    def __init__(self):
+        import threading
+
+        self._lock = threading.Lock()
+        self.started_at = time.time()
+        self.counts = defaultdict(int)
+        self._latencies = defaultdict(lambda: deque(maxlen=self.KEEP))
+        self.last_error = None
+        self.last_error_at = None
+
+    def record(self, kind, seconds=None, error=None):
+        with self._lock:
+            self.counts[kind] += 1
+            if seconds is not None:
+                self._latencies[kind].append(seconds)
+            if error is not None:
+                self.counts[kind + '_error'] += 1
+                self.last_error = str(error)[:200]
+                self.last_error_at = time.time()
+
+    def snapshot(self):
+        with self._lock:
+            out = {
+                'uptime_s': round(time.time() - self.started_at),
+                'counts': dict(self.counts),
+            }
+            for kind, values in self._latencies.items():
+                if not values:
+                    continue
+                ordered = sorted(values)
+                out.setdefault('latency_s', {})[kind] = {
+                    'n': len(ordered),
+                    'p50': round(ordered[len(ordered) // 2], 2),
+                    'p90': round(ordered[int(len(ordered) * 0.9)], 2),
+                    'max': round(ordered[-1], 2),
+                }
+            if self.last_error:
+                out['last_error'] = self.last_error
+                out['last_error_ago_s'] = round(time.time() - self.last_error_at)
+            return out
 
 
 class Conversations(object):
@@ -500,9 +741,15 @@ def extract_motion_json(text):
     return {'say': payload['say'], 'preset': preset, 'moves': moves}
 
 
-def make_handler(backend, conversations, token, motion_backend=None):
+def make_handler(backend, conversations, token, motion_backend=None, stats=None):
+    stats = stats if stats is not None else Stats()
+    health_cache = {'at': 0.0, 'value': None}
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
+        # 백엔드를 실제로 찔러 보는 건 비싸지 않지만 공짜도 아니다. 워치독이
+        # 2분마다, 로봇 서비스가 기동마다 두드리므로 짧게 캐시한다.
+        HEALTH_CACHE_S = 10.0
 
         def log_message(self, fmt, *args):
             logger.info('%s %s', self.address_string(), fmt % args)
@@ -514,6 +761,72 @@ def make_handler(backend, conversations, token, motion_backend=None):
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        # -- 문장 단위 스트리밍 응답 (chunked NDJSON) ---------------------
+        #
+        # 길이를 미리 알 수 없으니 Content-Length 를 못 쓴다. HTTP/1.1 의
+        # chunked 로 문장 하나를 한 줄씩 흘려보내면, 로봇은 첫 줄이 닿는
+        # 순간 바로 말하기 시작할 수 있다.
+
+        def _stream_start(self):
+            self.send_response(200)
+            self.send_header('Content-Type',
+                             'application/x-ndjson; charset=utf-8')
+            self.send_header('Transfer-Encoding', 'chunked')
+            self.end_headers()
+
+        def _stream_write(self, payload):
+            body = (json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8')
+            self.wfile.write(('%x\r\n' % len(body)).encode('ascii'))
+            self.wfile.write(body)
+            self.wfile.write(b'\r\n')
+            self.wfile.flush()
+
+        def _stream_end(self):
+            self.wfile.write(b'0\r\n\r\n')
+            self.wfile.flush()
+
+        def _reply_streaming(self, text, session, image):
+            """Send the reply sentence by sentence as the model makes it."""
+            started = False
+            parts = []
+            t0 = time.time()
+            first_at = None
+            try:
+                for sentence in backend.reply_stream(
+                        text, conversations.history(session), session,
+                        image=image):
+                    if not started:
+                        self._stream_start()
+                        started = True
+                        first_at = time.time() - t0
+                    parts.append(sentence)
+                    self._stream_write({'sentence': sentence})
+            except Exception as e:
+                logger.exception('Streaming backend failed')
+                if not started:
+                    # 아직 한 글자도 안 보냈으면 평소대로 502 를 준다 -
+                    # 로봇은 캔 답변으로 내려간다.
+                    stats.record('stream', time.time() - t0, error=e)
+                    self._send(502, {'error': '{}: {}'.format(
+                        type(e).__name__, e)})
+                    return
+                # 이미 말하기 시작한 뒤라면 되돌릴 수 없다. 받은 데까지만
+                # 마무리하고 끊는다.
+
+            if not started:
+                self._stream_start()
+
+            reply = ' '.join(parts).strip()
+            if reply:
+                conversations.record(session, text, reply)
+                # 사람이 체감하는 지연은 '첫 소리까지' 다. 전체 생성 시간이
+                # 아니라 그걸 센다.
+                stats.record('stream', first_at)
+            else:
+                stats.record('stream', time.time() - t0, error='empty reply')
+            self._stream_write({'done': True, 'reply': reply})
+            self._stream_end()
 
         def _authorized(self):
             if token is None:
@@ -527,10 +840,35 @@ def make_handler(backend, conversations, token, motion_backend=None):
             return json.loads(self.rfile.read(length).decode('utf-8'))
 
         def do_GET(self):
-            if self.path != '/health':
+            if self.path.startswith('/stats'):
+                self._send(200, stats.snapshot())
+                return
+
+            if not self.path.startswith('/health'):
                 self._send(404, {'error': 'not found'})
                 return
-            self._send(200, {'ok': True, 'backend': type(backend).__name__})
+
+            now = time.time()
+            if health_cache['value'] is None or (
+                    now - health_cache['at'] > self.HEALTH_CACHE_S):
+                try:
+                    detail = backend.health()
+                except Exception as e:
+                    detail = {'ok': False, 'error': '{}: {}'.format(
+                        type(e).__name__, e)}
+                health_cache['at'] = now
+                health_cache['value'] = detail
+            detail = dict(health_cache['value'])
+
+            payload = {'ok': bool(detail.pop('ok', False)),
+                       'backend': type(backend).__name__}
+            payload.update(detail)
+            payload['uptime_s'] = round(time.time() - stats.started_at)
+
+            # 실패는 실패로 알린다. 200 으로 돌려주면 워치독이 못 알아챈다 -
+            # 예전에는 브로커가 떠 있기만 하면 늘 200 이라, Ollama 가 죽어도
+            # 아무도 손대지 않았다.
+            self._send(200 if payload['ok'] else 503, payload)
 
         def do_POST(self):
             if not self._authorized():
@@ -562,20 +900,25 @@ def make_handler(backend, conversations, token, motion_backend=None):
                     return
 
                 image = payload.get('image') or None
+                t0 = time.time()
                 try:
                     raw = motion_backend.reply(text, [], payload.get('session', 'motion'),
                                                image=image)
                 except Exception as e:
                     logger.exception('Motion backend failed')
+                    stats.record('motion', time.time() - t0, error=e)
                     self._send(502, {'error': '{}: {}'.format(type(e).__name__, e)})
                     return
 
                 motion = extract_motion_json(raw)
                 if motion is None:
                     logger.warning('Unparseable motion reply: %r', (raw or '')[:300])
+                    stats.record('motion', time.time() - t0,
+                                 error='unparseable motion json')
                     self._send(502, {'error': 'model did not return valid motion json'})
                     return
 
+                stats.record('motion', time.time() - t0)
                 self._send(200, motion)
                 return
 
@@ -588,19 +931,28 @@ def make_handler(backend, conversations, token, motion_backend=None):
                 self._send(400, {'error': 'missing "text"'})
                 return
 
+            image = payload.get('image') or None
+
+            if payload.get('stream'):
+                self._reply_streaming(text, session, image)
+                return
+
+            t0 = time.time()
             try:
-                image = payload.get('image') or None
                 reply = backend.reply(text, conversations.history(session), session,
                                       image=image)
             except Exception as e:
                 logger.exception('Backend failed')
+                stats.record('reply', time.time() - t0, error=e)
                 self._send(502, {'error': '{}: {}'.format(type(e).__name__, e)})
                 return
 
             if not reply:
                 reply = FALLBACK_REPLY
+                stats.record('reply', time.time() - t0, error='empty reply')
             else:
                 conversations.record(session, text, reply)
+                stats.record('reply', time.time() - t0)
 
             self._send(200, {'reply': reply})
 
@@ -629,6 +981,9 @@ def main():
                         help='model for the ollama chat backend (local, free)')
     parser.add_argument('--ollama-host', default='127.0.0.1:11434',
                         help='host:port of the Ollama server')
+    parser.add_argument('--ollama-ctx', type=int, default=OllamaBackend.NUM_CTX,
+                        help='context window; must fit the persona or Ollama '
+                             'truncates it away (default: %(default)s)')
     parser.add_argument('--motion-model', default='opus',
                         help='model for the motion-generation session')
     parser.add_argument('--motion-prompt-file',
@@ -654,8 +1009,10 @@ def main():
     elif args.backend == 'claude-cli':
         backend = ClaudeCliBackend(model=args.cli_model)
     elif args.backend == 'ollama':
-        backend = OllamaBackend(model=args.ollama_model, host=args.ollama_host)
-        logger.info('Chat backend: Ollama %s @ %s', args.ollama_model, args.ollama_host)
+        backend = OllamaBackend(model=args.ollama_model, host=args.ollama_host,
+                                num_ctx=args.ollama_ctx)
+        logger.info('Chat backend: Ollama %s @ %s (num_ctx=%d)',
+                    args.ollama_model, args.ollama_host, args.ollama_ctx)
     else:
         backend = ClaudeBackend(model=args.model, max_tokens=args.max_tokens,
                                 effort=args.effort, workspace_id=args.workspace_id)
@@ -671,7 +1028,7 @@ def main():
                     args.motion_model, len(motion_prompt))
 
     handler = make_handler(backend, Conversations(), args.token,
-                           motion_backend=motion_backend)
+                           motion_backend=motion_backend, stats=Stats())
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
     logger.info('Broker listening on %s:%d (backend=%s)', args.host, args.port, args.backend)
