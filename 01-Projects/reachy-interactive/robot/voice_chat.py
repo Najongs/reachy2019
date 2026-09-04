@@ -1479,6 +1479,11 @@ def main():
     parser.add_argument('--camera-index', default='main',
                         help="which head camera: 'main' (the sharp one, pinned "
                              "by udev), 'sub' (spare), or a raw V4L2 index")
+    parser.add_argument('--collect-people', action='store_true',
+                        help='복도를 지나가는 사람을 촬영해 데이터셋으로 모은다 '
+                             '(~/reachy_logs/persons, 30일 후 자동 삭제)')
+    parser.add_argument('--collect-days', type=int, default=30,
+                        help='사람 사진 보관 기간(일). 0이면 삭제 안 함')
     parser.add_argument('--no-presence', action='store_true',
                         help='disable the local face-detection people watcher')
     parser.add_argument('--attend', action='store_true',
@@ -1579,6 +1584,7 @@ def main():
     hallway = None
     objvis = None
     music_player = None
+    person_db = None
 
     motion_handler = None
 
@@ -1622,6 +1628,34 @@ def main():
                 if args.attend or args.hallway:
                     idle.watcher = watcher
                     logger.info('Head will attend to detected people')
+
+                # 카메라가 머리에 달려 있어서, 목이 도는 동안에는 화면 전체가
+                # 흐른다(사람이 지나가는 것보다도 크게). 목이 언제 움직였는지
+                # 알려 주면, 화면이 안정된 순간에만 움직임을 사람으로 본다.
+                from say_and_move import head_still_for
+                watcher.head_still = head_still_for
+
+                # 지나가는 사람을 데이터셋으로 모은다. 저장 여부(간격·장수·용량·
+                # 보관기간)는 PersonDB 가 스스로 판단하므로 여기서는 넘겨만 준다.
+                if args.collect_people:
+                    try:
+                        from person_db import PersonDB
+                        person_db = PersonDB(retention_days=args.collect_days)
+
+                        def _collect(frame, box_rel):
+                            face = None
+                            if box_rel is not None and frame is not None:
+                                h, w = frame.shape[:2]
+                                x, y, bw, bh = box_rel
+                                face = (x * w, y * h, bw * w, bh * h)
+                            person_db.add(frame, face=face)
+
+                        watcher.on_person = _collect
+                        st = person_db.stats()
+                        logger.info('People collection ON (모은 사진 %d장, 보관 %d일)',
+                                    st.get('photos', 0), args.collect_days)
+                    except Exception:
+                        logger.exception('People collection failed to start')
             except Exception:
                 logger.exception('Presence watcher failed to start')
                 watcher = None
@@ -1700,6 +1734,7 @@ def main():
 
             hallway = HallwayGreeter(
                 watcher, speech, head, idle,
+                person_db=person_db,
                 executor=executor,
                 wave_segments=wave_segments,
                 turn_logger=turn_logger,

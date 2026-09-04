@@ -359,6 +359,18 @@ class Speech(object):
 
 # --- Head motion ------------------------------------------------------------
 
+# 목이 마지막으로 '실제로' 움직인 시각. 카메라가 머리에 달려 있어서, 머리가 도는
+# 동안에는 화면 전체가 흐르고 그게 지나가는 사람보다도 크게 잡힌다(실측: 머리
+# 0.25~0.54 vs 사람 0.12~0.18). 그래서 화면 변화만으로는 둘을 못 가른다.
+# 로봇은 자기가 목을 언제 돌렸는지 알고 있으니, 그 사실을 그대로 알려 준다.
+_LAST_HEAD_MOVE = 0.0
+
+
+def head_still_for():
+    """목 시선이 마지막으로 바뀐 뒤 흐른 시간(초). 클수록 화면이 안정적이다."""
+    return time.time() - _LAST_HEAD_MOVE
+
+
 def point_head(reachy, x, y, z, tilt=True):
     """Point the neck at (x, y, z) by writing disk targets directly.
 
@@ -381,6 +393,13 @@ def point_head(reachy, x, y, z, tilt=True):
 
     for disk, theta in zip(neck.disks, thetas):
         disk.target_rot_position = theta
+
+    # 같은 곳을 계속 다시 써 넣는 것은 '움직임'이 아니다. 시선이 실제로 옮겨갈
+    # 때만 시각을 남긴다 (idle 이 매 틱 기록해도 정지로 보이도록).
+    prev = getattr(reachy.head, '_soft_gaze', None)
+    if prev is None or abs(prev[0] - y) > 0.01 or abs(prev[1] - z) > 0.01:
+        global _LAST_HEAD_MOVE
+        _LAST_HEAD_MOVE = time.time()
 
     # Remember where we are looking, so the next motion can glide from here
     # instead of snapping.
@@ -676,6 +695,10 @@ class IdleMotion(object):
     ATTEND_MAX_Y = 0.35
     ATTEND_MAX_Z = 0.22
     ATTEND_SIGN = 1.0
+    # 얼굴이 이미 화면 가운데면 더 움직이지 않는다. 계속 미세하게 쫓아가면
+    # 시선이 떨려 보이고, 머리에 달린 카메라가 흔들려 사진도 흐려진다.
+    # 학습용 정면 사진은 '머리가 멈춰 있을 때' 나온다.
+    ATTEND_DEADBAND = 0.15
 
     def __init__(self, reachy, distance=0.5, freq=50, watcher=None):
         self.reachy = reachy
@@ -876,6 +899,10 @@ class IdleMotion(object):
 
         def clamp(v, lo, hi):
             return max(lo, min(hi, v))
+
+        if (abs(w.face_error) < self.ATTEND_DEADBAND
+                and abs(w.face_yerr) < self.ATTEND_DEADBAND):
+            return          # 이미 정면으로 보고 있다 - 가만히 둔다
 
         # face_error > 0 means the face is on the right of the image; move the
         # gaze that way to re-center it. Sign is flippable via ATTEND_SIGN.

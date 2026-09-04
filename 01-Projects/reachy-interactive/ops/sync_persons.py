@@ -1,0 +1,214 @@
+"""Pi 에 쌓인 사람 사진을 DGX 로 모아 중앙 데이터셋을 만든다.
+
+로봇의 SD 카드는 작고(8GB대) 보관기간도 30일로 잘라 두었지만, 학습용 데이터는
+오래 그리고 많이 모을수록 좋다. 그래서 사진은 Pi 에서 찍고, 이 스크립트가
+주기적으로 DGX 로 옮겨 중앙 DB에 합친다.
+
+중앙 저장소 (기본): ~/reachy-data/persons/
+    persons.db                 합쳐진 메타데이터
+    <robot>/YYYY-MM-DD/*.jpg   원본 사진 (로봇별로 분리)
+
+같은 사진을 두 번 넣지 않는다 (로봇 이름 + Pi 쪽 행 id 를 유일키로 둔다).
+그래서 몇 번을 돌려도 안전하고, 중간에 끊겨도 다시 돌리면 이어서 받는다.
+
+사용:
+    python3 ops/sync_persons.py                # 받아오고 DB 합치기
+    python3 ops/sync_persons.py --purge-remote # 옮긴 뒤 Pi 쪽 사진 삭제(SD 확보)
+    python3 ops/sync_persons.py --stats        # 중앙 DB 현황만 보기
+"""
+
+import argparse
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+
+DEFAULT_LOCAL = os.path.expanduser('~/reachy-data/persons')
+REMOTE_DIR = 'reachy_logs/persons'
+# ssh 는 포트가 -p, scp 는 -P 다. 섞어 쓰면 scp 가 -p 를 "시각 보존"으로 읽어
+# 엉뚱하게 실패한다.
+SSH_ARGS = ['-p', '2222', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
+SCP_ARGS = ['-P', '2222', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
+REMOTE = 'pi@localhost'
+
+
+def ensure_db(path):
+    """중앙 DB 를 열고 (없으면 만들고) 스키마를 보장한다."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS persons (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            robot       TEXT NOT NULL,      -- 어느 로봇에서 왔는지
+            src_id      INTEGER NOT NULL,   -- Pi 쪽 원래 행 id
+            ts          TEXT, day TEXT,
+            visit_id    TEXT, seq INTEGER,
+            image       TEXT, face_image TEXT,
+            face_x INTEGER, face_y INTEGER, face_w INTEGER, face_h INTEGER,
+            frame_w INTEGER, frame_h INTEGER,
+            sharpness   REAL,
+            interacted  INTEGER DEFAULT 0,
+            UNIQUE(robot, src_id)           -- 같은 사진을 두 번 넣지 않는다
+        )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_day ON persons(day)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_visit ON persons(robot, visit_id)')
+    conn.commit()
+    return conn
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def pull(local_root, robot):
+    """Pi 의 사진과 DB 를 받아온다. 받은 임시 DB 경로를 돌려준다."""
+    img_dir = os.path.join(local_root, robot)
+    os.makedirs(img_dir, exist_ok=True)
+
+    ssh_cmd = 'ssh ' + ' '.join(SSH_ARGS)
+    # 사진: 이미 있는 건 건너뛴다 (증분)
+    r = run(['rsync', '-az', '--partial', '-e', ssh_cmd,
+             '--include=*/', '--include=*.jpg', '--exclude=*',
+             '%s:%s/' % (REMOTE, REMOTE_DIR), img_dir + '/'])
+    if r.returncode != 0:
+        print('  사진 동기화 실패:', (r.stderr or '').strip()[:200])
+        return None
+
+    # DB: 통째로 임시 파일에 받아 온다 (원본은 Pi 가 계속 쓰므로 건드리지 않는다)
+    tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+    tmp.close()
+    r = run(['scp'] + SCP_ARGS + ['-q',
+            '%s:%s/persons.db' % (REMOTE, REMOTE_DIR), tmp.name])
+    if r.returncode != 0:
+        print('  DB 가져오기 실패:', (r.stderr or '').strip()[:200])
+        os.unlink(tmp.name)
+        return None
+    return tmp.name
+
+
+def merge(conn, remote_db, robot):
+    """Pi DB 의 행을 중앙 DB 에 합친다. 새로 들어간 행 수를 돌려준다."""
+    src = sqlite3.connect(remote_db)
+    rows = src.execute('''SELECT id, ts, day, visit_id, seq, image, face_image,
+                                 face_x, face_y, face_w, face_h,
+                                 frame_w, frame_h, sharpness, interacted
+                          FROM persons''').fetchall()
+    added = 0
+    for r in rows:
+        try:
+            conn.execute('''INSERT OR IGNORE INTO persons
+                (robot, src_id, ts, day, visit_id, seq, image, face_image,
+                 face_x, face_y, face_w, face_h, frame_w, frame_h,
+                 sharpness, interacted)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (robot, r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                 r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14]))
+            added += conn.total_changes and 1 or 0
+        except Exception:
+            pass
+    # interacted 는 나중에 갱신될 수 있으므로 항상 최신값으로 맞춰 준다
+    for r in rows:
+        conn.execute('UPDATE persons SET interacted=? WHERE robot=? AND src_id=?',
+                     (r[14], robot, r[0]))
+    conn.commit()
+    src.close()
+    return added
+
+
+def purge_remote(before_day=None):
+    """옮긴 사진을 Pi 에서 지워 SD 를 비운다 (DB 행도 함께)."""
+    script = (
+        "python3 - <<'EOF'\n"
+        "import os, sqlite3\n"
+        "root=os.path.expanduser('~/reachy_logs/persons')\n"
+        "db=os.path.join(root,'persons.db')\n"
+        "c=sqlite3.connect(db)\n"
+        "rows=c.execute('SELECT id,image,face_image FROM persons').fetchall()\n"
+        "n=0\n"
+        "for rid,img,face in rows:\n"
+        "    for rel in (img,face):\n"
+        "        if rel:\n"
+        "            try: os.remove(os.path.join(root,rel))\n"
+        "            except OSError: pass\n"
+        "    n+=1\n"
+        "c.execute('DELETE FROM persons'); c.commit()\n"
+        "for name in os.listdir(root):\n"
+        "    d=os.path.join(root,name)\n"
+        "    if os.path.isdir(d) and not os.listdir(d): os.rmdir(d)\n"
+        "print('purged', n)\n"
+        "EOF")
+    r = run(['ssh'] + SSH_ARGS + [REMOTE, script])
+    return (r.stdout or '').strip()
+
+
+def stats(conn, local_root):
+    q = lambda s: conn.execute(s).fetchone()[0]
+    total = q('SELECT COUNT(*) FROM persons')
+    if not total:
+        print('중앙 데이터셋: 아직 사진 없음')
+        return
+    print('중앙 데이터셋 (%s)' % local_root)
+    print('  사진 %d장 · 방문 %d회 · %d일치'
+          % (total, q('SELECT COUNT(DISTINCT robot||visit_id) FROM persons'),
+             q('SELECT COUNT(DISTINCT day) FROM persons')))
+    print('  얼굴 크롭 %d장 · 대화로 이어진 방문 %d회'
+          % (q('SELECT COUNT(*) FROM persons WHERE face_image IS NOT NULL'),
+             q('SELECT COUNT(DISTINCT robot||visit_id) FROM persons WHERE interacted=1')))
+    sharp = conn.execute(
+        'SELECT COUNT(*) FROM persons WHERE sharpness > 200').fetchone()[0]
+    print('  선명도 200 이상: %d장 (학습에 쓸 만한 것)' % sharp)
+    for day, n in conn.execute(
+            'SELECT day, COUNT(*) FROM persons GROUP BY day ORDER BY day DESC LIMIT 7'):
+        print('    %s  %d장' % (day, n))
+    size = 0
+    for dirpath, _, files in os.walk(local_root):
+        for f in files:
+            try:
+                size += os.path.getsize(os.path.join(dirpath, f))
+            except OSError:
+                pass
+    print('  디스크 사용: %.1f MB' % (size / 1024 / 1024))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--local', default=DEFAULT_LOCAL, help='중앙 저장소 위치')
+    ap.add_argument('--robot', default='reachy', help='로봇 이름 (여러 대일 때 구분)')
+    ap.add_argument('--purge-remote', action='store_true',
+                    help='옮긴 뒤 Pi 쪽 사진 삭제 (SD 확보)')
+    ap.add_argument('--stats', action='store_true', help='현황만 출력')
+    args = ap.parse_args()
+
+    local_root = os.path.expanduser(args.local)
+    conn = ensure_db(os.path.join(local_root, 'persons.db'))
+
+    if args.stats:
+        stats(conn, local_root)
+        return 0
+
+    print('── Pi 에서 사람 사진 가져오기')
+    remote_db = pull(local_root, args.robot)
+    if remote_db is None:
+        print('  가져오지 못했습니다 (터널 확인: systemctl status pi_tunnel)')
+        stats(conn, local_root)
+        return 1
+
+    added = merge(conn, remote_db, args.robot)
+    os.unlink(remote_db)
+    print('  새로 추가된 사진: %d장' % added)
+
+    if args.purge_remote:
+        print('── Pi 쪽 정리')
+        print(' ', purge_remote())
+
+    print()
+    stats(conn, local_root)
+    conn.close()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

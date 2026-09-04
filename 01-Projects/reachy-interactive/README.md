@@ -40,6 +40,7 @@ robot/voice_chat.py                                broker/llm_broker.py
 | `motion_presets.py` | 프리셋 (wave/greet/bow/handshake/pick_to_tray/hug_open/cheer/antenna_dance) |
 | `quick_notes.py` | 단순 패턴(인사/FAQ) 즉답 — LLM 안 거치고 `config/quick_notes.json` 에서 바로 |
 | `presence.py` | 얼굴 검출 + 프레임 차분 움직임 감지(로컬). 사람 쪽으로 고개(`--attend`) |
+| `person_db.py` | 지나가는 사람 사진 데이터셋(SQLite+jpg). 방문 단위 묶기, 흐린 사진 버리기, 보관 30일·SD 여유 확보 |
 | `hallway.py` | 복도 데모(`--hallway`): 방문자 인사·말걸기 유도, 자기 목소리 에코 가드, 이벤트 로그 |
 | `object_vision.py` | MobileNet-SSD 로 물체 검출 → 목을 그쪽으로 조준(비전 유도 파지 1단계) |
 | `music.py` | 짧은 무료 음원 재생 + 박자에 맞춰 춤(머리·안테나·팔). `music/` 클립, 오프라인 |
@@ -48,6 +49,7 @@ robot/voice_chat.py                                broker/llm_broker.py
 | `llm_client.py` | 브로커 HTTP 클라이언트 (stdlib만, Py3.7) |
 | `state_mirror.py` | 실물 엔코더값을 ws(6171)로 방송 → 시뮬 미러 |
 | `calibrate_real.py` / `snap_view.py` | 관절 방향 대조 / 카메라 프레임 저장 |
+| `camera_check.py` | 카메라 초점·수평 맞추기 도구(선명도 실시간 표시, main/sub 구분) |
 
 ## 실행
 
@@ -68,8 +70,14 @@ python3 broker/llm_broker.py --host 127.0.0.1 --port 8080 \
   --system-prompt-file config/persona.txt \
   --motion-model opus --motion-prompt-file config/motion_prompt.txt
 
-# [DGX] 로그 당겨와 분석·개선
+# [DGX] 로그 당겨와 분석·개선 (사람 사진 가져오기 포함)
 bash ops/daily_update.sh
+
+# [DGX] 사람 사진만 따로 가져오기 / 현황 / 학습용으로 뽑기
+python3 ops/sync_persons.py                      # Pi -> 중앙 DB 로 합치기
+python3 ops/sync_persons.py --purge-remote       # 옮긴 뒤 Pi 쪽 원본 삭제(SD 확보)
+python3 ops/persons_export.py --list             # 어떤 게 걸러지는지 미리 보기
+python3 ops/persons_export.py --faces-only --min-face 80 --out ~/ds/faces
 ```
 
 **설치 스크립트**(1회): `ops/install_ollama.sh`(DGX 로컬 LLM), `ops/install_vosk.sh`(오프라인 STT), `ops/install_object_vision.sh`(물체 검출 모델). 대용량 모델은 git 제외.
@@ -132,6 +140,47 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition vosk` + `sudo apt in
 **머리 움직임**
 - 목은 Orbita 3디스크 병렬 로봇 — 시선으로 제어하므로 팔 키프레임 파이프라인 밖. `run_head_gesture` 로 끄덕임/도리도리/상하좌우/젖히기/한바퀴를 로컬 실행
 - **속도 상한 설정이 없다** → 글라이드 시간이 유일한 제어(begin_ramp 1.3s, home 1.8s, 핸드팔로우 램프 1.2s·τ0.35)
+
+## 사람 데이터셋 (수집 → 중앙 DB → 학습용 추출)
+
+복도를 지나가는 사람을 계속 찍어 모은다. 나중에 분류 학습에 쓰는 것이 목적이라,
+"많이"보다 **쓸 수 있는 것**이 남도록 걸러 가며 모은다.
+
+```
+Pi: presence.py --collect-people        DGX: sync_persons.py        persons_export.py
+    얼굴/움직임 감지 → person_db      →   rsync + DB 병합       →   조건 걸어 추출
+    ~/reachy_logs/persons/                ~/reachy-data/persons/     images/ faces/ index.csv
+```
+
+**언제 찍나** — 두 경로가 있다.
+1. **얼굴이 보일 때** (Haar 정면 검출). 4초 간격, 방문당 6장까지.
+2. **얼굴은 없지만 화면이 움직일 때** — 옆모습·뒷모습으로 지나가는 사람. 12초 간격.
+
+**카메라가 머리에 달려 있다는 함정.** 목이 돌면 화면 전체가 흐른다. 실측하면
+머리 회전이 만드는 변화(0.25~0.54)가 사람이 지나갈 때(0.12~0.18)보다 **더 크다**.
+즉 화면 변화량만으로는 둘을 절대 못 가른다. 그래서 로봇이 아는 사실을 쓴다 —
+`say_and_move.head_still_for()` 가 목 시선이 마지막으로 바뀐 시각을 알려 주고,
+목이 0.8초 이상 멎어 있을 때만 화면을 믿는다.
+
+여기에 함정이 하나 더 있다. 사람이 지나가면 idle 모션이 **그쪽으로 고개를 돌린다**.
+찍고 싶은 바로 그 순간에 목이 움직이는 것이다. 그래서 "지금 움직이는가"가 아니라
+"최근 4초 안에 움직였는가"로 판단해, 고개가 멎은 직후를 노려 찍는다.
+
+**정면을 오래 보게 하려고** `IdleMotion.ATTEND_DEADBAND` 를 둔다. 얼굴이 이미 화면
+가운데(±0.15) 면 고개를 더 움직이지 않는다. 계속 미세하게 쫓아가면 시선이 떨리고,
+머리에 달린 카메라가 흔들려 사진도 흐려진다. 좋은 정면 사진은 머리가 멎어 있을 때 나온다.
+
+**품질·용량 안전장치**
+- 선명도 `MIN_SHARPNESS=60` 미만은 버린다(움직이는 중에 찍힌 흐린 사진). 실제 복도 프레임은 370 안팎이라 여유가 크다.
+- 방문당 6장 · 하루 800장 · 보관 30일 · SD 여유 700MB 미만이면 촬영 중단.
+- **방문(visit) 단위로 묶는다.** 복도 로직이 방문을 열어 주지만, 움직임 촬영은 그 로직을 안 거치므로 `person_db` 가 스스로 방문을 연다(`auto-...`). 이게 없으면 장수 카운터가 리셋되지 않아 **6장 뒤로 수집이 영영 멈춘다**.
+
+**중앙 DB** — `UNIQUE(robot, src_id)` 라서 몇 번을 돌려도 중복이 안 쌓이고, 중간에
+끊겨도 다시 돌리면 이어서 받는다. `--purge-remote` 로 옮긴 뒤 Pi 원본을 지워 SD 를 비운다.
+
+**학습용 추출** — `persons_export.py` 가 선명도·얼굴크기·방문당 장수로 걸러
+`images/`, `faces/`, `index.csv` 로 복사한다. 한 사람이 오래 서 있었다고 그 사람만
+잔뜩 들어가지 않도록 방문당 상한(기본 4장)을 두고, 선명한 것부터 남긴다.
 
 ## 지속적 개선 루프 (로그 → 분석 → 반영)
 

@@ -5,6 +5,8 @@
 #   bash ops/daily_update.sh --since 2026-09-03   # 그 날짜 이후만 요약
 #   bash ops/daily_update.sh --merge      # 제안 중 안전·일관된 것 자동 승격까지
 #   bash ops/daily_update.sh --no-clean   # Pi 로그 정리(voice_chat.log 비우기) 생략
+#   bash ops/daily_update.sh --no-persons # 사람 사진 가져오기 생략
+#   bash ops/daily_update.sh --purge-persons  # 사진을 옮긴 뒤 Pi 쪽 원본 삭제(SD 확보)
 #
 # 로봇은 계속 켜져 있으니 logrotate 대신, 여기서 로그를 안전히 당겨온 뒤(=DGX 보관본
 # 갱신) Pi 의 커지는 voice_chat.log 만 비운다. 세션 events.jsonl 은 건드리지 않는다.
@@ -12,24 +14,29 @@
 set -e
 cd "$(dirname "$0")/.."                                  # reachy-interactive/
 PI_LOGS=../../04-Archives/conversation-logs/pi           # 저장소 로그 보관 위치
-SINCE=""; MERGE=""; CLEAN=1
+SINCE=""; MERGE=""; CLEAN=1; PERSONS=1; PURGE=
 while [ $# -gt 0 ]; do
   case "$1" in
     --since) SINCE="--since $2"; shift 2 ;;
     --merge) MERGE="--merge"; shift ;;
     --no-clean) CLEAN=0; shift ;;
+    --no-persons) PERSONS=0; shift ;;
+    --purge-persons) PURGE="--purge-remote"; shift ;;
     *) echo "unknown arg: $1"; exit 1 ;;
   esac
 done
 
 mkdir -p "$PI_LOGS"
 
-echo "── [1/3] Pi 로그 당겨오기 (역터널 2222)"
+echo "── [1/4] Pi 로그 당겨오기 (역터널 2222)"
 PULLED=0
 if ssh -p 2222 -o BatchMode=yes -o ConnectTimeout=10 pi@localhost true 2>/dev/null; then
-  # 작은 로그(<1MB) — 매번 전체를 scp 로 가져와 로컬 보관본 갱신.
-  if scp -P 2222 -o BatchMode=yes -o ConnectTimeout=10 -q -r \
-       pi@localhost:'~/reachy_logs/*' "$PI_LOGS/" 2>/dev/null; then
+  # 작은 로그(<1MB) — 매번 전체를 가져와 로컬 보관본 갱신.
+  # persons/ 는 제외한다: 사람 사진은 [2/4] 가 중앙 데이터셋(~/reachy-data)으로
+  # 따로 옮기므로, 여기서까지 받으면 같은 사진을 두 벌 쌓게 된다.
+  if rsync -az --partial --exclude='persons/' \
+       -e 'ssh -p 2222 -o BatchMode=yes -o ConnectTimeout=10' \
+       pi@localhost:reachy_logs/ "$PI_LOGS/" 2>/dev/null; then
     echo "   가져오기 완료"; PULLED=1
   else
     echo "   ! 일부 파일 복사 실패 - 로컬 보관본 사용"
@@ -48,11 +55,19 @@ turns=$(cat "$PI_LOGS"/*/events.jsonl 2>/dev/null | wc -l)
 echo "   현재 총 턴 수: $turns"
 
 echo
-echo "── [2/3] 활동 다이제스트"
+echo "── [2/4] 사람 사진 → 중앙 데이터셋 (~/reachy-data/persons)"
+if [ "$PERSONS" = 1 ]; then
+  python3 ops/sync_persons.py $PURGE || echo "   ! 사진 동기화 실패 (계속 진행)"
+else
+  echo "   건너뜀 (--no-persons)"
+fi
+
+echo
+echo "── [3/4] 활동 다이제스트"
 python3 ops/log_digest.py "$PI_LOGS" $SINCE
 
 echo
-echo "── [3/3] 노트 제안 (실제 로그 답변 재사용, 실행약속/동작류 제외)"
+echo "── [4/4] 노트 제안 (실제 로그 답변 재사용, 실행약속/동작류 제외)"
 python3 broker/build_notes.py --logs "$PI_LOGS" $MERGE
 
 echo

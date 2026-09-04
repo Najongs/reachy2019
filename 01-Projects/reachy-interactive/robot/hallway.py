@@ -55,7 +55,8 @@ class HallwayGreeter(object):
                  greet_cooldown=3600.0, absence_reset=20.0,
                  linger_after=120.0, prompt_cooldown=3600.0,
                  gesture_cooldown=300.0, max_prompts=1,
-                 snap=None, snap_interval=90.0, snap_budget=200):
+                 snap=None, snap_interval=90.0, snap_budget=200,
+                 person_db=None):
         self.watcher = watcher
         self.speech = speech
         self.head = head
@@ -78,6 +79,9 @@ class HallwayGreeter(object):
         self.snap_budget = snap_budget
         self._last_snap = 0.0
         self._snaps = 0
+        # 사람 데이터셋. 방문 단위로 묶어 두면 나중에 "한 사람의 여러 장"으로
+        # 다룰 수 있고, 대화까지 이어진 방문인지도 표시된다.
+        self.person_db = person_db
 
         # True while the greeter is speaking/gesturing; the main loop skips
         # restarting idle during that window.
@@ -224,11 +228,18 @@ class HallwayGreeter(object):
                     if absence >= self.absence_reset:
                         self._greeted_this_visit = False
                         self._prompts_this_visit = 0
+                        if self.person_db is not None:
+                            self.person_db.start_visit(
+                                time.strftime('%Y%m%d-%H%M%S'))
                         self._log('appeared',
                                   {'absence_s': round(min(absence, 9999), 1)},
                                   image_b64=self._maybe_snap())
 
                 if not person and prev_person:
+                    if self.person_db is not None:
+                        # 이 방문에 대화가 있었는지 표시해 둔다(데이터 선별용).
+                        self.person_db.end_visit(
+                            interacted=(now - self._last_activity) < 60)
                     self._log('left', {
                         'stayed_s': round(now - w.appeared_at, 1),
                         'greeted': self._greeted_this_visit,
