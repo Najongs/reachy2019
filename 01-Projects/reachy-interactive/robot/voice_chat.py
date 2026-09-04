@@ -21,6 +21,7 @@ Say "그만" or "종료" to stop the loop.
 
 import argparse
 import logging
+import json
 import os
 import time
 
@@ -1117,6 +1118,18 @@ def precache_common_lines(speech, notes=None):
     # QuickNotes 는 (패턴들, 답변, 종류) 로 컴파일해 들고 있다.
     for _pats, reply, _kind in getattr(notes, '_compiled', None) or []:
         phrases.append(reply)
+
+    # 로그에서 뽑은, 실제로 되풀이된 답변들 (ops/build_tts_cache_list.py 가 만든다).
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, 'cached_lines.json'),
+                 os.path.join(here, '..', 'config', 'cached_lines.json')):
+        if os.path.exists(path):
+            try:
+                with open(path, encoding='utf-8') as fh:
+                    phrases.extend(json.load(fh).get('lines') or [])
+            except Exception:
+                logger.debug('cached_lines.json 을 읽지 못했습니다', exc_info=True)
+            break
 
     phrases = [p for p in dict.fromkeys(phrases) if p]
     if not phrases:

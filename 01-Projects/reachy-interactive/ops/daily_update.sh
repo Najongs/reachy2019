@@ -8,6 +8,10 @@
 #   bash ops/daily_update.sh --no-persons # 사람 사진 가져오기 생략
 #   bash ops/daily_update.sh --purge-persons  # 사진을 옮긴 뒤 Pi 쪽 원본 삭제(SD 확보)
 #
+# 사람 데이터가 쌓이는 곳 (DGX):
+#   ~/reachy-data/persons/    원본 + persons.db  (모으는 곳, 건드리지 않는다)
+#   ~/reachy-data/dataset/    걸러서 뽑아 낸 것  (images/ faces/ persons/ index.csv)
+#
 # 로봇은 계속 켜져 있으니 logrotate 대신, 여기서 로그를 안전히 당겨온 뒤(=DGX 보관본
 # 갱신) Pi 의 커지는 voice_chat.log 만 비운다. 세션 events.jsonl 은 건드리지 않는다.
 # 노트는 기본 '제안'만 만든다 (config/quick_notes.proposed.json). 검토 후 --merge 로 반영.
@@ -69,6 +73,19 @@ python3 ops/log_digest.py "$PI_LOGS" $SINCE
 echo
 echo "── [4/4] 노트 제안 (실제 로그 답변 재사용, 실행약속/동작류 제외)"
 python3 broker/build_notes.py --logs "$PI_LOGS" $MERGE
+
+echo
+echo "── 사람 이미지 폴더 갱신 (~/reachy-data/dataset)"
+if [ "$PERSONS" = 1 ]; then
+  python3 ops/persons_export.py --out ~/reachy-data/dataset --crop-persons 2>&1 \
+    | tail -4 || echo "   ! 추출 실패 (계속 진행)"
+else
+  echo "   건너뜀 (--no-persons)"
+fi
+
+echo
+echo "── 미리 합성할 답변 목록 갱신 (자주 나온 답변)"
+python3 ops/build_tts_cache_list.py --write | tail -3
 
 echo
 echo "── 완료. 다음 단계:"

@@ -141,6 +141,14 @@ edge 를 못 찾은 것이다.
 그대로 튼다. 인터넷이 끊겨도 이 말들은 자연스러운 목소리로 나오고, 합성 대기도
 없다(실측: 캐시 문구는 0.004초 만에 재생 시작).
 
+미리 합성할 목록은 두 곳에서 온다.
+- 복도 인사말과 노트 즉답 (코드/설정에 적힌 것)
+- **로그에서 실제로 되풀이된 답변** — `ops/build_tts_cache_list.py` 가 events.jsonl
+  에서 2번 이상 나온 답변을 뽑아 `config/quick_notes.json` 옆의
+  `cached_lines.json` 에 적는다. 한 번만 나온 문장은 넣지 않는다(LLM 이 그때그때
+  만든 말은 다시 나오지 않아 자리만 차지한다). 시각·온도처럼 값이 바뀌는 문장도
+  거른다. `daily_update.sh` 가 매번 갱신하고, `deploy.sh` 가 Pi 로 보낸다.
+
 합성 자체에는 인터넷이 필요한데 복도 와이파이는 부팅 직후에 특히 잘 끊긴다
 (실제로 39개 중 7개가 그때 이름 풀이 실패로 빠졌다). 그래서 미리 합성은
 백그라운드에서 돌면서 1분 간격으로 최대 10번까지 빠진 것을 다시 채운다.
@@ -231,9 +239,19 @@ Orbita 목은 `connect()` 직후 **풀린 채로** 온다(실측: 디스크 셋 
 
 ```
 Pi: presence.py --collect-people        DGX: sync_persons.py        persons_export.py
-    얼굴/움직임 감지 → person_db      →   rsync + DB 병합       →   조건 걸어 추출
-    ~/reachy_logs/persons/                ~/reachy-data/persons/     images/ faces/ index.csv
+    사람 검출(SSD) → person_db        →   rsync + DB 병합       →   조건 걸어 추출
+    ~/reachy_logs/persons/                ~/reachy-data/persons/     ~/reachy-data/dataset/
 ```
+
+**DGX 에서 어디에 쌓이나**
+
+| 위치 | 무엇 | 성격 |
+|---|---|---|
+| `~/reachy-data/persons/` | `persons.db` + `reachy/YYYY-MM-DD/*.jpg` | **모으는 곳.** 원본, 지우지 않는다 |
+| `~/reachy-data/dataset/` | `images/` `faces/` `persons/` `index.csv` | **뽑아 낸 것.** 조건으로 거른 사본, 언제든 다시 만들 수 있다 |
+
+`persons/` 에는 사람 상자대로 자른 이미지가 들어간다(학습에 바로 쓰는 용도).
+`bash ops/daily_update.sh` 가 둘 다 갱신한다.
 
 **언제 찍나** — **SSD 가 사람을 검출했을 때만** 찍는다(신뢰도 0.5 이상).
 Haar 얼굴 검출은 '찍을지'를 정하지 않고 **얼굴 상자만 얹는** 역할이다. 예전에는
