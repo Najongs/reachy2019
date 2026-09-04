@@ -1619,6 +1619,7 @@ def main():
     reachy = None
     head = None
     idle = None
+    neck_hold = None
     watcher = None
     hallway = None
     objvis = None
@@ -1652,6 +1653,17 @@ def main():
         head = TalkingHead(reachy)
         head.setup()
         idle = IdleMotion(reachy)
+
+        # 목을 계속 붙잡는다. connect() 직후 목은 풀린 채로 오고(실측: 디스크
+        # 셋 다 compliant), 풀린 목은 중력에 처졌다가 누가 다시 굳히는 순간
+        # 마지막 목표값으로 확 돌아간다 - 대기 중에 이따금 '팍' 하고 움직이는
+        # 정체가 이것이다. 대화 루프도 강성을 다시 잡지만 한 바퀴에 한 번뿐이라,
+        # 아무도 말을 걸지 않는 복도에서는 그 간격이 십수 초까지 벌어진다.
+        from say_and_move import NeckHold
+        try:
+            neck_hold = NeckHold(reachy).start()
+        except Exception:
+            logger.exception('목 붙잡기를 시작하지 못했습니다')
 
         # Local people awareness: a background face watcher so the robot knows
         # someone is there (free, no LLM). With --attend it also turns the head
@@ -1818,6 +1830,8 @@ def main():
     except KeyboardInterrupt:
         print()
     finally:
+        if neck_hold is not None:
+            neck_hold.stop()
         if hallway is not None:
             hallway.stop()
         if watcher is not None:

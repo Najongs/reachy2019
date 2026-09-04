@@ -359,6 +359,21 @@ class Speech(object):
 
 # --- Head motion ------------------------------------------------------------
 
+def gaze_thetas(reachy, x, y, z, tilt=True):
+    """시선 방향 (x, y, z) 를 목 디스크 세 개의 각도로 바꾼다.
+
+    도달할 수 없는 방향이면 None. point_head 와 목 되잡기가 같은 계산을 쓰도록
+    떼어 두었다.
+    """
+    neck = reachy.head.neck
+    offset = GAZE_TILT * (x / 0.5) if tilt else 0.0
+    q = neck.model.find_quaternion_transform([1, 0, 0], [x, y, z + offset])
+    try:
+        return neck.model.get_angles_from_quaternion(q.w, q.x, q.y, q.z)
+    except ValueError:
+        return None
+
+
 def point_head(reachy, x, y, z, tilt=True):
     """Point the neck at (x, y, z) by writing disk targets directly.
 
@@ -371,20 +386,136 @@ def point_head(reachy, x, y, z, tilt=True):
     """
     neck = reachy.head.neck
 
-    offset = GAZE_TILT * (x / 0.5) if tilt else 0.0
-    q = neck.model.find_quaternion_transform([1, 0, 0], [x, y, z + offset])
-    try:
-        thetas = neck.model.get_angles_from_quaternion(q.w, q.x, q.y, q.z)
-    except ValueError:
+    thetas = gaze_thetas(reachy, x, y, z, tilt=tilt)
+    if thetas is None:
         # Target outside of Orbita's reachable orientations, skip this step.
         return
 
     for disk, theta in zip(neck.disks, thetas):
         disk.target_rot_position = theta
 
+    # 마지막으로 '실제로 명령한' 디스크 각도. 시선 (y, z) 만 기억해 두면 tilt
+    # 적용 여부를 알 수 없어, 되돌릴 때 엉뚱한 곳을 향한다(실측 10.4도 차이).
+    reachy.head._soft_thetas = tuple(thetas)
+
     # Remember where we are looking, so the next motion can glide from here
     # instead of snapping.
     reachy.head._soft_gaze = (y, z)
+
+
+# -- Neck hold ---------------------------------------------------------------
+NECK_HOLD_INTERVAL = 1.0     # 목 강성을 다시 확인하는 주기(초)
+NECK_REGRIP_GLIDE = 1.2      # 되잡은 뒤 원래 보던 곳으로 돌아가는 시간(초)
+NECK_REGRIP_DEADBAND = 1.5   # 이보다 덜 어긋났으면 되돌리지 않는다(도)
+
+
+class NeckHold(object):
+    """대기 중에도 목을 계속 붙잡아 둔다.
+
+    Orbita 목은 connect() 직후 풀린 상태로 온다(실측: compliant 셋 다 True).
+    풀린 목은 중력에 처지고, 다음에 누가 다시 굳히는 순간 마지막 목표값으로
+    확 돌아간다 - 대기 중에 이따금 '팍' 하고 움직이는 정체가 이것이다.
+    대화 루프도 강성을 다시 잡긴 하지만 한 바퀴에 한 번뿐이라, 아무도 말을
+    걸지 않는 복도에서는 그 간격이 십수 초까지 벌어진다.
+
+    그래서 이 스레드가 (1) 1초마다 강성을 확인하고, (2) 풀려 있었다면 목표값을
+    '지금 있는 자리'로 먼저 덮어써서 튀지 않게 잡은 뒤, (3) 원래 보던 방향으로
+    천천히 되돌린다.
+
+    되잡은 횟수를 로그로 남긴다. 정말 풀리는 일이 있는지, 있다면 얼마나 잦은지
+    추측하지 않고 알기 위해서다.
+    """
+
+    def __init__(self, reachy, interval=NECK_HOLD_INTERVAL):
+        self.reachy = reachy
+        self.interval = interval
+        self.regrips = 0
+        self._stop = None
+        self._thread = None
+
+    def _disks(self):
+        return self.reachy.head.neck.disks
+
+    def is_limp(self):
+        """목 디스크 중 하나라도 힘이 풀려 있나."""
+        try:
+            return any(d.compliant for d in self._disks())
+        except Exception:
+            return False
+
+    def grip(self, quiet=False):
+        """튀지 않게 목을 다시 잡는다."""
+        disks = self._disks()
+        try:
+            here = [d.rot_position for d in disks]
+        except Exception:
+            here = None
+
+        # 굳히기 전에 '지금 자리'를 목표로 써 둔다. 풀린 상태의 쓰기는 무시될
+        # 수 있으므로 굳힌 뒤에 한 번 더 쓴다. 이 두 번 사이 간격은 순간이라
+        # 눈에 보이는 움직임이 생기지 않는다.
+        if here is not None:
+            for d, p in zip(disks, here):
+                d.target_rot_position = p
+        try:
+            self.reachy.head.compliant = False
+        except Exception:
+            logger.debug('목 강성 설정 실패', exc_info=True)
+            return
+        if here is not None:
+            for d, p in zip(disks, here):
+                d.target_rot_position = p
+
+        self.regrips += 1
+        if not quiet:
+            logger.warning('목이 풀려 있어 다시 잡았습니다 (%d번째)', self.regrips)
+        self._glide_back()
+
+    def _glide_back(self):
+        """처져 있었다면, 마지막으로 명령했던 목 자세로 천천히 되돌린다."""
+        thetas = getattr(self.reachy.head, '_soft_thetas', None)
+        if thetas is None:
+            return                      # 아직 목을 움직인 적이 없다
+        try:
+            here = [d.rot_position for d in self._disks()]
+        except Exception:
+            return
+        off = max(abs(a - b) for a, b in zip(thetas, here))
+        if off < NECK_REGRIP_DEADBAND:
+            return                      # 제자리다 - 건드리지 않는다
+        try:
+            # goto 가 보간을 해 준다. 되잡기는 드문 일이라 스레드 비용은 괜찮다.
+            self.reachy.head.neck.goto(list(thetas), duration=NECK_REGRIP_GLIDE,
+                                       wait=False, interpolation_mode='minjerk')
+            logger.info('처져 있던 목을 %.1f도 되돌립니다', off)
+        except Exception:
+            logger.debug('되돌리기 실패', exc_info=True)
+
+    def _loop(self):
+        while not self._stop.wait(self.interval):
+            try:
+                if self.is_limp():
+                    self.grip()
+            except Exception:
+                logger.debug('목 붙잡기 실패', exc_info=True)
+
+    def start(self):
+        from threading import Event, Thread
+
+        self._stop = Event()
+        # 시작할 때 한 번은 조용히 잡아 둔다 (connect 직후는 늘 풀려 있다).
+        self.grip(quiet=True)
+        self._thread = Thread(target=self._loop)
+        self._thread.daemon = True
+        self._thread.start()
+        logger.info('목 붙잡기 시작 (%.1f초마다 확인)', self.interval)
+        return self
+
+    def stop(self):
+        if self._stop is not None:
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=2)
 
 
 # -- Neck (Orbita) gestures --------------------------------------------------
