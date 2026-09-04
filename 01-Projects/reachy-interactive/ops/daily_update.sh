@@ -99,6 +99,10 @@ else
 fi
 
 echo
+echo "── 방문별 요약 (누가 있었고 무슨 말이 오갔나)"
+python3 ops/visit_report.py --limit 5 2>&1 | head -20 || true
+
+echo
 echo "── 미리 합성할 답변 목록 갱신 (자주 나온 답변)"
 python3 ops/build_tts_cache_list.py --write | tail -3
 

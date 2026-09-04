@@ -160,6 +160,15 @@ class PersonDB(object):
             self._visit_count = 0
             self._visit_auto = True
 
+    @property
+    def visit_id(self):
+        """지금 진행 중인 방문 id (없으면 None).
+
+        대화 기록에 이 값을 함께 남겨, 나중에 군집으로 이 방문이 '누구'인지
+        알아냈을 때 그 사람이 무슨 말을 했는지까지 따라오게 한다.
+        """
+        return self._visit_id
+
     def should_capture(self, faceless=False):
         """지금 한 장 더 찍어도 되는지 (간격·장수·용량 제한)."""
         now = time.strftime('%Y-%m-%d')

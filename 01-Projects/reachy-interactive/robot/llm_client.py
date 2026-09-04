@@ -58,6 +58,28 @@ OFFLINE_LINES = [
 REFUSAL_LINE = '그건 대답하기 어려운 질문이에요.'
 
 
+# 터널이 끊긴 순간(브로커 포트가 안 열려 있음)에는 urlopen 이 즉시 실패한다.
+# 로그를 보면 실패한 대화 18건 중 10건이 지연 0.0초 - 모델이 느린 게 아니라
+# 연결 자체가 없었다. pi_tunnel 은 Restart=always 로 곧 돌아오므로, 그 몇 초를
+# 기다려 주기만 하면 대부분 살아난다. 어차피 그동안 로봇은 "음..." 하며
+# 뜸을 들이고 있으니, 사람이 듣기에는 캔 답변보다 훨씬 낫다.
+CONNECT_RETRIES = 2
+CONNECT_BACKOFF = 2.5
+
+
+def _retry_connect(attempt, what):
+    """연결 자체가 실패했을 때 다시 시도할지. 기다렸다가 True."""
+    import time
+
+    if attempt >= CONNECT_RETRIES:
+        return False
+    wait = CONNECT_BACKOFF * (attempt + 1)
+    logger.warning('%s - %.1f초 뒤 다시 시도합니다 (%d/%d)',
+                   what, wait, attempt + 1, CONNECT_RETRIES)
+    time.sleep(wait)
+    return True
+
+
 def _post_json(url, payload, headers, timeout):
     """POST json and return the parsed response."""
     data = json.dumps(payload).encode('utf-8')
@@ -133,20 +155,98 @@ class BrokerClient(BaseClient):
         if image:
             body['image'] = image
 
-        try:
-            payload = _post_json(self.url + '/reply', body,
-                                 self._headers(), self.timeout)
-        except urllib.error.HTTPError as e:
-            logger.warning('Broker returned %s: %s', e.code, e.read()[:200])
-            return None
-        except (urllib.error.URLError, OSError) as e:
-            logger.warning('Cannot reach broker at %s: %s', self.url, e)
-            return None
-        except ValueError as e:
-            logger.warning('Broker sent invalid json: %s', e)
-            return None
+        for attempt in range(CONNECT_RETRIES + 1):
+            try:
+                payload = _post_json(self.url + '/reply', body,
+                                     self._headers(), self.timeout)
+            except urllib.error.HTTPError as e:
+                # 브로커는 살아 있고 모델이 실패한 것 - 다시 물어도 같다.
+                logger.warning('Broker returned %s: %s', e.code, e.read()[:200])
+                return None
+            except (urllib.error.URLError, OSError) as e:
+                if _retry_connect(attempt, '브로커에 닿지 못했습니다: {}'.format(e)):
+                    continue
+                logger.warning('Cannot reach broker at %s: %s', self.url, e)
+                return None
+            except ValueError as e:
+                logger.warning('Broker sent invalid json: %s', e)
+                return None
 
-        return payload.get('reply')
+            return payload.get('reply')
+
+        return None
+
+    def ask_stream(self, text, on_sentence, image=None):
+        """문장이 완성되는 대로 하나씩 받아 on_sentence 로 넘긴다.
+
+        답을 다 기다렸다 말하면 생성(1.2초)과 음성 합성(1.5초)이 통째로
+        직렬이 된다. 첫 문장은 0.4초면 나오므로, 받는 즉시 말하기 시작하면
+        첫 소리까지가 1초쯤 빨라진다.
+
+        전체 답을 돌려준다. 한 문장도 못 받았으면 None (호출한 쪽은 평소의
+        캔 답변으로 내려가면 된다). 절대 예외를 올리지 않는다.
+        """
+        body = {'text': text, 'session': self.session, 'stream': True}
+        if image:
+            body['image'] = image
+        data = json.dumps(body).encode('utf-8')
+
+        for attempt in range(CONNECT_RETRIES + 1):
+            request = urllib.request.Request(self.url + '/reply', data=data,
+                                             method='POST')
+            request.add_header('Content-Type', 'application/json')
+            for name, value in self._headers().items():
+                request.add_header(name, value)
+
+            said_anything = False
+            try:
+                response = urllib.request.urlopen(request, timeout=self.timeout)
+            except urllib.error.HTTPError as e:
+                logger.warning('Broker returned %s: %s', e.code, e.read()[:200])
+                return None
+            except (urllib.error.URLError, OSError) as e:
+                if _retry_connect(attempt, '브로커에 닿지 못했습니다: {}'.format(e)):
+                    continue
+                logger.warning('Cannot reach broker at %s: %s', self.url, e)
+                return None
+
+            parts = []
+            try:
+                for line in response:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line.decode('utf-8'))
+                    except ValueError:
+                        continue
+                    sentence = event.get('sentence')
+                    if sentence:
+                        parts.append(sentence)
+                        said_anything = True
+                        try:
+                            on_sentence(sentence)
+                        except Exception:
+                            logger.exception('문장 처리 중 오류')
+                    if event.get('done'):
+                        break
+            except (urllib.error.URLError, OSError) as e:
+                # 말하는 도중 끊겼다. 이미 소리를 냈다면 되돌릴 수 없으니
+                # 받은 데까지 쓴다.
+                logger.warning('스트림이 중간에 끊겼습니다: %s', e)
+                if not said_anything and _retry_connect(
+                        attempt, '스트림이 시작도 못 했습니다'):
+                    continue
+            finally:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+            reply = ' '.join(parts).strip()
+            return reply or None
+
+        return None
 
     def ask_motion(self, text, image=None, timeout=150):
         """Ask the motion session to design a gesture.

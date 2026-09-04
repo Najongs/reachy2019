@@ -25,6 +25,87 @@ def _bigrams(text):
     return {s[i:i + 2] for i in range(len(s) - 1)}
 
 
+# 사내 인사 캠페인 멘트. 코드가 아니라 config/campaign_lines.json 에 둔다 -
+# 문구는 홍보 사정으로 바뀌고, 그때마다 로봇 코드를 고쳐 다시 배포하는 건
+# 과하다. 파일이 없거나 깨져 있으면 아래 기본값으로 조용히 돌아간다.
+CAMPAIGN_LINES = [
+    '먼저 건넨 인사, 한 걸음 가까워진 우리!',
+    '우리 먼저 인사해요!',
+]
+# 포스터 QR 안내. 표어와 나눠 두는 이유: QR 은 걸음을 멈춘 사람만 찍을 수
+# 있으므로, 스쳐 지나가는 사람에게 읊으면 그냥 흘러간다.
+CAMPAIGN_INVITE = [
+    '제 앞에 포스터 보이시죠? QR 코드 찍으시면 행사에 참여하실 수 있어요!',
+]
+CAMPAIGN_EVERY = 3          # 인사 세 번 중 한 번만 덧붙인다
+
+
+def load_campaign(path=None):
+    """캠페인 멘트를 읽어 (표어들, QR 안내들, 주기) 로 돌려준다.
+
+    Pi 는 모든 파일을 ~/Documents/ 에 평면으로 두고, DGX/git 은 PARA 구조라
+    config/ 아래에 둔다. 양쪽을 다 본다.
+    """
+    import json
+    import os
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [path] if path else [
+        os.path.join(here, 'campaign_lines.json'),
+        os.path.join(here, '..', 'config', 'campaign_lines.json'),
+    ]
+    for candidate in candidates:
+        if not candidate or not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, encoding='utf-8') as fh:
+                data = json.load(fh)
+            lines = [ln.strip() for ln in (data.get('lines') or []) if ln.strip()]
+            invite = [ln.strip() for ln in (data.get('invite') or []) if ln.strip()]
+            every = int(data.get('every') or CAMPAIGN_EVERY)
+            if lines or invite:
+                logger.info('캠페인 멘트 %d개 + 포스터 QR 안내 %d개 '
+                            '(%d번에 한 번) - %s',
+                            len(lines), len(invite), every, candidate)
+                return lines, invite, max(1, every)
+        except Exception:
+            logger.warning('캠페인 멘트를 읽지 못했습니다: %s', candidate,
+                           exc_info=True)
+        break
+    return list(CAMPAIGN_LINES), list(CAMPAIGN_INVITE), CAMPAIGN_EVERY
+
+
+def all_spoken_lines():
+    """복도 인사에서 나올 수 있는 모든 문장. TTS 미리 합성용.
+
+    캠페인 멘트는 인사말 뒤에 붙어 하나의 문장으로 합성되므로, 조합까지
+    전부 돌려줘야 실제로 캐시가 맞는다.
+    """
+    lines, invite, _ = load_campaign()
+    tags = _interleave(lines, invite)
+    out = (list(HallwayGreeter.GREETINGS) + list(HallwayGreeter.PROMPTS)
+           + list(lines) + list(invite))
+    for greeting in HallwayGreeter.GREETINGS:
+        for tag in tags:
+            out.append(greeting + ' ' + tag)
+    return list(dict.fromkeys(out))
+
+
+def _interleave(lines, invite):
+    """표어와 QR 안내를 번갈아 놓은 한 줄짜리 순번표.
+
+    덧붙일 차례마다 이 목록을 순서대로 돈다. 그래서 표어만 나가는 날도,
+    QR 안내만 되풀이되는 날도 없다.
+    """
+    out = []
+    for i in range(max(len(lines), len(invite))):
+        if i < len(lines):
+            out.append(lines[i])
+        if i < len(invite):
+            out.append(invite[i])
+    return out
+
+
 class HallwayGreeter(object):
     """Proactive greeting/prompting for an unattended hallway demo.
 
@@ -53,10 +134,11 @@ class HallwayGreeter(object):
     def __init__(self, watcher, speech, head, idle,
                  executor=None, wave_segments=None, turn_logger=None,
                  greet_cooldown=3600.0, absence_reset=20.0,
-                 linger_after=120.0, prompt_cooldown=3600.0,
+                 linger_after=40.0, prompt_cooldown=600.0,
                  gesture_cooldown=300.0, max_prompts=1,
                  snap=None, snap_interval=90.0, snap_budget=200,
-                 person_db=None):
+                 person_db=None, campaign=None, campaign_every=None,
+                 invite=None):
         self.watcher = watcher
         self.speech = speech
         self.head = head
@@ -90,9 +172,23 @@ class HallwayGreeter(object):
         # begin_turn/end_turn) - hard-mutes all proactive behavior.
         self.in_turn = False
 
+        # 사내 인사 캠페인. 인사 끝에 가끔만 붙인다 - 매번 붙이면 광고가
+        # 되고, 지나가는 사람이 로봇 말을 끝까지 듣지 않게 된다.
+        loaded_lines, loaded_invite, loaded_every = load_campaign()
+        self.campaign = list(campaign) if campaign is not None else loaded_lines
+        self.campaign_invite = (list(invite) if invite is not None
+                                else loaded_invite)
+        self.campaign_every = (campaign_every if campaign_every is not None
+                               else loaded_every)
+        # 표어와 QR 안내를 번갈아 붙인다.
+        self._campaign_rotation = _interleave(self.campaign, self.campaign_invite)
+        self._greets = 0            # 몇 번째 인사인지 (주기 계산용)
+        self._campaign_at = 0       # 다음에 쓸 멘트 (순서대로 돌린다)
+
         self._last_activity = 0.0
         self._last_greet = 0.0
         self._last_prompt = 0.0
+        self._greeted_at = 0.0
         self._last_gesture = 0.0
         self._greeted_this_visit = False
         self._prompts_this_visit = 0
@@ -261,25 +357,51 @@ class HallwayGreeter(object):
                     elif (self._greeted_this_visit
                           and self._prompts_this_visit < self.max_prompts
                           and now - w.appeared_at >= self.linger_after
+                          and now - self._greeted_at >= self.linger_after
                           and now - self._last_prompt >= self.prompt_cooldown
                           and now - self._last_activity >= self.linger_after):
                         self._prompt()
             except Exception:
                 logger.exception('Hallway greeter loop error')
 
+    def _next_campaign_line(self):
+        """이번 인사에 붙일 캠페인 멘트. 붙일 차례가 아니면 None.
+
+        무작위가 아니라 순서대로 돌린다: 하루에 인사가 몇 번 안 나가므로,
+        무작위로 뽑으면 같은 멘트만 계속 나가는 날이 생긴다.
+        """
+        if not self._campaign_rotation:
+            return None
+        self._greets += 1
+        if self._greets % self.campaign_every:
+            return None
+        line = self._campaign_rotation[
+            self._campaign_at % len(self._campaign_rotation)]
+        self._campaign_at += 1
+        return line
+
     def _greet(self):
         line = random.choice(self.GREETINGS)
+        tag = self._next_campaign_line()
+        if tag:
+            line = line + ' ' + tag
         self._last_greet = time.time()
         self._greeted_this_visit = True
-        self._last_prompt = time.time()   # linger timer starts after greeting
+        # 인사 시각은 _last_prompt 가 아니라 여기에 남긴다. 예전에는 인사할 때
+        # _last_prompt 를 찍었는데, 루프가 그 값에 prompt_cooldown(1시간)을
+        # 걸어 검사하므로 "인사 후 1시간이 지난 방문" 이라는 불가능한 조건이
+        # 됐다. 로그 159건에 prompted 가 0건이었던 이유다.
+        self._greeted_at = time.time()
 
         wave = (self.executor is not None and self.wave_segments
                 and time.time() - self._last_gesture >= self.gesture_cooldown)
-        logger.info('Greeting a visitor%s', ' (with wave)' if wave else '')
+        logger.info('Greeting a visitor%s%s', ' (with wave)' if wave else '',
+                    ' (+campaign)' if tag else '')
         self._say(line, gesture=self.wave_segments if wave else None)
         if wave:
             self._last_gesture = time.time()
-        self._log('greeted', {'text': line, 'wave': bool(wave)})
+        self._log('greeted', {'text': line, 'wave': bool(wave),
+                              'campaign': tag})
 
     def _greet_silent(self):
         """Wave hello without speaking - the between-greetings default."""
@@ -321,12 +443,22 @@ class HallwayGreeter(object):
             logger.exception('Idle restart failed')
 
     def _prompt(self):
-        line = random.choice(self.PROMPTS)
+        # 걸음을 멈추고 머무는 사람 - 포스터를 읽고 QR 을 찍을 수 있는
+        # 유일한 상대다. 그래서 여기서는 QR 안내를 먼저 건넨다.
+        kind = 'prompt'
+        if self.campaign_invite:
+            line = random.choice(self.campaign_invite)
+            kind = 'invite'
+        elif self.campaign and random.random() < 0.3:
+            line = random.choice(self.campaign)
+            kind = 'campaign'
+        else:
+            line = random.choice(self.PROMPTS)
         self._last_prompt = time.time()
         self._prompts_this_visit += 1
-        logger.info('Prompting a lingering visitor')
+        logger.info('Prompting a lingering visitor (%s)', kind)
         self._say(line)
-        self._log('prompted', {'text': line})
+        self._log('prompted', {'text': line, 'campaign': kind})
 
     def _say(self, line, gesture=None):
         """Speak (and optionally wave) without fighting the idle motions."""

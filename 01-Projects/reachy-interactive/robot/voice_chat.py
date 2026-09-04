@@ -266,6 +266,11 @@ class TurnLogger(object):
         self.frames = os.path.join(self.root, 'frames')
         os.makedirs(self.frames, exist_ok=True)
         self.path = os.path.join(self.root, 'events.jsonl')
+        # 지금 누가 앞에 있는지 알려 주는 함수(person_db.visit_id). 모든 이벤트에
+        # 방문 id 를 붙여, 나중에 군집으로 그 방문이 '누구'인지 알아냈을 때
+        # 그 사람이 무슨 말을 했는지까지 따라오게 한다. 이게 없으면 사진과
+        # 대화가 끊겨, 사람을 알아봐도 아는 게 얼굴뿐이다.
+        self.visit_of = None
         self._seq = 0
         self._disk_checked = 0.0
         self._disk_ok = True
@@ -293,6 +298,13 @@ class TurnLogger(object):
 
         try:
             entry = {'ts': time.strftime('%Y-%m-%d %H:%M:%S'), 'kind': kind}
+            if self.visit_of is not None:
+                try:
+                    visit = self.visit_of()
+                except Exception:
+                    visit = None
+                if visit:
+                    entry['visit_id'] = visit
             entry.update(data)
 
             if image_b64 and self._frames_ok():
@@ -1110,8 +1122,10 @@ def precache_common_lines(speech, notes=None):
 
     phrases = []
     try:
-        from hallway import HallwayGreeter
-        phrases.extend(HallwayGreeter.GREETINGS)
+        # 인사말·권유말에 더해, 캠페인 멘트가 붙은 조합까지 전부. 붙은 문장은
+        # 통째로 한 번에 합성되므로 조합을 캐시해야 실제로 캐시가 맞는다.
+        from hallway import all_spoken_lines
+        phrases.extend(all_spoken_lines())
     except Exception:
         logger.debug('복도 인사말을 읽지 못했습니다', exc_info=True)
 
@@ -1165,6 +1179,72 @@ def precache_common_lines(speech, notes=None):
     return len(phrases)
 
 
+# 첫 문장을 기다리는 한계. 모델이 1.2초면 답하므로 넉넉하다. 이걸 넘으면
+# 스트리밍을 포기하고 평소의 한 번에 받는 경로로 내려간다.
+STREAM_FIRST_WAIT = 25.0
+STREAM_NEXT_WAIT = 20.0
+
+
+def stream_reply(client, text, image=None):
+    """브로커에 스트리밍으로 묻는다. (첫 문장, 나머지 이터레이터, 결과칸).
+
+    첫 문장이 닿을 때까지만 막는다. 그 뒤 문장들은 오는 대로 흘려 주므로,
+    부르는 쪽은 첫 문장을 말하는 동안 나머지를 받을 수 있다.
+
+    스트리밍을 쓸 수 없거나 한 문장도 못 받으면 (None, None, 결과칸).
+    """
+    if not hasattr(client, 'ask_stream'):
+        return None, None, None
+
+    from queue import Empty, Queue
+    from threading import Thread
+
+    q = Queue()
+    box = {'reply': None}
+
+    def producer():
+        try:
+            box['reply'] = client.ask_stream(text, q.put, image=image)
+        except Exception:
+            logger.exception('스트리밍 요청이 실패했습니다')
+        finally:
+            q.put(None)
+
+    thread = Thread(target=producer)
+    thread.daemon = True
+    thread.start()
+
+    try:
+        first = q.get(timeout=STREAM_FIRST_WAIT)
+    except Empty:
+        logger.warning('첫 문장이 %.0f초 안에 오지 않았습니다', STREAM_FIRST_WAIT)
+        first = None
+
+    if not first:
+        return None, None, box
+
+    def rest():
+        while True:
+            try:
+                item = q.get(timeout=STREAM_NEXT_WAIT)
+            except Empty:
+                logger.warning('다음 문장을 기다리다 끊었습니다')
+                return
+            if item is None:
+                return
+            yield item
+
+    return first, rest(), box
+
+
+def _sentence_stream(first, rest):
+    """첫 문장과 나머지를 하나의 흐름으로 잇는다."""
+    yield first
+    if rest is not None:
+        for item in rest:
+            yield item
+
+
 def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
              ack_delay=0.8, idle=None, vision=False, camera_side='left',
              camera_index=0, motion_handler=None, turn_logger=None, notes=None,
@@ -1172,7 +1252,7 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
     """Main conversation loop. Blocks until a stop word or Ctrl-C."""
     import random
 
-    from say_and_move import say_and_move
+    from say_and_move import say_and_move, say_sentences_and_move
 
     def speak(line):
         if reachy is not None:
@@ -1187,7 +1267,7 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
         _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
              say_and_move, random, speak, vision, camera_side, camera_index,
              motion_handler, turn_logger, notes, hallway, objvis,
-             music_player)
+             music_player, say_sentences_and_move)
     finally:
         # Order matters: silence the greeter FIRST so its finally-block can't
         # restart idle after we stop it (then throw against a closed robot).
@@ -1201,7 +1281,8 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
 def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_and_move, random, speak, vision=False, camera_side='left',
          camera_index=0, motion_handler=None, turn_logger=None, notes=None,
-         hallway=None, objvis=None, music_player=None):
+         hallway=None, objvis=None, music_player=None,
+         say_sentences_and_move=None):
     from threading import Event, Thread
 
     last_kind = None   # 직전 턴 종류 (motion/chat) — 문맥 라우팅용
@@ -1489,40 +1570,71 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             except Exception:
                 logger.debug('thinking accent failed', exc_info=True)
 
+        def finish_fillers():
+            """뜸 들이는 소리를 끊고 답할 준비를 한다."""
+            if head is not None:
+                head.stop_thinking()
+            filler_stop.set()
+            if filler_thread is not None:
+                # Wait for the hum to finish its word (bounded by
+                # FILLER_TAIL_MAX inside the loop), then a short beat so the
+                # answer does not start on top of it.
+                filler_thread.join(timeout=FILLER_TAIL_MAX + 0.5)
+                if filler_started.is_set():
+                    time.sleep(FILLER_BREATH)
+
         t_ask = time.time()
-        reply = client.ask_or_fallback(text, image=image)
-        latency = round(time.time() - t_ask, 1)
 
-        if head is not None:
-            head.stop_thinking()
+        # 문장이 완성되는 대로 받아 바로 말한다. 답을 다 기다렸다 합성하면
+        # 생성(1.2초)과 음성 합성(1.5초)이 통째로 직렬이 되는데, 첫 문장은
+        # 0.4초면 나오므로 첫 소리까지가 1초쯤 빨라진다.
+        first = rest = box = None
+        if (reachy is not None and speech is not None
+                and say_sentences_and_move is not None):
+            first, rest, box = stream_reply(client, text, image=image)
 
-        filler_stop.set()
-        if filler_thread is not None:
-            # Wait for the hum to finish its word (bounded by FILLER_TAIL_MAX
-            # inside the loop), then a short beat so the answer does not start
-            # on top of it.
-            filler_thread.join(timeout=FILLER_TAIL_MAX + 0.5)
-            if filler_started.is_set():
-                time.sleep(FILLER_BREATH)
+        if first is not None:
+            latency = round(time.time() - t_ask, 1)
+            finish_fillers()
+            # Gesture a little while talking - a talking head alone reads as
+            # stiff. Fires on the first sentence, so it overlaps the speech.
+            if motion_handler is not None and random.random() < 0.45:
+                try:
+                    motion_handler.executor.talk_accent(duration=2.6)
+                except Exception:
+                    logger.debug('talk accent failed', exc_info=True)
+
+            spoken = say_sentences_and_move(
+                reachy, _sentence_stream(first, rest), speech=speech, head=head,
+                on_sentence=lambda line: print('리치:', line))
+            reply = ((box or {}).get('reply') or ' '.join(spoken)).strip() or first
+            if hallway is not None:
+                hallway.note_activity()
+        else:
+            # 스트리밍이 안 되면(구형 브로커, 첫 문장 지연, 로봇 없이 실행)
+            # 예전처럼 한 번에 받아 말한다.
+            reply = client.ask_or_fallback(text, image=image)
+            latency = round(time.time() - t_ask, 1)
+            finish_fillers()
+            print('리치:', reply)
+            if motion_handler is not None and len(reply) > 12 and random.random() < 0.45:
+                try:
+                    motion_handler.executor.talk_accent(
+                        duration=min(4.0, 1.4 + len(reply) / 55.0))
+                except Exception:
+                    logger.debug('talk accent failed', exc_info=True)
+            speak(reply)
 
         if turn_logger is not None:
+            # latency_s 는 이제 '첫 소리까지', total_s 는 '말을 마칠 때까지'.
+            # streamed 플래그가 있어야 예전 로그와 섞어 읽어도 헷갈리지 않는다.
             turn_logger.log('vision_chat' if image else 'chat',
                             {'text': text, 'reply': reply, 'latency_s': latency,
+                             'total_s': round(time.time() - t_ask, 1),
+                             'streamed': first is not None,
                              'engine': getattr(listener, 'last_engine', None),
                              'rms': getattr(listener, 'last_rms', None)},
                             image_b64=image)
-
-        print('리치:', reply)
-        # Gesture a little while talking - a talking head alone reads as stiff.
-        # Small offsets on the already-powered ready pose, so it is safe and
-        # runs alongside the speech instead of delaying it.
-        if motion_handler is not None and len(reply) > 12 and random.random() < 0.45:
-            try:
-                motion_handler.executor.talk_accent(
-                    duration=min(4.0, 1.4 + len(reply) / 55.0))
-            except Exception:
-                logger.debug('talk accent failed', exc_info=True)
-        speak(reply)
         last_kind = 'chat'
 
 
@@ -1661,8 +1773,13 @@ def main():
         # Above the broker's worst case (60s CLI turn + one retry on a fresh
         # process): at 30s the Pi spoke an offline line while the broker was
         # still successfully answering, then the next request queued behind it.
+        # 모델이 1.2초에 답하는데 140초를 기다릴 이유가 없다. 터널이 반쯤
+        # 열린 채 멈추면 그 시간만큼 로봇이 통째로 얼어붙는다(로그 최대
+        # 90.1초). 20초면 가장 긴 답도 넉넉하고, 넘어가면 곧바로 캔 답변으로
+        # 내려가 사람을 세워 두지 않는다. 동작 생성(opus)은 ask_motion 이
+        # 따로 150초를 쓴다.
         client = BrokerClient(url=args.url, token=args.token, session=args.session,
-                              timeout=140)
+                              timeout=20)
         if client.health() is None:
             logger.warning('Broker is not answering; replies will be canned lines.')
 
@@ -1778,6 +1895,12 @@ def main():
                     try:
                         from person_db import PersonDB
                         person_db = PersonDB(retention_days=args.collect_days)
+                        # 대화 기록에 '지금 앞에 있는 방문'을 붙인다. 사진과
+                        # 대화가 이어져야, 나중에 사람을 알아봤을 때 그 사람이
+                        # 전에 무슨 말을 했는지도 알 수 있다.
+                        if turn_logger is not None:
+                            turn_logger.visit_of = (
+                                lambda _db=person_db: _db.visit_id)
 
                         def _collect(frame, box_rel, person_rel=None, conf=None):
                             if frame is None:

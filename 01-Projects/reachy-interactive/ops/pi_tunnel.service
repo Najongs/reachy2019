@@ -19,7 +19,7 @@ After=network-online.target
 [Service]
 User=pi
 ExecStart=/usr/bin/ssh -N \
-  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
   -o StrictHostKeyChecking=accept-new \
   -i /home/pi/.ssh/dgx_tunnel \
   -p 20411 \
@@ -30,7 +30,11 @@ ExecStart=/usr/bin/ssh -N \
   -R 6172:localhost:6172 \
   kiro-ai@210.183.240.125
 Restart=always
-RestartSec=10
+# 10초였다. 터널이 끊긴 그 10초 동안 8080 이 아예 안 열려 있어서, 그 사이
+# 말을 건 사람은 지연 0.0초로 "음, 잘 모르겠어요" 를 들었다(실패한 대화
+# 18건 중 10건). 2초로 줄이고, 로봇 쪽에서도 몇 초는 기다렸다 다시 묻는다
+# (llm_client.CONNECT_RETRIES).
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target

@@ -71,6 +71,7 @@ PRONUNCIATIONS = {
     'Reachy': '리치',
     'reachy': '리치',
     'AI': '에이아이',
+    'QR': '큐알',
 }
 
 
@@ -1203,6 +1204,79 @@ def say_and_move(reachy, text=None, wav=None, speech=None, head=None, timeout=60
     finally:
         speech.stop()
         head.home()
+
+
+def say_sentences_and_move(reachy, sentences, speech=None, head=None,
+                          timeout=90, on_sentence=None):
+    """문장이 오는 대로 이어 말하면서, 머리는 한 번만 움직였다 제자리로.
+
+    say_and_move 를 문장마다 부르면 안 된다: 그 함수는 끝날 때마다
+    head.home(1.8초) 으로 천천히 제자리에 돌아가므로, 문장 사이마다 2초씩
+    죽은 시간이 생겨 스트리밍으로 번 시간을 도로 까먹는다. 여기서는 목
+    동작을 답변 전체에 한 번만 두고, 그 아래로 문장을 이어 붙인다.
+
+    말하는 동안 다음 문장을 미리 합성해 둔다(TTS 캐시에 넣으면 Speech.start
+    가 알아서 그 파일을 튼다). 그래서 문장 사이에 합성 대기 1.5초가 생기지
+    않는다.
+
+    Args:
+        sentences: 문장을 하나씩 내놓는 이터레이터. 네트워크에서 오는 대로
+            막혔다 풀려도 된다.
+        on_sentence: 문장을 말하기 직전에 부르는 콜백 (로그/출력용)
+
+    Returns:
+        실제로 말한 문장들의 리스트.
+    """
+    from threading import Event, Thread
+
+    speech = speech if speech is not None else Speech()
+    head = head if head is not None else TalkingHead(reachy)
+
+    done = Event()
+    spoken = []
+
+    def player():
+        try:
+            iterator = iter(sentences)
+            current = next(iterator, None)
+            while current:
+                if on_sentence is not None:
+                    try:
+                        on_sentence(current)
+                    except Exception:
+                        logger.debug('on_sentence 콜백 실패', exc_info=True)
+                spoken.append(current)
+                speech.start(text=current)
+
+                # 재생되는 동안 다음 문장을 받아 미리 합성해 둔다.
+                nxt = next(iterator, None)
+                if nxt:
+                    try:
+                        speech.precache([nxt])
+                    except Exception:
+                        logger.debug('다음 문장 미리 합성 실패', exc_info=True)
+
+                while speech.is_playing:
+                    time.sleep(0.05)
+                current = nxt
+        except Exception:
+            logger.exception('문장 재생 중 오류')
+        finally:
+            done.set()
+
+    thread = Thread(target=player)
+    thread.daemon = True
+    thread.start()
+
+    head.setup()
+    try:
+        head.run_while(lambda: not done.is_set(), timeout=timeout)
+    finally:
+        done.set()
+        speech.stop()
+        head.home()
+
+    return spoken
 
 
 def move_only(reachy, duration, head=None):
