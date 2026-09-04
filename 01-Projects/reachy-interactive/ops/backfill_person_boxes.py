@@ -51,6 +51,54 @@ def load_detector(device):
     return model, weights.transforms()
 
 
+def others_in_crop(model, transform, device, img, box, pad_frac=0.06):
+    """이 사람을 잘라 냈을 때 크롭 안에 보이는 '다른 사람'의 크기 비율.
+
+    잘라 낸 그림을 검출기에 다시 넣어, 주인공 말고 두 번째로 큰 사람이 크롭을
+    얼마나 차지하는지 본다. 상자끼리의 겹침으로 계산하면 틀린다 - 큰 사람의
+    사각형 상자가 옆 사람 크롭에 걸쳐도 실제로는 안 보이는 경우가 있다.
+    """
+    import torch
+
+    _, x, y, w, h = box
+    H, W = img.shape[1], img.shape[2]
+    pad = int(pad_frac * w)
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(W, x + w + pad), min(H, y + h + pad)
+    if x1 - x0 < 16 or y1 - y0 < 16:
+        return 0.0
+    crop = img[:, y0:y1, x0:x1]
+    ch, cw = crop.shape[1], crop.shape[2]
+    out = model([transform(crop).to(device)])[0]
+
+    found = []
+    for b, l, sc in zip(out['boxes'], out['labels'], out['scores']):
+        if int(l) != COCO_PERSON or float(sc) < 0.7:
+            continue
+        found.append([float(v) for v in b])
+    if len(found) < 2:
+        return 0.0
+
+    # 가장 큰 것이 주인공. 검출기는 같은 사람을 머리/몸으로 두 번 잡기도 해서,
+    # 주인공과 많이 겹치는 상자는 '다른 사람'으로 세면 안 된다(실측: 한 명뿐인
+    # 크롭이 0.50 으로 표시됐다).
+    def area(b):
+        return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+    found.sort(key=area, reverse=True)
+    main = found[0]
+    worst = 0.0
+    for b in found[1:]:
+        ix = max(0.0, min(main[2], b[2]) - max(main[0], b[0]))
+        iy = max(0.0, min(main[3], b[3]) - max(main[1], b[1]))
+        inter = ix * iy
+        union = area(main) + area(b) - inter
+        if union > 0 and inter / union > 0.3:
+            continue                   # 주인공을 겹쳐 잡은 것
+        worst = max(worst, area(b) / float(cw * ch))
+    return round(worst, 3)
+
+
 def all_persons(model, transform, device, path, min_conf):
     """사진에 있는 사람 전부. [(신뢰도, x, y, w, h)] 를 큰 사람부터.
 
@@ -74,7 +122,7 @@ def all_persons(model, transform, device, path, min_conf):
         got.append((float(score), int(x1), int(y1),
                     int(x2 - x1), int(y2 - y1)))
     got.sort(key=lambda g: -(g[3] * g[4]))      # 큰 사람부터
-    return got
+    return got, img
 
 
 def main():
@@ -116,15 +164,23 @@ def main():
             x INTEGER, y INTEGER, w INTEGER, h INTEGER,
             conf     REAL,
             source   TEXT,                 -- 누가 잡았나 ('dgx-frcnn')
+            -- 이 사람을 잘라 냈을 때 크롭 안에 '다른 사람'이 얼마나 보이나
+            -- (0~1). 상자끼리의 겹침으로는 못 잰다 - 상자는 사각형이라 큰
+            -- 사람의 상자가 옆 사람 크롭에 걸쳐도 실제로는 안 보이는 경우가
+            -- 있다(실측으로 확인). 그래서 잘라 낸 그림을 검출기에 다시 넣어
+            -- 잰다. 군집할 때 오염된 크롭을 걸러 내는 데 쓴다.
+            other_in_crop REAL,
             -- 나중에 임베딩으로 군집을 지어 같은 사람을 엮을 자리.
             -- 지금은 비어 있고, 군집 도구가 채운다.
             identity_id TEXT,
             UNIQUE(photo_id, seq)
         )''')
-    try:
-        conn.execute('ALTER TABLE person_boxes ADD COLUMN identity_id TEXT')
-    except Exception:
-        pass                               # 이미 있는 칼럼
+    for _col, _typ in (('identity_id', 'TEXT'), ('other_in_crop', 'REAL')):
+        try:
+            conn.execute('ALTER TABLE person_boxes ADD COLUMN %s %s'
+                         % (_col, _typ))
+        except Exception:
+            pass                           # 이미 있는 칼럼
     conn.commit()
 
     # 로봇이 잡은 상자(pi-ssd)도 다시 잡는다. 인식 DB 는 여기서 만드는 것이
@@ -141,14 +197,15 @@ def main():
           % (len(rows), args.device, args.min_conf))
     model, transform = load_detector(args.device)
 
-    found = empty = missing = people = 0
+    found = empty = missing = people = dirty = 0
     for rid, robot, image in rows:
         path = os.path.join(args.root, robot, image)
         if not os.path.exists(path):
             missing += 1
             continue
         try:
-            got = all_persons(model, transform, args.device, path, args.min_conf)
+            got, img = all_persons(model, transform, args.device, path,
+                                   args.min_conf)
         except Exception as exc:
             print('  %-28s 실패: %s' % (image, exc))
             missing += 1
@@ -176,18 +233,27 @@ def main():
                 (x, y, w, h, conf, rid))
             # 사람별 상자는 따로. 다시 돌려도 겹치지 않게 지우고 새로 넣는다.
             conn.execute('DELETE FROM person_boxes WHERE photo_id=?', (rid,))
+            rows_out = []
+            for i, g in enumerate(got):
+                # 사람이 하나뿐이면 크롭에 다른 사람이 있을 수 없다 - 검사 생략.
+                other = (others_in_crop(model, transform, args.device, img, g)
+                         if len(got) > 1 else 0.0)
+                if other > 0.15:
+                    dirty += 1
+                rows_out.append((rid, i, g[1], g[2], g[3], g[4], g[0], other))
             conn.executemany(
                 '''INSERT INTO person_boxes
-                   (photo_id, seq, x, y, w, h, conf, source)
-                   VALUES (?,?,?,?,?,?,?,'dgx-frcnn')''',
-                [(rid, i, g[1], g[2], g[3], g[4], g[0])
-                 for i, g in enumerate(got)])
+                   (photo_id, seq, x, y, w, h, conf, other_in_crop, source)
+                   VALUES (?,?,?,?,?,?,?,?,'dgx-frcnn')''', rows_out)
 
     if args.write:
         conn.commit()
 
     print('\n사람을 찾은 사진 %d장 (사람 %d명) · 사람이 없던 사진 %d장 · '
           '못 읽은 사진 %d장' % (found, people, empty, missing))
+    if dirty:
+        print('  크롭에 다른 사람이 15%% 넘게 걸친 것 %d명 '
+              '(persons.csv 의 other_in_crop 으로 거를 수 있다)' % dirty)
     if not args.write:
         print('실제로 기록하려면 --write 를 주세요.')
     else:

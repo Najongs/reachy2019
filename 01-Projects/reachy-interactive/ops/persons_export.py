@@ -94,6 +94,9 @@ def main():
                     help='사람 가로 픽셀 하한 (예: 150). 멀리 찍힌 것 제외')
     ap.add_argument('--crop-persons', action='store_true',
                     help='사람마다 잘라 persons/ 에 저장 + persons.csv (학습용)')
+    ap.add_argument('--max-overlap', type=float, default=1.0,
+                    help='크롭에 다른 사람이 이 비율 넘게 보이면 제외 (예: 0.3). '
+                         '군집용으로 깨끗한 것만 쓸 때')
     ap.add_argument('--per-visit', type=int, default=4,
                     help='한 방문에서 최대 몇 장 (0 이면 제한 없음)')
     ap.add_argument('--day', help='이 날짜만 (YYYY-MM-DD)')
@@ -150,7 +153,7 @@ def main():
         else:
             os.makedirs(person_out, exist_ok=True)
 
-    copied = missing = 0
+    copied = missing = skipped_overlap = 0
     person_rows = []
     with open(os.path.join(out, 'index.csv'), 'w', newline='') as fh:
         w = csv.writer(fh)
@@ -178,17 +181,24 @@ def main():
             # 여럿이면 전부 잘라 낸다 - 한 명만 남기면 나머지가 버려진다.
             person_name = ''
             if crop_cv is not None:
+                # other_in_crop 은 backfill 이 '잘라 낸 그림을 검출기에 다시
+                # 넣어' 재 둔 값이다. 상자끼리의 겹침으로 계산하면 틀린다 -
+                # 큰 사람의 사각형 상자가 옆 사람 크롭에 걸쳐도 실제로는 안
+                # 보이는 경우가 있다(실측으로 확인).
                 boxes = conn.execute(
-                    '''SELECT seq, x, y, w, h, conf FROM person_boxes
-                       WHERE photo_id=? ORDER BY seq''', (rid,)).fetchall()
+                    '''SELECT seq, x, y, w, h, conf,
+                              COALESCE(other_in_crop, 0)
+                       FROM person_boxes WHERE photo_id=? ORDER BY seq''',
+                    (rid,)).fetchall()
                 if not boxes and pw:
-                    boxes = [(0, px, py, pw, ph, pconf)]   # 예전 방식 대비
+                    boxes = [(0, px, py, pw, ph, pconf, 0.0)]  # 예전 방식 대비
                 made = []
                 try:
                     img = crop_cv.imread(src) if boxes else None
                 except Exception:
                     img = None
-                for seq, bx, by, bw, bh, bconf in (boxes if img is not None else []):
+                for (seq, bx, by, bw, bh, bconf,
+                     overlap) in (boxes if img is not None else []):
                     try:
                         pad = int(0.06 * bw)
                         x0, y0 = max(0, bx - pad), max(0, by - pad)
@@ -197,12 +207,16 @@ def main():
                         crop = img[y0:y1, x0:x1]
                         if not crop.size:
                             continue
+                        if overlap > args.max_overlap:
+                            skipped_overlap += 1
+                            continue
                         cname = name.replace('.jpg', '_p%d.jpg' % seq)
                         crop_cv.imwrite(os.path.join(person_out, cname), crop,
                                         [int(crop_cv.IMWRITE_JPEG_QUALITY), 88])
                         made.append(cname)
                         person_rows.append([cname, name, robot, ts, day, visit,
-                                            seq, bx, by, bw, bh, bconf])
+                                            seq, bx, by, bw, bh, bconf,
+                                            round(overlap, 3)])
                     except Exception:
                         continue
                 person_name = ';'.join(made)
@@ -215,7 +229,8 @@ def main():
         with open(os.path.join(out, 'persons.csv'), 'w', newline='') as fh:
             pw_ = csv.writer(fh)
             pw_.writerow(['file', 'source_image', 'robot', 'ts', 'day',
-                          'visit_id', 'seq', 'x', 'y', 'w', 'h', 'conf'])
+                          'visit_id', 'seq', 'x', 'y', 'w', 'h', 'conf',
+                          'other_in_crop'])
             pw_.writerows(person_rows)
 
     print('\n내보냄: %s' % out)
@@ -224,6 +239,13 @@ def main():
         n = len(os.listdir(person_out)) if os.path.isdir(person_out) else 0
         multi = len({r[1] for r in person_rows}) if person_rows else 0
         print('  persons/ %d명 (사진 %d장에서) · persons.csv' % (n, multi))
+        dirty = sum(1 for r in person_rows if r[12] > 0.15)
+        if dirty:
+            print('    크롭에 다른 사람이 15%% 넘게 보이는 것 %d개 '
+                  '(persons.csv 의 other_in_crop 으로 거를 수 있다)' % dirty)
+        if skipped_overlap:
+            print('    --max-overlap %.2f 로 제외한 크롭 %d개'
+                  % (args.max_overlap, skipped_overlap))
     if missing:
         print('  ! 파일을 찾지 못한 행 %d건 (sync_persons.py 를 다시 돌려 보세요)' % missing)
     return 0
