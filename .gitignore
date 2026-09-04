@@ -21,6 +21,8 @@
 
 # 사진 (용량)
 03-Resources/robot-photos/
+# 카메라 조준 확인용 스냅샷 (필요하면 camera_check.py 로 다시 찍는다)
+04-Archives/camera-views/
 
 # 파이썬
 __pycache__/

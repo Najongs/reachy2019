@@ -18,6 +18,53 @@ robot/voice_chat.py                                broker/llm_broker.py
 
 **설계 원칙**: 인터넷·LLM 없이도 되는 건 전부 로컬에서 (인사·FAQ·목·물체주시·오프라인 STT). LLM 은 열린 대화(무료 로컬)와 새 동작 생성(opus)에만.
 
+## 전체 구조 (무엇이 어디서 도는가)
+
+```
+        복도 (KIRO 수도권센터)                          DGX (172.16.201.166)
+ ┌──────────────────────────────────┐        ┌──────────────────────────────────┐
+ │  Reachy (Pi 4, Buster, armv7l)   │        │                                  │
+ │                                  │        │  llm_broker :8080                │
+ │  voice_chat.py  ─ 마이크→STT     │◀──────▶│    대화 → ollama/EXAONE (로컬)   │
+ │    │              →라우팅→TTS    │  터널  │    동작 → claude CLI (opus)      │
+ │    ├─ presence   사람 검출(SSD)  │        │                                  │
+ │    ├─ hallway    인사·데이터수집 │        │  ollama :11434 (GPU 0)           │
+ │    ├─ motion_exec 팔 동작 안전층 │        │                                  │
+ │    └─ person_db  사진+메타 저장  │───────▶│  04-Archives/person-dataset/     │
+ │                                  │ 하루1회│    persons/  원본 + DB           │
+ │  목: NeckHold 가 계속 붙잡음     │        │    dataset/  사람 크롭 등        │
+ └──────────────────────────────────┘        └──────────────────────────────────┘
+   전원만 켜면 자동 실행 (systemd)             수동 실행: bash ops/daily_update.sh
+```
+
+**역할 구분이 이 시스템의 뼈대다.**
+
+| | 로봇(Pi) | DGX |
+|---|---|---|
+| 듣기 | Google STT → 끊기면 vosk(오프라인) | — |
+| 대화 | — | ollama + EXAONE 3.5 (무료·로컬) |
+| 동작 생성 | 안전 검증·실행 | claude CLI (opus) 가 키프레임 생성 |
+| 사람 검출 | MobileNet-SSD (armv7l 한계) | Faster R-CNN 으로 다시 제대로 |
+| 말하기 | edge-tts, 자주 쓰는 말은 미리 합성 | — |
+
+로봇은 **실시간으로 해야 하는 것**만 한다. 무겁거나 정확해야 하는 일(대화 생성,
+동작 생성, 사람 인식 DB)은 DGX 로 넘긴다. 인터넷이 끊겨도 로봇이 멈추지 않도록,
+끊겼을 때 쓸 수 있는 길(오프라인 STT, 미리 합성한 목소리, 오프라인 목 제스처와
+프리셋 동작)을 각각 남겨 두었다.
+
+**Pi 에서 늘 도는 서비스** (전부 `enabled`, 전원만 켜면 시작)
+
+| 서비스 | 하는 일 |
+|---|---|
+| `voice_chat` | 메인 루프. 죽으면 자동 재시작 |
+| `pi_tunnel` | DGX 로 역터널 (브로커 접속 + 여기서 Pi 접속) |
+| `respeaker_gain` | 마이크 게인 고정 (재부팅하면 풀린다) |
+| `camera_tune` | 카메라 노출·선명도 고정 (재연결하면 풀린다) |
+| `pi_viewer` | 시뮬레이터 뷰어 |
+
+**DGX 에서 늘 도는 것**: `ollama serve`(:11434), `llm_broker`(:8080).
+브로커는 터널로만 열려 있어 바깥에서 접근할 수 없다.
+
 ## 폴더
 
 | 폴더 | 실행 위치 | 내용 |
@@ -48,7 +95,8 @@ robot/voice_chat.py                                broker/llm_broker.py
 | `base_pose.py` | 로봇 연결(`connect()`)·기본자세·stiffen/relax |
 | `llm_client.py` | 브로커 HTTP 클라이언트 (stdlib만, Py3.7) |
 | `state_mirror.py` | 실물 엔코더값을 ws(6171)로 방송 → 시뮬 미러 |
-| `calibrate_real.py` / `snap_view.py` | 관절 방향 대조 / 카메라 프레임 저장 |
+| `calibrate_real.py` | 관절 방향 대조 |
+| `snap_view.py` | 카메라 프레임 한 장 저장 (조준 확인용) |
 | `camera_check.py` | 카메라 초점·수평 맞추기 도구(선명도 실시간 표시, main/sub 구분) |
 
 ## 실행
@@ -57,7 +105,8 @@ robot/voice_chat.py                                broker/llm_broker.py
 
 ```bash
 # [Pi] 복도 데모 (서비스가 이걸 실행한다)
-python3 voice_chat.py --motions --hallway --stt auto --fixed-energy 550 \
+python3 voice_chat.py --motions --hallway --stt auto --fixed-energy 900 \
+  --gaze-tilt 0.15 --camera-index main --collect-people \
   --url http://127.0.0.1:8080 --token <TOKEN>
 
 # [Pi] 조용한 모드(불러야 반응) / STT 튜닝
@@ -73,14 +122,49 @@ python3 broker/llm_broker.py --host 127.0.0.1 --port 8080 \
 # [DGX] 로그 당겨와 분석·개선 (사람 사진 가져오기 포함)
 bash ops/daily_update.sh
 
-# [DGX] 사람 사진만 따로 가져오기 / 현황 / 학습용으로 뽑기
-python3 ops/sync_persons.py                      # Pi -> 중앙 DB 로 합치기
-python3 ops/sync_persons.py --purge-remote       # 옮긴 뒤 Pi 쪽 원본 삭제(SD 확보)
-python3 ops/persons_export.py --list             # 어떤 게 걸러지는지 미리 보기
-python3 ops/persons_export.py --faces-only --min-face 80 --out ~/ds/faces
+# [DGX] 사람 데이터만 따로 (daily_update 가 이 순서를 자동으로 돈다)
+python3 ops/sync_persons.py                      # Pi -> 여기로 가져와 DB 합치기
+$VENV/bin/python3 ops/backfill_person_boxes.py --write   # 사람 인식 DB 생성
+python3 ops/persons_export.py --out --crop-persons       # 학습용으로 뽑기
+python3 ops/sync_persons.py --stats              # 현황만 보기
+python3 ops/sync_persons.py --purge-remote       # 옮긴 뒤 Pi 원본 삭제(SD 확보)
 ```
 
-**설치 스크립트**(1회): `ops/install_ollama.sh`(DGX 로컬 LLM), `ops/install_vosk.sh`(오프라인 STT), `ops/install_object_vision.sh`(물체 검출 모델). 대용량 모델은 git 제외.
+`$VENV` = `/home/kiro-ai/NAJY/trossen-ai-simulation/.venv` (torch 가 여기 있다)
+
+**브로커 엔드포인트** (토큰은 `X-Auth-Token` 헤더로 보낸다 — 본문에 넣으면 401)
+
+| 경로 | 하는 일 |
+|---|---|
+| `POST /reply` | 대화. `{"text": "...", "session": "..."}` |
+| `POST /motion` | 동작 생성(opus). `{"text": "..."}` → `{say, preset, moves}` |
+| `POST /reset` | 그 세션의 대화 맥락 비우기 |
+| `GET /health` | 살아 있는지 + 어떤 백엔드인지 |
+
+```bash
+curl -s http://127.0.0.1:8080/reply -H 'X-Auth-Token: <TOKEN>' \
+  -H 'Content-Type: application/json' -d '{"text":"안녕하세요"}'
+```
+
+## ops/ 파일
+
+| 파일 | 하는 일 | 어디서 |
+|---|---|---|
+| `deploy.sh` | 로봇 코드·설정을 Pi 로 보낸다 | DGX |
+| `daily_update.sh` | **하루 한 번 이것만 돌리면 된다.** 아래 순서를 자동으로 | DGX |
+| `sync_persons.py` | Pi 사진 → 중앙 DB 로 가져오기·합치기 | DGX |
+| `backfill_person_boxes.py` | 가져온 사진에서 사람 인식 DB 생성 (Faster R-CNN) | DGX |
+| `persons_export.py` | 조건 걸어 학습용으로 뽑기 (사람 크롭 포함) | DGX |
+| `log_digest.py` | 활동 다이제스트 (무엇이 얼마나 일어났나) | DGX |
+| `build_tts_cache_list.py` | 자주 나온 답변 → 미리 합성할 목록 | DGX |
+| `voice_chat.service` 외 | Pi 의 systemd 유닛들 | Pi |
+| `99-reachy-cameras.rules` | 카메라 이름 고정 (main/sub) | Pi |
+| `70-wifi-powersave-off.rules` | 와이파이 절전 끄기 (끊김 원인이었다) | Pi |
+| `camera_tune.sh` / `respeaker_gain.py` | 카메라·마이크 설정 고정 | Pi |
+
+**설치 스크립트**(1회): `ops/install_ollama.sh`(DGX 로컬 LLM),
+`ops/install_vosk.sh`(오프라인 STT), `ops/install_object_vision.sh`(물체 검출 모델).
+대용량 모델은 git 제외.
 
 Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition vosk` + `sudo apt install mpg123 python3-pyaudio flac`
 
