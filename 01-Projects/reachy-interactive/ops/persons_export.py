@@ -93,7 +93,7 @@ def main():
     ap.add_argument('--min-person', type=int, default=0,
                     help='사람 가로 픽셀 하한 (예: 150). 멀리 찍힌 것 제외')
     ap.add_argument('--crop-persons', action='store_true',
-                    help='사람 상자대로 잘라 persons/ 에도 저장 (학습용)')
+                    help='사람마다 잘라 persons/ 에 저장 + persons.csv (학습용)')
     ap.add_argument('--per-visit', type=int, default=4,
                     help='한 방문에서 최대 몇 장 (0 이면 제한 없음)')
     ap.add_argument('--day', help='이 날짜만 (YYYY-MM-DD)')
@@ -151,6 +151,7 @@ def main():
             os.makedirs(person_out, exist_ok=True)
 
     copied = missing = 0
+    person_rows = []
     with open(os.path.join(out, 'index.csv'), 'w', newline='') as fh:
         w = csv.writer(fh)
         w.writerow(['file', 'face_file', 'person_file', 'robot', 'ts', 'day',
@@ -173,33 +174,56 @@ def main():
                 if os.path.exists(fsrc):
                     face_name = name.replace('.jpg', '_face.jpg')
                     shutil.copy2(fsrc, os.path.join(face_out, face_name))
-            # 사람 상자대로 잘라 두면 학습 때 바로 쓸 수 있다.
+            # 사람 상자대로 잘라 두면 학습 때 바로 쓸 수 있다. 한 사진에 사람이
+            # 여럿이면 전부 잘라 낸다 - 한 명만 남기면 나머지가 버려진다.
             person_name = ''
-            if crop_cv is not None and pw:
+            if crop_cv is not None:
+                boxes = conn.execute(
+                    '''SELECT seq, x, y, w, h, conf FROM person_boxes
+                       WHERE photo_id=? ORDER BY seq''', (rid,)).fetchall()
+                if not boxes and pw:
+                    boxes = [(0, px, py, pw, ph, pconf)]   # 예전 방식 대비
+                made = []
                 try:
-                    img = crop_cv.imread(src)
-                    if img is not None:
-                        pad = int(0.06 * pw)
-                        x0, y0 = max(0, px - pad), max(0, py - pad)
-                        x1 = min(img.shape[1], px + pw + pad)
-                        y1 = min(img.shape[0], py + ph + pad)
-                        crop = img[y0:y1, x0:x1]
-                        if crop.size:
-                            person_name = name.replace('.jpg', '_person.jpg')
-                            crop_cv.imwrite(
-                                os.path.join(person_out, person_name), crop,
-                                [int(crop_cv.IMWRITE_JPEG_QUALITY), 88])
+                    img = crop_cv.imread(src) if boxes else None
                 except Exception:
-                    person_name = ''
+                    img = None
+                for seq, bx, by, bw, bh, bconf in (boxes if img is not None else []):
+                    try:
+                        pad = int(0.06 * bw)
+                        x0, y0 = max(0, bx - pad), max(0, by - pad)
+                        x1 = min(img.shape[1], bx + bw + pad)
+                        y1 = min(img.shape[0], by + bh + pad)
+                        crop = img[y0:y1, x0:x1]
+                        if not crop.size:
+                            continue
+                        cname = name.replace('.jpg', '_p%d.jpg' % seq)
+                        crop_cv.imwrite(os.path.join(person_out, cname), crop,
+                                        [int(crop_cv.IMWRITE_JPEG_QUALITY), 88])
+                        made.append(cname)
+                        person_rows.append([cname, name, robot, ts, day, visit,
+                                            seq, bx, by, bw, bh, bconf])
+                    except Exception:
+                        continue
+                person_name = ';'.join(made)
             w.writerow([name, face_name, person_name, robot, ts, day, visit,
                         fw, fh, px, py, pw, ph, pconf, sharp, inter])
             copied += 1
 
+    # 사람 단위 목록: 학습에는 이쪽이 바로 쓰인다 (한 줄에 사람 하나).
+    if person_rows:
+        with open(os.path.join(out, 'persons.csv'), 'w', newline='') as fh:
+            pw_ = csv.writer(fh)
+            pw_.writerow(['file', 'source_image', 'robot', 'ts', 'day',
+                          'visit_id', 'seq', 'x', 'y', 'w', 'h', 'conf'])
+            pw_.writerows(person_rows)
+
     print('\n내보냄: %s' % out)
     print('  images/ %d장 · faces/ · index.csv' % copied)
     if crop_cv is not None:
-        n = len([f for f in os.listdir(person_out)]) if os.path.isdir(person_out) else 0
-        print('  persons/ %d장 (사람 상자대로 자른 것)' % n)
+        n = len(os.listdir(person_out)) if os.path.isdir(person_out) else 0
+        multi = len({r[1] for r in person_rows}) if person_rows else 0
+        print('  persons/ %d명 (사진 %d장에서) · persons.csv' % (n, multi))
     if missing:
         print('  ! 파일을 찾지 못한 행 %d건 (sync_persons.py 를 다시 돌려 보세요)' % missing)
     return 0

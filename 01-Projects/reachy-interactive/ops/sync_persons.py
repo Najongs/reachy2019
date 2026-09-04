@@ -71,6 +71,22 @@ def ensure_db(path):
             conn.execute('ALTER TABLE persons ADD COLUMN %s %s' % (col, typ))
         except Exception:
             pass                # 이미 있는 칼럼
+    # 한 사진에 사람이 여럿일 수 있다(실측: 25장 중 6장). 사진 한 행에 상자를
+    # 하나만 두면 나머지 사람이 버려지므로, 사람별로 따로 적는다.
+    # persons 의 person_x/y/... 는 그중 가장 큰 사람을 그대로 유지한다
+    # (예전 질의가 계속 동작하도록).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS person_boxes (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            photo_id INTEGER NOT NULL,     -- persons.id
+            seq      INTEGER,              -- 그 사진에서 몇 번째 사람(큰 순)
+            x INTEGER, y INTEGER, w INTEGER, h INTEGER,
+            conf     REAL,
+            source   TEXT,                 -- 누가 잡았나 ('dgx-frcnn')
+            UNIQUE(photo_id, seq)
+        )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_boxes_photo '
+                 'ON person_boxes(photo_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_day ON persons(day)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_visit ON persons(robot, visit_id)')
     conn.commit()
@@ -198,6 +214,11 @@ def stats(conn, local_root):
         todo = q("SELECT COUNT(*) FROM persons "
                  "WHERE box_source IS NULL OR box_source<>'dgx-frcnn'")
         print('  사람 위치가 기록된 것: %d장 (여기서 제대로 잡은 것 %d장)' % (pb, good))
+        boxes = q('SELECT COUNT(*) FROM person_boxes')
+        multi = q('SELECT COUNT(*) FROM (SELECT photo_id FROM person_boxes '
+                  'GROUP BY photo_id HAVING COUNT(*) > 1)')
+        if boxes:
+            print('  잡힌 사람 %d명 (두 명 이상 찍힌 사진 %d장)' % (boxes, multi))
         if todo:
             print('  아직 여기서 안 잡은 것: %d장 (다음 업데이트에서 처리)' % todo)
     except Exception:

@@ -51,8 +51,12 @@ def load_detector(device):
     return model, weights.transforms()
 
 
-def best_person(model, transform, device, path, min_conf):
-    """가장 확실한 사람의 (신뢰도, x, y, w, h) — 없으면 None."""
+def all_persons(model, transform, device, path, min_conf):
+    """사진에 있는 사람 전부. [(신뢰도, x, y, w, h)] 를 큰 사람부터.
+
+    한 사진에 사람이 여럿이면 전부 남긴다 - 한 명만 잘라 내면 나머지가 버려진다
+    (실측: 사진 25장 중 6장에 두 명 이상 있었다).
+    """
     import torch
     from torchvision.io import decode_image
 
@@ -62,16 +66,15 @@ def best_person(model, transform, device, path, min_conf):
     batch = [transform(img).to(device)]
     out = model(batch)[0]
 
-    best = None
+    got = []
     for box, label, score in zip(out['boxes'], out['labels'], out['scores']):
-        if int(label) != COCO_PERSON:
-            continue
-        conf = float(score)
-        if conf < min_conf or (best is not None and conf <= best[0]):
+        if int(label) != COCO_PERSON or float(score) < min_conf:
             continue
         x1, y1, x2, y2 = [float(v) for v in box]
-        best = (conf, int(x1), int(y1), int(x2 - x1), int(y2 - y1))
-    return best
+        got.append((float(score), int(x1), int(y1),
+                    int(x2 - x1), int(y2 - y1)))
+    got.sort(key=lambda g: -(g[3] * g[4]))      # 큰 사람부터
+    return got
 
 
 def main():
@@ -118,19 +121,19 @@ def main():
           % (len(rows), args.device, args.min_conf))
     model, transform = load_detector(args.device)
 
-    found = empty = missing = 0
+    found = empty = missing = people = 0
     for rid, robot, image in rows:
         path = os.path.join(args.root, robot, image)
         if not os.path.exists(path):
             missing += 1
             continue
         try:
-            got = best_person(model, transform, args.device, path, args.min_conf)
+            got = all_persons(model, transform, args.device, path, args.min_conf)
         except Exception as exc:
             print('  %-28s 실패: %s' % (image, exc))
             missing += 1
             continue
-        if got is None:
+        if not got:
             empty += 1
             # 사람을 못 찾았어도 '여기서 봤다'고 남긴다. 안 그러면 매번 다시
             # 검사하게 된다.
@@ -139,21 +142,32 @@ def main():
                     "UPDATE persons SET box_source='dgx-frcnn' WHERE id=?",
                     (rid,))
             continue
-        conf, x, y, w, h = got
+        conf, x, y, w, h = got[0]          # 가장 큰 사람
         found += 1
-        print('  %-28s 사람 %.2f  (%d,%d %dx%d)' % (image, conf, x, y, w, h))
+        people += len(got)
+        print('  %-28s 사람 %d명 (가장 큰 사람 %.2f, %dx%d)'
+              % (image, len(got), conf, w, h))
         if args.write:
+            # 사진 행에는 가장 큰 사람을 남긴다(예전 질의 호환).
             conn.execute(
                 '''UPDATE persons SET person_x=?, person_y=?, person_w=?,
                    person_h=?, person_conf=?, box_source='dgx-frcnn'
                    WHERE id=?''',
                 (x, y, w, h, conf, rid))
+            # 사람별 상자는 따로. 다시 돌려도 겹치지 않게 지우고 새로 넣는다.
+            conn.execute('DELETE FROM person_boxes WHERE photo_id=?', (rid,))
+            conn.executemany(
+                '''INSERT INTO person_boxes
+                   (photo_id, seq, x, y, w, h, conf, source)
+                   VALUES (?,?,?,?,?,?,?,'dgx-frcnn')''',
+                [(rid, i, g[1], g[2], g[3], g[4], g[0])
+                 for i, g in enumerate(got)])
 
     if args.write:
         conn.commit()
 
-    print('\n사람을 찾은 사진 %d장 · 사람이 없던 사진 %d장 · 못 읽은 사진 %d장'
-          % (found, empty, missing))
+    print('\n사람을 찾은 사진 %d장 (사람 %d명) · 사람이 없던 사진 %d장 · '
+          '못 읽은 사진 %d장' % (found, people, empty, missing))
     if not args.write:
         print('실제로 기록하려면 --write 를 주세요.')
     else:
