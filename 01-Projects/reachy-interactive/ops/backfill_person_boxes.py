@@ -39,6 +39,59 @@ VENV_PY = '/home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3'
 COCO_PERSON = 1        # torchvision COCO 라벨에서 'person'
 
 
+MIN_FACE = 60          # 얼굴 인식에 쓰려면 이 정도 폭은 되어야 한다(px)
+# 키포인트 점수 하한. 이 모델은 가려진 부위도 점수와 함께 추측해서, 낮게 잡으면
+# 뒤통수가 얼굴로 들어온다(실측: 뒤통수 코 6.9 대 정면 20.1).
+FACE_KP_MIN = 10.0
+
+
+def load_pose(device):
+    """얼굴 위치를 뽑을 키포인트 모델 (사람 검출기와 별개)."""
+    from torchvision.models import detection
+
+    weights = detection.KeypointRCNN_ResNet50_FPN_Weights.DEFAULT
+    model = detection.keypointrcnn_resnet50_fpn(weights=weights)
+    model.eval().to(device)
+    return model, weights.transforms()
+
+
+def face_boxes(model, transform, device, img):
+    """사진에서 (얼굴상자, 그 사람의 몸상자) 쌍을 뽑는다. 원본 좌표.
+
+    얼굴을 몸에 짝지을 때 '몸 상자 안에 얼굴 중심이 들어가나' 로 판단하면
+    틀린다 - 가까이 있는 사람의 큰 상자 안에 뒷사람 머리가 들어가서, 앞사람의
+    얼굴로 뒤통수가 배정됐다(실측). 키포인트 모델은 사람마다 상자와 키포인트를
+    함께 주므로, 그 짝을 그대로 쓰고 나중에 IoU 로 맞춘다.
+
+    코와 눈이 함께 뚜렷해야 얼굴로 친다. 귀만 보이는 것은 뒤통수다.
+    """
+    out = model([transform(img).to(device)])[0]
+    pairs = []
+    for kps, ksc, score, pbox in zip(out['keypoints'], out['keypoints_scores'],
+                                     out['scores'], out['boxes']):
+        if float(score) < 0.8:
+            continue
+        nose_s = float(ksc[0])
+        eye_s = max(float(ksc[1]), float(ksc[2]))
+        if nose_s < FACE_KP_MIN or eye_s < FACE_KP_MIN:
+            continue
+        nose_x = float(kps[0][0])
+        lx, rx = float(kps[1][0]), float(kps[2][0])
+        if not (min(lx, rx) - 5 <= nose_x <= max(lx, rx) + 5):
+            continue                       # 코가 두 눈 사이가 아니면 정면이 아니다
+
+        vis = [i for i in range(5) if float(ksc[i]) > FACE_KP_MIN]
+        xs = [float(kps[i][0]) for i in vis]
+        ys = [float(kps[i][1]) for i in vis]
+        side = max(max(xs) - min(xs), 1.0) * 2.2
+        side = max(side, 40.0)
+        cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+        face = (max(0, int(cx - side / 2)), max(0, int(cy - side * 0.55)),
+                int(side), int(side * 1.2))
+        pairs.append((face, [float(v) for v in pbox]))
+    return pairs
+
+
 def load_detector(device):
     """COCO 사전학습 검출기를 올린다. (모델, 변환) 을 돌려준다."""
     import torch
@@ -170,12 +223,18 @@ def main():
             -- 있다(실측으로 확인). 그래서 잘라 낸 그림을 검출기에 다시 넣어
             -- 잰다. 군집할 때 오염된 크롭을 걸러 내는 데 쓴다.
             other_in_crop REAL,
+            -- 얼굴 위치(원본 프레임 좌표). 며칠에 걸쳐 같은 사람을 알아보려면
+            -- 얼굴이 필요하다 - 옷/체형 임베딩은 옷을 갈아입으면 무너진다.
+            -- 로봇의 Haar 는 이 복도에서 거의 안 잡히므로 여기서 키포인트로 뽑는다.
+            face_x INTEGER, face_y INTEGER, face_w INTEGER, face_h INTEGER,
             -- 나중에 임베딩으로 군집을 지어 같은 사람을 엮을 자리.
             -- 지금은 비어 있고, 군집 도구가 채운다.
             identity_id TEXT,
             UNIQUE(photo_id, seq)
         )''')
-    for _col, _typ in (('identity_id', 'TEXT'), ('other_in_crop', 'REAL')):
+    for _col, _typ in (('identity_id', 'TEXT'), ('other_in_crop', 'REAL'),
+                       ('face_x', 'INTEGER'), ('face_y', 'INTEGER'),
+                       ('face_w', 'INTEGER'), ('face_h', 'INTEGER')):
         try:
             conn.execute('ALTER TABLE person_boxes ADD COLUMN %s %s'
                          % (_col, _typ))
@@ -196,8 +255,9 @@ def main():
     print('%d장 검사 (%s, 신뢰도 %.2f 이상)'
           % (len(rows), args.device, args.min_conf))
     model, transform = load_detector(args.device)
+    pose, pose_tf = load_pose(args.device)
 
-    found = empty = missing = people = dirty = 0
+    found = empty = missing = people = dirty = usable_faces = 0
     for rid, robot, image in rows:
         path = os.path.join(args.root, robot, image)
         if not os.path.exists(path):
@@ -233,6 +293,28 @@ def main():
                 (x, y, w, h, conf, rid))
             # 사람별 상자는 따로. 다시 돌려도 겹치지 않게 지우고 새로 넣는다.
             conn.execute('DELETE FROM person_boxes WHERE photo_id=?', (rid,))
+            # 얼굴은 사람마다 짝지어 둔다. 며칠 뒤에도 같은 사람을 알아보려면
+            # 옷이 아니라 얼굴이 필요하다.
+            try:
+                faces = face_boxes(pose, pose_tf, args.device, img)
+            except Exception:
+                faces = []
+
+            def face_for(person):
+                """이 사람의 얼굴. 키포인트 모델이 준 몸 상자와 IoU 로 맞춘다."""
+                _, px_, py_, pw_, ph_ = person
+                a = (px_, py_, px_ + pw_, py_ + ph_)
+                best, best_iou = None, 0.4      # 이 정도는 겹쳐야 같은 사람
+                for face, b in faces:
+                    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+                    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+                    inter = ix * iy
+                    union = (pw_ * ph_ + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+                    iou = inter / union if union > 0 else 0.0
+                    if iou > best_iou:
+                        best, best_iou = face, iou
+                return best
+
             rows_out = []
             for i, g in enumerate(got):
                 # 사람이 하나뿐이면 크롭에 다른 사람이 있을 수 없다 - 검사 생략.
@@ -240,11 +322,17 @@ def main():
                          if len(got) > 1 else 0.0)
                 if other > 0.15:
                     dirty += 1
-                rows_out.append((rid, i, g[1], g[2], g[3], g[4], g[0], other))
+                fb = face_for(g)
+                if fb and fb[2] >= MIN_FACE:
+                    usable_faces += 1
+                rows_out.append((rid, i, g[1], g[2], g[3], g[4], g[0], other,
+                                 fb[0] if fb else None, fb[1] if fb else None,
+                                 fb[2] if fb else None, fb[3] if fb else None))
             conn.executemany(
                 '''INSERT INTO person_boxes
-                   (photo_id, seq, x, y, w, h, conf, other_in_crop, source)
-                   VALUES (?,?,?,?,?,?,?,?,'dgx-frcnn')''', rows_out)
+                   (photo_id, seq, x, y, w, h, conf, other_in_crop,
+                    face_x, face_y, face_w, face_h, source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'dgx-frcnn')''', rows_out)
 
     if args.write:
         conn.commit()
@@ -254,6 +342,10 @@ def main():
     if dirty:
         print('  크롭에 다른 사람이 15%% 넘게 걸친 것 %d명 '
               '(persons.csv 의 other_in_crop 으로 거를 수 있다)' % dirty)
+    if people:
+        print('  얼굴이 %dpx 이상으로 찍힌 사람 %d명 / %d명 '
+              '(며칠 뒤에도 알아보려면 이쪽이 쓰인다)'
+              % (MIN_FACE, usable_faces, people))
     if not args.write:
         print('실제로 기록하려면 --write 를 주세요.')
     else:

@@ -1,0 +1,21 @@
+# Pi 로그 회전. voice_chat.service 가 append: 로 직접 쓰므로 systemd 가 아니라
+# 이 파일이 관리한다. 회전이 없으면 파일이 무한정 자란다 - 실제로 연결 실패로
+# 크래시 루프가 돌던 날에는 몇 분 만에 수천 줄이 쌓였다.
+#
+# copytruncate 가 핵심이다: 서비스가 파일을 열어 둔 채 쓰고 있어서, 파일을
+# 옮기기만 하면 계속 옛 inode 에 쓰고 새 파일은 영영 비어 있다.
+#
+# 설치 (Pi에서):
+#   sudo cp ~/Documents/logrotate-reachy /etc/logrotate.d/reachy
+#   sudo logrotate -d /etc/logrotate.d/reachy     # 점검
+/home/pi/reachy_logs/*.log {
+    daily
+    rotate 7
+    size 5M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su pi pi
+}

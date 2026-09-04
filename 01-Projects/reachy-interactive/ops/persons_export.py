@@ -94,6 +94,8 @@ def main():
                     help='사람 가로 픽셀 하한 (예: 150). 멀리 찍힌 것 제외')
     ap.add_argument('--crop-persons', action='store_true',
                     help='사람마다 잘라 persons/ 에 저장 + persons.csv (학습용)')
+    ap.add_argument('--min-face-px', type=int, default=60,
+                    help='얼굴을 따로 잘라 둘 최소 폭 (기본 60px)')
     ap.add_argument('--max-overlap', type=float, default=1.0,
                     help='크롭에 다른 사람이 이 비율 넘게 보이면 제외 (예: 0.3). '
                          '군집용으로 깨끗한 것만 쓸 때')
@@ -187,18 +189,20 @@ def main():
                 # 보이는 경우가 있다(실측으로 확인).
                 boxes = conn.execute(
                     '''SELECT seq, x, y, w, h, conf,
-                              COALESCE(other_in_crop, 0)
+                              COALESCE(other_in_crop, 0),
+                              face_x, face_y, face_w, face_h
                        FROM person_boxes WHERE photo_id=? ORDER BY seq''',
                     (rid,)).fetchall()
                 if not boxes and pw:
-                    boxes = [(0, px, py, pw, ph, pconf, 0.0)]  # 예전 방식 대비
+                    boxes = [(0, px, py, pw, ph, pconf, 0.0,
+                              None, None, None, None)]        # 예전 방식 대비
                 made = []
                 try:
                     img = crop_cv.imread(src) if boxes else None
                 except Exception:
                     img = None
-                for (seq, bx, by, bw, bh, bconf,
-                     overlap) in (boxes if img is not None else []):
+                for (seq, bx, by, bw, bh, bconf, overlap,
+                     fx2, fy2, fw2, fh2) in (boxes if img is not None else []):
                     try:
                         pad = int(0.06 * bw)
                         x0, y0 = max(0, bx - pad), max(0, by - pad)
@@ -214,9 +218,22 @@ def main():
                         crop_cv.imwrite(os.path.join(person_out, cname), crop,
                                         [int(crop_cv.IMWRITE_JPEG_QUALITY), 88])
                         made.append(cname)
-                        person_rows.append([cname, name, robot, ts, day, visit,
-                                            seq, bx, by, bw, bh, bconf,
-                                            round(overlap, 3)])
+                        # 얼굴도 함께 잘라 둔다. 옷은 갈아입지만 얼굴은 그대로라,
+                        # 며칠에 걸쳐 같은 사람을 엮을 때 이쪽이 쓰인다.
+                        fname = ''
+                        if fw2 and fw2 >= args.min_face_px:
+                            fx0, fy0 = max(0, fx2), max(0, fy2)
+                            fx1 = min(img.shape[1], fx2 + fw2)
+                            fy1 = min(img.shape[0], fy2 + fh2)
+                            fcrop = img[fy0:fy1, fx0:fx1]
+                            if fcrop.size:
+                                fname = name.replace('.jpg', '_p%d_face.jpg' % seq)
+                                crop_cv.imwrite(
+                                    os.path.join(face_out, fname), fcrop,
+                                    [int(crop_cv.IMWRITE_JPEG_QUALITY), 92])
+                        person_rows.append([cname, fname, name, robot, ts, day,
+                                            visit, seq, bx, by, bw, bh, bconf,
+                                            round(overlap, 3), fw2 or 0])
                     except Exception:
                         continue
                 person_name = ';'.join(made)
@@ -228,9 +245,9 @@ def main():
     if person_rows:
         with open(os.path.join(out, 'persons.csv'), 'w', newline='') as fh:
             pw_ = csv.writer(fh)
-            pw_.writerow(['file', 'source_image', 'robot', 'ts', 'day',
-                          'visit_id', 'seq', 'x', 'y', 'w', 'h', 'conf',
-                          'other_in_crop'])
+            pw_.writerow(['file', 'face_file', 'source_image', 'robot', 'ts',
+                          'day', 'visit_id', 'seq', 'x', 'y', 'w', 'h', 'conf',
+                          'other_in_crop', 'face_w'])
             pw_.writerows(person_rows)
 
     print('\n내보냄: %s' % out)
@@ -239,7 +256,10 @@ def main():
         n = len(os.listdir(person_out)) if os.path.isdir(person_out) else 0
         multi = len({r[1] for r in person_rows}) if person_rows else 0
         print('  persons/ %d명 (사진 %d장에서) · persons.csv' % (n, multi))
-        dirty = sum(1 for r in person_rows if r[12] > 0.15)
+        nf = sum(1 for r in person_rows if r[1])
+        print('  faces/ %d명 (얼굴 %dpx 이상 - 며칠 뒤에도 알아보려면 이쪽)'
+              % (nf, args.min_face_px))
+        dirty = sum(1 for r in person_rows if r[13] > 0.15)
         if dirty:
             print('    크롭에 다른 사람이 15%% 넘게 보이는 것 %d개 '
                   '(persons.csv 의 other_in_crop 으로 거를 수 있다)' % dirty)
