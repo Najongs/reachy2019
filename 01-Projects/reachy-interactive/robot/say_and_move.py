@@ -56,6 +56,26 @@ def speakable(text):
 
 # --- Speech -----------------------------------------------------------------
 
+# pip3 install --user 로 깐 명령은 ~/.local/bin 에 들어간다. 그런데 systemd 가
+# 주는 PATH 에는 그 디렉터리가 없어서, shutil.which 만 믿으면 서비스로 돌릴 때만
+# 조용히 못 찾는다 - 실제로 edge-tts 가 설치돼 있는데도 로봇은 몇 주 동안 gtts
+# (더 기계적인 목소리)로 말하고 있었다. 사람이 손으로 돌려 보면 잘 되니 더
+# 안 드러난다.
+_EXTRA_BINS = (os.path.expanduser('~/.local/bin'), '/usr/local/bin')
+
+
+def which_tool(name):
+    """PATH 에서 찾고, 없으면 사용자 설치 위치까지 뒤진다."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in _EXTRA_BINS:
+        p = os.path.join(d, name)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
 class Speech(object):
     """Play a sound in the background so the robot can move while talking.
 
@@ -100,7 +120,7 @@ class Speech(object):
 
     @staticmethod
     def _edge_usable():
-        return (shutil.which('edge-tts') is not None
+        return (which_tool('edge-tts') is not None
                 and shutil.which('mpg123') is not None)
 
     def _resolve_engine(self, engine):
@@ -127,9 +147,9 @@ class Speech(object):
     def available_backends():
         """List the audio tools actually installed on this machine."""
         found = {
-            name: shutil.which(name)
+            name: which_tool(name)
             for name in ('edge-tts', 'espeak-ng', 'espeak', 'aplay', 'mpg123')
-            if shutil.which(name) is not None
+            if which_tool(name) is not None
         }
         try:
             import gtts
@@ -173,7 +193,7 @@ class Speech(object):
         if self.engine == 'edge':
             try:
                 result = subprocess.run(
-                    [shutil.which('edge-tts'),
+                    [which_tool('edge-tts'),
                      '--voice', self.edge_voice, '--rate={}'.format(self.edge_rate),
                      '--text', text, '--write-media', path],
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
@@ -248,7 +268,7 @@ class Speech(object):
         def synth_and_play():
             try:
                 result = subprocess.run(
-                    [shutil.which('edge-tts'),
+                    [which_tool('edge-tts'),
                      '--voice', self.edge_voice, '--rate={}'.format(self.edge_rate),
                      '--text', text, '--write-media', self._tmp_path],
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,

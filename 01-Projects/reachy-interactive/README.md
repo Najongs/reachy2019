@@ -107,6 +107,30 @@ Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition vosk` + `sudo apt in
 - 실행: 단일 50Hz 스레드, 명령값 FK 로 손 시야추적, 키프레임마다 실측 동기화
 - 상태: 시작(인사+레디포즈) → 대기(idle+팔 숨쉬기) → 생각/말하기 → 동작(손추적) → 레디복귀 → 3분후 자동이완
 
+## 목소리 (TTS)
+
+`edge` (마이크로소프트 신경망 음성) → `gtts` → `espeak` 순으로 내려간다.
+뒤로 갈수록 기계음에 가깝다.
+
+**systemd 로 돌리면 PATH 가 다르다.** `pip3 install --user` 로 깐 명령은
+`~/.local/bin` 에 들어가는데 systemd 기본 PATH 에는 그 디렉터리가 없다. 그래서
+`shutil.which('edge-tts')` 가 None 을 돌려주고, 로봇은 아무 말 없이 `gtts`(더
+기계적인 목소리)로 내려가 있었다. 사람이 ssh 로 손수 실행하면 로그인 셸 PATH 에
+`~/.local/bin` 이 있어 잘 되니, 더더욱 드러나지 않는다.
+
+두 겹으로 막았다.
+- `say_and_move.which_tool()` 이 PATH 에 없으면 `~/.local/bin`, `/usr/local/bin`
+  까지 찾는다.
+- `ops/voice_chat.service` 에 `Environment=PATH=/home/pi/.local/bin:...` 를 넣었다.
+
+확인 방법: 기동 로그에 `TTS engine: edge` 와
+`filler sounds ready (edge-koKRSunHiNeural)` 가 찍혀야 한다. `gtts` 로 찍혀 있으면
+edge 를 못 찾은 것이다.
+
+**주의: edge 도 gtts 도 인터넷이 필요하다.** 복도 무선이 끊기면 결국 espeak
+(오프라인·기계음)까지 내려간다. 자주 쓰는 문구(필러)는 미리 합성해 캐시에
+넣어 두므로 그 구간은 끊겨도 자연스러운 목소리가 나온다.
+
 ## 기능 노트
 
 **대화 (무료 로컬 LLM)**

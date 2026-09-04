@@ -10,6 +10,10 @@ StartLimitIntervalSec=0
 [Service]
 User=pi
 WorkingDirectory=/home/pi/Documents
+# pip3 install --user 로 깐 edge-tts 등이 ~/.local/bin 에 있다. systemd 기본
+# PATH 에는 그 디렉터리가 없어서, 넣어 주지 않으면 코드가 못 찾고 더 기계적인
+# 목소리(gtts)로 조용히 내려간다.
+Environment=PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HOME=/home/pi
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=PYTHONUNBUFFERED=1
