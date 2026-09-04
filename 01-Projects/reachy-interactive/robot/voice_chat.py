@@ -149,6 +149,47 @@ _LOOK_OBJ = ('저거 봐', '저것 봐', '이거 봐', '이것 봐', '그거 봐
              '바닥에 있는', '앞에 있는 물', '카메라로')
 
 
+# STT junk seen repeatedly in the logs. Vosk (used whenever Google STT is
+# unreachable) turns corridor noise and half-heard words into confident-looking
+# but meaningless text - "야 고사양" appeared 8 times in one day, and each one
+# cost an LLM call and a puzzled reply. These are LOUD, so an audio-level
+# threshold cannot catch them; they have to be filtered as text.
+_STT_JUNK = {
+    '야고사양', 'a고사양', '야록고사양', '호소야', '호소야아', '호소야야',
+    '아호소야햐', '하얀자', '하얀', '이다', '노는', '보스', '음', '으음',
+    '어', '아', '그', '저', '네네네',
+}
+
+
+_SHORT_REAL = {'안녕', '하이', '만세', '인사', '악수', '박수', '고마워', '미안',
+               '누구', '이름', '뭐야', '왜', '응', '네', '노래', '춤'}
+
+
+def looks_like_noise(text, engine=None):
+    """True for transcripts that are almost certainly mis-heard noise.
+
+    Only consulted at the very END of routing: anything meaningful (a command,
+    a note, a real question) has already matched by then, so filtering here
+    cannot swallow a real request. Keeps the robot from answering the corridor.
+    """
+    compact = (text or '').replace(' ', '')
+    if not compact:
+        return True
+    if compact.lower() in _STT_JUNK:
+        return True
+    # A one- or two-syllable leftover that matched nothing is noise - EXCEPT
+    # for real short words people actually say to a robot.
+    if compact in _SHORT_REAL:
+        return False
+    if len(compact) <= 2:
+        return True
+    # Offline Vosk is much noisier than Google; be stricter with its output.
+    if engine == 'vosk' and len(compact) <= 3 and not any(
+            c in compact for c in ('안녕', '고마', '미안', '누구', '이름')):
+        return True
+    return False
+
+
 def wants_object_look(text):
     """True if the user wants the robot to look at / find an object."""
     compact = text.replace(' ', '')
@@ -1256,6 +1297,23 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                 speak(note_reply)
                 last_kind = 'chat'
                 continue
+
+        # Everything meaningful has been routed by now. What is left and looks
+        # like mis-heard noise must NOT reach the model: the logs showed the
+        # robot earnestly explaining "고사양" eight times to a corridor.
+        if looks_like_noise(text, getattr(listener, 'last_engine', None)):
+            logger.info('Ignoring noise-like transcript: %r', text)
+            if head is not None:
+                try:
+                    head.acknowledge(duration=0.35)   # 짧게 "응?" 정도만
+                except Exception:
+                    pass
+            if turn_logger is not None:
+                turn_logger.log('noise', {'text': text,
+                                          'engine': getattr(listener, 'last_engine', None),
+                                          'rms': getattr(listener, 'last_rms', None)})
+            last_kind = None
+            continue
 
         # Fill the whole wait with pondering sounds, not just one blip: after
         # ack_delay, play fillers back-to-back until the reply arrives, so a

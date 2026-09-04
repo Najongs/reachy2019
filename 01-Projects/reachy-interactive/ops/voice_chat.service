@@ -23,7 +23,7 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -sf -m 3 http://127.0.0.1
 # --gaze-tilt: the default (-0.15) aims the head DOWN, and on this stand the
 # camera saw only floor - face detection, visitor photos and object look all
 # stayed at zero. Positive lifts the resting gaze to head height.
-ExecStart=/usr/bin/python3 /home/pi/Documents/voice_chat.py --motions --hallway --stt auto --fixed-energy 550 --gaze-tilt 0.15 --camera-index main \
+ExecStart=/usr/bin/python3 /home/pi/Documents/voice_chat.py --motions --hallway --stt auto --fixed-energy 900 --gaze-tilt 0.15 --camera-index main \
   --url http://127.0.0.1:8080 --token reachy2019
 # A visitor's genuine goodbye no longer exits in hallway mode, but any crash
 # or manual stop word in non-hallway runs just restarts the loop.
