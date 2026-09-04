@@ -31,6 +31,20 @@ HEAD_SETTLE = 0.8      # 목이 멈춘 뒤 이만큼 지나야 화면을 믿는�
 MOTION_RECENT = 4.0    # 최근 이 시간 안에 움직임이 있었으면 아직 사람이 있다고 본다
 DIAG_EVERY = 30.0      # 수집 조건이 왜 막혔는지 이따금 남긴다(튜닝용)
 
+# 얼굴로 인정하려면 이웃 검출이 몇 개나 겹쳐야 하는지.
+#
+# 기본값 5 는 이 복도에서 오검출이 잦다. 실측:
+#   - 빈 복도 26장 중 5장에서 유리문 틀을 얼굴로 잡았고, 그 사진들이 그대로
+#     데이터셋에 들어갔다. 7 이상에서는 그 26장에서 오검출 0.
+#   - 예전 복도 프레임 24장에서는 바닥 표식을 얼굴로 잡았다(8 에서도 남고,
+#     9 에서 사라진다).
+# 오검출은 데이터셋을 더럽힐 뿐 아니라 로봇이 문을 보고 인사하게 만든다.
+#
+# 주의: 진짜 얼굴에 대한 재현율은 아직 검증하지 못했다. 가진 표본(위 50장)에
+# 사람 얼굴이 한 장도 없었기 때문이다. 그래서 오검출을 줄이되 너무 올리지는
+# 않는 선인 8 로 둔다. 사람 앞에서 확인한 뒤 조정할 것.
+FACE_MIN_NEIGHBORS = 8
+
 
 class PresenceWatcher(object):
     """Watch the camera for faces on a background thread.
@@ -128,7 +142,7 @@ class PresenceWatcher(object):
     def _detect_gray(self, gray):
         faces = self._cascade.detectMultiScale(
             self._cv.equalizeHist(gray),
-            scaleFactor=1.2, minNeighbors=5, minSize=(30, 30))
+            scaleFactor=1.2, minNeighbors=FACE_MIN_NEIGHBORS, minSize=(30, 30))
         if len(faces) == 0:
             return None
 
