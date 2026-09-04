@@ -43,6 +43,24 @@ GAZE_TILT = -0.15
 # 실제로는 천장을 보고 있었다.
 NEUTRAL_GAZE = (0.0, -0.05)
 
+# 목을 이보다 빠르게는 돌리지 않는다(도/초). Orbita 는 자체 속도 제한이 없어서,
+# 목표값을 확 바꾸면 그만큼 확 돈다 - 기구에 무리가 간다.
+#
+# point_head 가 목을 움직이는 유일한 통로이므로, 여기서 한 번만 막으면 제스처·
+# 따라가기·춤·손 추적까지 전부 보호된다.
+#
+# 실측 최고 각속도 (0.25초 평균. 순간값은 디스크 값이 캐시라 부풀려진다):
+#                    상한 없음   상한 45
+#   따라가기 한 걸음      34.8     34.1
+#   정면 복귀           273.8     73.1
+#   제스처 nod           80.4     37.7
+#   제스처 shake        105.0     56.6
+# 원래도 자연스러웠던 '두리번'이 45 쯤이라, 그 수준에 맞췄다.
+MAX_NECK_SPEED = 45.0
+_NECK_MAX_DT = 0.1        # 오래 쉬었다고 한 번에 크게 움직이지 않도록
+_last_thetas = None
+_last_theta_t = 0.0
+
 
 # Words the TTS engines mispronounce, fixed just before synthesis.
 # The LLM is also told to write these in hangul, but replies slip sometimes.
@@ -458,6 +476,25 @@ def gaze_thetas(reachy, x, y, z, tilt=True):
         return None
 
 
+def _rate_limited(thetas):
+    """직전 명령에서 너무 멀리 뛰지 않도록 자른다 (목 보호).
+
+    호출 간격만큼만 움직이게 하므로, 50Hz 로 도는 모션은 자연스럽게 이어지고
+    목표만 확 바뀐 경우에는 천천히 따라간다.
+    """
+    global _last_thetas, _last_theta_t
+
+    now = time.time()
+    if _last_thetas is not None and len(_last_thetas) == len(thetas):
+        dt = min(max(now - _last_theta_t, 0.001), _NECK_MAX_DT)
+        step = MAX_NECK_SPEED * dt
+        thetas = [prev + max(-step, min(step, want - prev))
+                  for prev, want in zip(_last_thetas, thetas)]
+    _last_thetas = list(thetas)
+    _last_theta_t = now
+    return thetas
+
+
 def point_head(reachy, x, y, z, tilt=True):
     """Point the neck at (x, y, z) by writing disk targets directly.
 
@@ -474,6 +511,8 @@ def point_head(reachy, x, y, z, tilt=True):
     if thetas is None:
         # Target outside of Orbita's reachable orientations, skip this step.
         return
+
+    thetas = _rate_limited(thetas)
 
     for disk, theta in zip(neck.disks, thetas):
         disk.target_rot_position = theta
@@ -622,7 +661,7 @@ HEAD_GESTURES = {
 }
 
 
-def run_head_gesture(reachy, name, distance=0.5, freq=50, seg=0.9, hold=0.35):
+def run_head_gesture(reachy, name, distance=0.5, freq=50, seg=1.4, hold=0.35):
     """Move the neck through a named gesture, then return to neutral.
 
     Glides between gaze waypoints at `freq` Hz so the Orbita moves smoothly
@@ -644,8 +683,8 @@ def run_head_gesture(reachy, name, distance=0.5, freq=50, seg=0.9, hold=0.35):
 
     start = list(getattr(head, '_soft_gaze', NEUTRAL_GAZE))
     path = list(waypoints)
-    if path[-1] != (0.0, 0.0):
-        path = path + [(0.0, 0.0)]        # always settle looking forward
+    if path[-1] != NEUTRAL_GAZE:
+        path = path + [NEUTRAL_GAZE]      # 늘 정면을 보고 끝낸다
 
     for (ty, tz) in path:
         y0, z0 = start
@@ -1139,7 +1178,7 @@ class IdleMotion(object):
                    -self.ATTEND_MAX_Y, self.ATTEND_MAX_Y)
         tz = clamp(self._gaze[1] - w.face_yerr * self.ATTEND_GAIN_Z,
                    -self.ATTEND_MAX_Z, self.ATTEND_MAX_Z)
-        self._move_gaze(ty, tz, duration=0.8)
+        self._move_gaze(ty, tz, duration=1.5)
 
 
 def say_and_move(reachy, text=None, wav=None, speech=None, head=None, timeout=60):
