@@ -1089,6 +1089,69 @@ def prepare_fillers(speech, cache_dir='~/.cache/reachy_fillers'):
     return paths
 
 
+RECACHE_TRIES = 10      # 연결이 돌아오길 기다리며 다시 시도하는 횟수
+RECACHE_WAIT = 60.0     # 시도 사이 간격(초)
+
+
+def precache_common_lines(speech, notes=None):
+    """자주 하는 말을 미리 합성해 둔다.
+
+    이 Pi 는 Buster(glibc 2.28) 라 오프라인 신경망 TTS(piper)를 못 쓴다 - 받아
+    보니 어느 릴리스든 GLIBC 2.29~2.30 을 요구한다. 자연스러운 목소리(edge)는
+    인터넷이 필요하므로, 복도 와이파이가 끊기면 결국 espeak(기계음)까지
+    내려간다. 그래서 '늘 하는 말'만이라도 미리 만들어 두면, 끊긴 동안에도
+    인사와 단골 답변은 자연스러운 목소리로 나온다. 덤으로 합성 대기도 없다.
+    """
+    if speech is None or not hasattr(speech, 'precache'):
+        return 0
+
+    from threading import Thread
+
+    phrases = []
+    try:
+        from hallway import HallwayGreeter
+        phrases.extend(HallwayGreeter.GREETINGS)
+    except Exception:
+        logger.debug('복도 인사말을 읽지 못했습니다', exc_info=True)
+
+    # QuickNotes 는 (패턴들, 답변, 종류) 로 컴파일해 들고 있다.
+    for _pats, reply, _kind in getattr(notes, '_compiled', None) or []:
+        phrases.append(reply)
+
+    phrases = [p for p in dict.fromkeys(phrases) if p]
+    if not phrases:
+        return 0
+
+    # 백그라운드에서 채운다. 합성에는 인터넷이 필요한데 복도 와이파이는 부팅
+    # 직후에 특히 잘 끊긴다(실제로 39개 중 7개가 그때 이름 풀이 실패로 빠졌다).
+    # 기동을 붙잡아 두지 않고, 연결이 돌아오면 나머지를 채우도록 되풀이한다.
+    def _fill():
+        for attempt in range(RECACHE_TRIES):
+            missing = [ph for ph in phrases if speech.cached_path(ph) is None]
+            if not missing:
+                if attempt:
+                    logger.info('자주 쓰는 말 %d개 모두 준비됐습니다', len(phrases))
+                return
+            try:
+                made = speech.precache(missing)
+            except Exception:
+                made = 0
+                logger.debug('미리 합성 실패', exc_info=True)
+            left = len([ph for ph in phrases if speech.cached_path(ph) is None])
+            logger.info('자주 쓰는 말 %d개 중 %d개 준비 (이번에 %d개 추가) - '
+                        '인터넷이 끊겨도 이 말들은 자연스러운 목소리로 나옵니다',
+                        len(phrases), len(phrases) - left, made)
+            if not left:
+                return
+            time.sleep(RECACHE_WAIT)
+        logger.info('자주 쓰는 말 일부를 아직 못 만들었습니다 (인터넷 확인)')
+
+    t = Thread(target=_fill)
+    t.daemon = True
+    t.start()
+    return len(phrases)
+
+
 def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
              ack_delay=0.8, idle=None, vision=False, camera_side='left',
              camera_index=0, motion_handler=None, turn_logger=None, notes=None,
@@ -1608,6 +1671,9 @@ def main():
                         len(notes), notes_path)
         else:
             logger.info('QuickNotes: no note file at %s, skipping', notes_path)
+
+    # 자주 하는 말은 미리 합성해 둔다 (인터넷이 끊겨도 자연스러운 목소리로).
+    precache_common_lines(speech, notes)
 
     if args.stt_corrections and args.stt_corrections != 'off':
         corr_path = args.stt_corrections

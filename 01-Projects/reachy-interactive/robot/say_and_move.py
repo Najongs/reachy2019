@@ -311,6 +311,54 @@ class Speech(object):
         self._worker.daemon = True
         self._worker.start()
 
+    # -- 미리 합성해 둔 문구 캐시 -------------------------------------------
+    #
+    # /tmp 는 tmpfs 라 재부팅하면 날아간다. 부팅 직후 와이파이가 늦으면 하루
+    # 종일 캐시 없이 도는 일이 있었으므로, 홈 아래에 남긴다.
+    CACHE_DIR = '~/.cache/reachy_tts'
+
+    def _cache_slug(self):
+        """엔진과 목소리가 바뀌면 캐시도 갈리도록."""
+        voice = self.edge_voice if self.engine == 'edge' else self.voice
+        return '{}-{}'.format(self.engine,
+                              ''.join(c for c in (voice or '') if c.isalnum()))
+
+    def cache_path_for(self, text):
+        """이 문구가 캐시된다면 놓일 자리 (있든 없든 경로를 돌려준다)."""
+        import hashlib
+
+        d = os.path.expanduser(self.CACHE_DIR)
+        tag = hashlib.md5(text.encode('utf-8')).hexdigest()[:10]
+        return os.path.join(d, 'say_{}_{}.mp3'.format(self._cache_slug(), tag))
+
+    def cached_path(self, text):
+        """이미 합성해 둔 파일이 있으면 그 경로, 없으면 None."""
+        if self.engine not in ('edge', 'gtts'):
+            return None                 # espeak 는 즉시 나오므로 캐시가 의미 없다
+        try:
+            p = self.cache_path_for(text)
+            return p if os.path.exists(p) and os.path.getsize(p) > 0 else None
+        except Exception:
+            return None
+
+    def precache(self, phrases):
+        """문구들을 미리 합성해 둔다. 새로 만든 개수를 돌려준다."""
+        if self.engine not in ('edge', 'gtts'):
+            return 0
+        d = os.path.expanduser(self.CACHE_DIR)
+        os.makedirs(d, exist_ok=True)
+        made = 0
+        for phrase in phrases:
+            phrase = speakable(phrase or '').strip()
+            if not phrase:
+                continue
+            path = self.cache_path_for(phrase)
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                continue
+            if self.synthesize_to_file(phrase, path):
+                made += 1
+        return made
+
     def start(self, text=None, wav=None):
         """Start playing, without blocking.
 
@@ -323,6 +371,13 @@ class Speech(object):
 
         if text is not None:
             text = speakable(text)
+            # 미리 합성해 둔 문구면 그대로 튼다. 네트워크가 끊겨도 자연스러운
+            # 목소리가 나오고, 합성 대기도 없다. 이 Pi 는 Buster(glibc 2.28)라
+            # 오프라인 신경망 TTS(piper)는 GLIBC 2.29+ 를 요구해 쓸 수 없다.
+            # 그래서 '자주 하는 말'만이라도 미리 만들어 두는 쪽을 택했다.
+            cached = self.cached_path(text)
+            if cached is not None:
+                wav, text = cached, None
 
         if wav is not None:
             self._proc = subprocess.Popen(
