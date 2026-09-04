@@ -1700,13 +1700,23 @@ def main():
                         from person_db import PersonDB
                         person_db = PersonDB(retention_days=args.collect_days)
 
-                        def _collect(frame, box_rel):
+                        def _collect(frame, box_rel, person_rel=None, conf=None):
+                            if frame is None:
+                                return
+                            h, w = frame.shape[:2]
                             face = None
-                            if box_rel is not None and frame is not None:
-                                h, w = frame.shape[:2]
+                            if box_rel is not None:
                                 x, y, bw, bh = box_rel
                                 face = (x * w, y * h, bw * w, bh * h)
-                            person_db.add(frame, face=face)
+                            # 사람 상자는 (x1, y1, x2, y2) 비율로 온다.
+                            person = None
+                            if person_rel is not None:
+                                x1, y1, x2, y2 = person_rel
+                                person = (max(0.0, x1) * w, max(0.0, y1) * h,
+                                          (min(1.0, x2) - max(0.0, x1)) * w,
+                                          (min(1.0, y2) - max(0.0, y1)) * h)
+                            person_db.add(frame, face=face, person=person,
+                                          person_conf=conf)
 
                         watcher.on_person = _collect
                         st = person_db.stats()
@@ -1736,11 +1746,13 @@ def main():
                     # 그대로 나눠 쓴다.
                     if watcher is not None and (args.collect_people or args.hallway):
                         def _person_conf(frame, _ov=ov):
-                            best = 0.0
+                            """가장 확실한 사람의 (신뢰도, 상자) — 없으면 (0, None)."""
+                            best, box = 0.0, None
                             for d in _ov.detect(frame):
                                 if d['label'] == 'person' and d['conf'] > best:
                                     best = d['conf']
-                            return best
+                                    box = (d['x1'], d['y1'], d['x2'], d['y2'])
+                            return best, box
 
                         watcher.detect_person = _person_conf
                         logger.info('사람 검출(SSD)을 감시에 연결했습니다')

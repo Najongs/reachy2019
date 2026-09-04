@@ -43,10 +43,10 @@ DIAG_EVERY = 30.0      # 수집 조건이 왜 막혔는지 이따금 남긴다(�
 #     9 에서 사라진다).
 # 오검출은 데이터셋을 더럽힐 뿐 아니라 로봇이 문을 보고 인사하게 만든다.
 #
-# 주의: 진짜 얼굴에 대한 재현율은 아직 검증하지 못했다. 가진 표본(위 50장)에
-# 사람 얼굴이 한 장도 없었기 때문이다. 그래서 오검출을 줄이되 너무 올리지는
-# 않는 선인 8 로 둔다. 사람 앞에서 확인한 뒤 조정할 것.
-FACE_MIN_NEIGHBORS = 8
+# 이제 '찍을지 말지'는 SSD 사람 검출이 정하고 Haar 는 얼굴 상자만 얹는다.
+# 그래서 Haar 를 엄격하게 올려도 사진을 놓치지 않는다 - 얼굴 크롭이 덜 붙을
+# 뿐이다. 반대로 느슨하면 문틀 크롭이 데이터셋에 섞인다(8 에서도 실제로 섞였다).
+FACE_MIN_NEIGHBORS = 10
 
 # 사람 검출(MobileNet-SSD)을 얼마나 자주 돌릴지(초). Pi 4 에서 한 번에 ~350ms 라
 # 매 폴링마다 돌리면 코어 하나를 절반쯤 먹는다.
@@ -108,6 +108,7 @@ class PresenceWatcher(object):
         # 실측: 크게 찍힌 정면 얼굴을 Haar 는 어떤 설정으로도 못 잡았는데
         # (역광·안경·화면 기울기 13도), SSD 는 같은 사진을 0.98 로 잡았다.
         self.detect_person = None
+        self.person_box = None
         self._net_at = 0.0
         self.person_conf = 0.0
         self.head_pose = None
@@ -143,6 +144,20 @@ class PresenceWatcher(object):
     def seen_within(self, seconds):
         """True if a face was detected within the last `seconds`."""
         return self.person and (time.time() - self.last_seen) <= seconds
+
+    def _face_on_person(self, face_center):
+        """얼굴 상자가 검출된 사람 위에 있나 (비율 좌표).
+
+        Haar 는 복도 끝 유리문이나 바닥 표식을 얼굴로 잡는다. 사람이 프레임에
+        있더라도 그 상자가 사람 위가 아니면 얼굴 크롭으로 남겨서는 안 된다.
+        """
+        box = self.person_box
+        if box is None:
+            return True                 # 상자를 모르면 예전대로 믿는다
+        x1, y1, x2, y2 = box
+        m = 0.05                        # 검출 상자가 몸을 살짝 자르는 경우 대비
+        cx, cy = face_center
+        return (x1 - m) <= cx <= (x2 + m) and (y1 - m) <= cy <= (y2 + m)
 
     def _update_head_state(self):
         """목이 실제로 움직였는지 갱신한다 (디스크 실측 위치 비교)."""
@@ -249,37 +264,42 @@ class PresenceWatcher(object):
                     res = self._detect_gray(gray)
                     now = time.time()
 
-                    # 얼굴이 안 잡혀도 사람일 수 있다. 무거운 검출기라 간격을 둔다.
+                    # 사람이 있는지는 SSD 가 정한다. Haar 는 얼굴 상자를 얹는
+                    # 역할만 한다. 예전에는 Haar 가 잡으면 그대로 찍었는데,
+                    # 복도 끝 유리문과 바닥 표식을 얼굴로 잡아 사람 없는 사진이
+                    # 데이터셋에 들어갔다(minNeighbors 를 8 로 올려도 남았다).
+                    # 무거운 검출기라 간격을 둔다.
                     body = False
-                    if (res is None and self.detect_person is not None
-                            and now - self._net_at > PERSON_NET_INTERVAL):
+                    if self.detect_person is None:
+                        body = res is not None      # 검출기가 없으면 얼굴만 믿는다
+                    elif now - self._net_at > PERSON_NET_INTERVAL:
                         self._net_at = now
                         try:
-                            conf = self.detect_person(frame)
+                            got = self.detect_person(frame)
                         except Exception:
-                            conf = 0.0
+                            got = 0.0
                             logger.debug('사람 검출 실패', exc_info=True)
+                        # (신뢰도, 상자) 또는 신뢰도만 - 둘 다 받아 준다.
+                        if isinstance(got, tuple):
+                            conf, self.person_box = got
+                        else:
+                            conf, self.person_box = got, None
                         self.person_conf = conf
                         body = conf >= PERSON_NET_CONF
 
                     if body:
+                        if res is not None and self._face_on_person(res):
+                            cx, cy = res
+                            self.face_error = (cx - 0.5) * 2.0
+                            self.face_yerr = (cy - 0.5) * 2.0
+                        else:
+                            # 얼굴 상자가 사람 위가 아니면(문틀 등) 크롭을 남기지
+                            # 않는다. 사진은 그대로 저장된다.
+                            self.face_box_rel = None
                         if not self.person:
-                            logger.info('사람 검출 (몸 %.2f)', self.person_conf)
-                            self.appeared_at = now
-                        self.person = True
-                        self.last_seen = now
-                        self.face_box_rel = None
-                        if self.on_person is not None:
-                            try:
-                                self.on_person(frame, None)
-                            except Exception:
-                                logger.debug('on_person(body) failed', exc_info=True)
-                    elif res is not None:
-                        cx, cy = res
-                        self.face_error = (cx - 0.5) * 2.0
-                        self.face_yerr = (cy - 0.5) * 2.0
-                        if not self.person:
-                            logger.info('Person detected')
+                            logger.info('사람 검출 (몸 %.2f, 얼굴 %s)',
+                                        self.person_conf,
+                                        '있음' if res is not None else '없음')
                             self.appeared_at = now
                         self.person = True
                         self.last_seen = now
@@ -287,7 +307,8 @@ class PresenceWatcher(object):
                         # 받는 쪽(person_db)이 간격·장수 제한으로 결정한다.
                         if self.on_person is not None:
                             try:
-                                self.on_person(frame, self.face_box_rel)
+                                self.on_person(frame, self.face_box_rel,
+                                               self.person_box, self.person_conf)
                             except Exception:
                                 logger.debug('on_person failed', exc_info=True)
                     else:

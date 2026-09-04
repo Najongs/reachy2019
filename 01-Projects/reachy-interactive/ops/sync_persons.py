@@ -50,8 +50,19 @@ def ensure_db(path):
             frame_w INTEGER, frame_h INTEGER,
             sharpness   REAL,
             interacted  INTEGER DEFAULT 0,
+            -- 사람 검출기가 알려 준 사람 위치 (나중에 사람만 잘라 쓰기 위해)
+            person_x    INTEGER, person_y INTEGER,
+            person_w    INTEGER, person_h INTEGER,
+            person_conf REAL,
             UNIQUE(robot, src_id)           -- 같은 사진을 두 번 넣지 않는다
         )''')
+    for col, typ in (('person_x', 'INTEGER'), ('person_y', 'INTEGER'),
+                     ('person_w', 'INTEGER'), ('person_h', 'INTEGER'),
+                     ('person_conf', 'REAL')):
+        try:
+            conn.execute('ALTER TABLE persons ADD COLUMN %s %s' % (col, typ))
+        except Exception:
+            pass                # 이미 있는 칼럼
     conn.execute('CREATE INDEX IF NOT EXISTS idx_day ON persons(day)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_visit ON persons(robot, visit_id)')
     conn.commit()
@@ -88,23 +99,32 @@ def pull(local_root, robot):
     return tmp.name
 
 
-def merge(conn, remote_db, robot):
-    """Pi DB 의 행을 중앙 DB 에 합친다. 새로 들어간 행 수를 돌려준다."""
+def merge(conn, remote_db, robot, img_dir=None):
+    """Pi DB 의 행을 중앙 DB 에 합친다. (새로 들어간 수, 사진 없어 건너뛴 수)."""
     src = sqlite3.connect(remote_db)
-    rows = src.execute('''SELECT id, ts, day, visit_id, seq, image, face_image,
-                                 face_x, face_y, face_w, face_h,
-                                 frame_w, frame_h, sharpness, interacted
-                          FROM persons''').fetchall()
-    added = 0
+    # Pi 쪽 DB 가 아직 예전 스키마일 수 있으니 있는 칼럼만 고른다.
+    have = {r[1] for r in src.execute('PRAGMA table_info(persons)')}
+    extra = [c for c in ('person_x', 'person_y', 'person_w', 'person_h',
+                         'person_conf') if c in have]
+    cols = ['id', 'ts', 'day', 'visit_id', 'seq', 'image', 'face_image',
+            'face_x', 'face_y', 'face_w', 'face_h',
+            'frame_w', 'frame_h', 'sharpness', 'interacted'] + extra
+    rows = src.execute('SELECT %s FROM persons' % ', '.join(cols)).fetchall()
+    n_base = 15
+    target = ['robot', 'src_id', 'ts', 'day', 'visit_id', 'seq', 'image',
+              'face_image', 'face_x', 'face_y', 'face_w', 'face_h',
+              'frame_w', 'frame_h', 'sharpness', 'interacted'] + extra
+    sql = ('INSERT OR IGNORE INTO persons (%s) VALUES (%s)'
+           % (', '.join(target), ', '.join('?' * len(target))))
+    added = skipped = 0
     for r in rows:
+        # 사진이 아직 안 온 행은 넣지 않는다. 다음 번에 사진과 함께 들어온다.
+        # (파일 없는 행이 쌓이면 학습용으로 뽑을 때 빈 손이 된다.)
+        if r[5] and img_dir and not os.path.exists(os.path.join(img_dir, r[5])):
+            skipped += 1
+            continue
         try:
-            conn.execute('''INSERT OR IGNORE INTO persons
-                (robot, src_id, ts, day, visit_id, seq, image, face_image,
-                 face_x, face_y, face_w, face_h, frame_w, frame_h,
-                 sharpness, interacted)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (robot, r[0], r[1], r[2], r[3], r[4], r[5], r[6],
-                 r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14]))
+            conn.execute(sql, (robot,) + tuple(r[:n_base]) + tuple(r[n_base:]))
             added += conn.total_changes and 1 or 0
         except Exception:
             pass
@@ -114,7 +134,7 @@ def merge(conn, remote_db, robot):
                      (r[14], robot, r[0]))
     conn.commit()
     src.close()
-    return added
+    return added, skipped
 
 
 def purge_remote(before_day=None):
@@ -159,6 +179,12 @@ def stats(conn, local_root):
     sharp = conn.execute(
         'SELECT COUNT(*) FROM persons WHERE sharpness > 200').fetchone()[0]
     print('  선명도 200 이상: %d장 (학습에 쓸 만한 것)' % sharp)
+    try:
+        pb = q('SELECT COUNT(*) FROM persons WHERE person_w IS NOT NULL')
+        big = q('SELECT COUNT(*) FROM persons WHERE person_w >= 150')
+        print('  사람 위치가 기록된 것: %d장 (그중 크게 찍힌 것 %d장)' % (pb, big))
+    except Exception:
+        pass
     for day, n in conn.execute(
             'SELECT day, COUNT(*) FROM persons GROUP BY day ORDER BY day DESC LIMIT 7'):
         print('    %s  %d장' % (day, n))
@@ -196,9 +222,13 @@ def main():
         stats(conn, local_root)
         return 1
 
-    added = merge(conn, remote_db, args.robot)
+    added, skipped = merge(conn, remote_db, args.robot,
+                           img_dir=os.path.join(local_root, args.robot))
     os.unlink(remote_db)
     print('  새로 추가된 사진: %d장' % added)
+    if skipped:
+        print('  사진이 아직 안 온 행 %d건은 건너뜀 (다음 번에 함께 들어옵니다)'
+              % skipped)
 
     if args.purge_remote:
         print('── Pi 쪽 정리')

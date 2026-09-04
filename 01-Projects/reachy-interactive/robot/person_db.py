@@ -65,8 +65,15 @@ class PersonDB(object):
                 face_w      INTEGER, face_h INTEGER,
                 frame_w     INTEGER, frame_h INTEGER,
                 sharpness   REAL,                -- 선명도 (낮으면 학습에 부적합)
-                interacted  INTEGER DEFAULT 0    -- 이 방문에서 실제로 대화했나
+                interacted  INTEGER DEFAULT 0,   -- 이 방문에서 실제로 대화했나
+                -- 사람 검출기(SSD)가 알려 준 사람 위치. 나중에 사람만 잘라
+                -- 쓰거나, 너무 작게 찍힌 것을 걸러 내는 데 쓴다. 얼굴 상자는
+                -- 이 복도에서 잘 안 잡히므로 이쪽이 실질적인 기준이 된다.
+                person_x    INTEGER, person_y INTEGER,
+                person_w    INTEGER, person_h INTEGER,
+                person_conf REAL
             )''')
+        self._migrate()
         self._conn.execute(
             'CREATE INDEX IF NOT EXISTS idx_persons_day ON persons(day)')
         self._conn.execute(
@@ -81,6 +88,18 @@ class PersonDB(object):
         self._day = time.strftime('%Y-%m-%d')
         self._day_count = self._count_today()
         self.prune()
+
+    def _migrate(self):
+        """예전 DB 에 새 칼럼을 붙인다 (이미 있으면 조용히 넘어간다)."""
+        for col, typ in (('person_x', 'INTEGER'), ('person_y', 'INTEGER'),
+                         ('person_w', 'INTEGER'), ('person_h', 'INTEGER'),
+                         ('person_conf', 'REAL')):
+            try:
+                self._conn.execute(
+                    'ALTER TABLE persons ADD COLUMN %s %s' % (col, typ))
+            except Exception:
+                pass            # 이미 있는 칼럼
+        self._conn.commit()
 
     # -- 상태 -----------------------------------------------------------------
 
@@ -157,13 +176,16 @@ class PersonDB(object):
 
     # -- 저장 -----------------------------------------------------------------
 
-    def add(self, frame, face=None, sharpness=None):
+    def add(self, frame, face=None, sharpness=None, person=None,
+            person_conf=None):
         """프레임 한 장을 데이터셋에 넣는다. 저장했으면 행 id, 아니면 None.
 
         Args:
             frame: BGR ndarray (전체 프레임)
             face: (x, y, w, h) 얼굴 위치 - 전체 프레임 좌표
             sharpness: 선명도 지표 (없으면 계산)
+            person: (x, y, w, h) 사람 전체 위치 - 전체 프레임 좌표
+            person_conf: 사람 검출 신뢰도
         """
         if frame is None:
             return None
@@ -194,8 +216,19 @@ class PersonDB(object):
 
         stamp = '%s_%03d' % (time.strftime('%H%M%S'), self._visit_count)
         rel = os.path.join(day, stamp + '.jpg')
-        cv2.imwrite(os.path.join(self.root, rel), frame,
-                    [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        path = os.path.join(self.root, rel)
+        # 사진이 실제로 남았는지 확인한 뒤에만 행을 넣는다. 예전에 18행 중
+        # 3행이 파일 없는 채로 남아, 나중에 학습용으로 뽑을 때 빈 손이 됐다.
+        # imwrite 는 실패해도 예외를 던지지 않는다.
+        ok = False
+        try:
+            ok = bool(cv2.imwrite(path, frame,
+                                  [int(cv2.IMWRITE_JPEG_QUALITY), 80]))
+        except Exception:
+            logger.debug('사진 저장 중 오류', exc_info=True)
+        if not ok or not os.path.exists(path):
+            logger.warning('사진을 저장하지 못해 기록하지 않습니다: %s', rel)
+            return None
 
         rel_face = None
         fx = fy = fw = fh = None
@@ -212,14 +245,20 @@ class PersonDB(object):
                 cv2.imwrite(os.path.join(self.root, rel_face), crop,
                             [int(cv2.IMWRITE_JPEG_QUALITY), 88])
 
+        px = py = pw = ph = None
+        if person is not None:
+            px, py, pw, ph = [int(v) for v in person]
+
         h, w = frame.shape[:2]
         cur = self._conn.execute(
             '''INSERT INTO persons
                (ts, day, visit_id, seq, image, face_image,
-                face_x, face_y, face_w, face_h, frame_w, frame_h, sharpness)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                face_x, face_y, face_w, face_h, frame_w, frame_h, sharpness,
+                person_x, person_y, person_w, person_h, person_conf)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (ts, day, self._visit_id, self._visit_count, rel, rel_face,
-             fx, fy, fw, fh, w, h, sharpness))
+             fx, fy, fw, fh, w, h, sharpness,
+             px, py, pw, ph, person_conf))
         self._conn.commit()
 
         self._visit_count += 1

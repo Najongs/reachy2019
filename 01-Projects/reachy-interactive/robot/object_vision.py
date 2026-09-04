@@ -74,6 +74,11 @@ class ObjectVision(object):
                 'conf': c,
                 'cx': float((x1 + x2) / 2), 'cy': float((y1 + y2) / 2),
                 'area': float(abs((x2 - x1) * (y2 - y1))),
+                # 상자 자체도 넘긴다(비율 좌표). 얼굴 상자가 정말 이 사람 위에
+                # 있는지 확인하는 데 쓴다 - 안 그러면 문틀을 얼굴로 잡은 크롭이
+                # 사람 사진에 섞인다.
+                'x1': float(x1), 'y1': float(y1),
+                'x2': float(x2), 'y2': float(y2),
             })
         return out
 
