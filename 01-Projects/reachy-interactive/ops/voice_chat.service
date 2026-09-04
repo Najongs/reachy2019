@@ -24,10 +24,12 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/ttyUSB2 ] && exit 0;
 # Then wait up to 5 min for the tunnel+broker so the first turn (and filler
 # synthesis) has a network; start anyway if it never comes (degraded mode).
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -sf -m 3 http://127.0.0.1:8080/health >/dev/null && exit 0; sleep 5; done; exit 0'
-# --gaze-tilt: the default (-0.15) aims the head DOWN, and on this stand the
-# camera saw only floor - face detection, visitor photos and object look all
-# stayed at zero. Positive lifts the resting gaze to head height.
-ExecStart=/usr/bin/python3 /home/pi/Documents/voice_chat.py --motions --hallway --stt auto --fixed-energy 900 --gaze-tilt 0.15 --camera-index main --collect-people \
+# --gaze-tilt 0: 시선 값이 곧 실제로 보는 곳이 되게 한다.
+# 코드 기본값(-0.15)은 바닥을 봤고, 한동안 쓰던 +0.15 는 반대로 천장을 봤다
+# (수집된 사진이 배관과 천장 위주였다). 목을 굳히고 높이를 바꿔 가며 찍어 보니
+# z=-0.05 에서 복도와 사람 눈높이가 화면 가운데 왔다. 그래서 기울기는 0 으로
+# 두고, 정면은 say_and_move.NEUTRAL_GAZE = (0, -0.05) 로 정의한다.
+ExecStart=/usr/bin/python3 /home/pi/Documents/voice_chat.py --motions --hallway --stt auto --fixed-energy 900 --gaze-tilt 0 --camera-index main --collect-people \
   --url http://127.0.0.1:8080 --token reachy2019
 # A visitor's genuine goodbye no longer exits in hallway mode, but any crash
 # or manual stop word in non-hallway runs just restarts the loop.

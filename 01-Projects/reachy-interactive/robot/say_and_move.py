@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 # frame. Tune with voice_chat --gaze-tilt.
 GAZE_TILT = -0.15
 
+# '딱 정면'. 실측으로 골랐다 - 목을 굳히고 시선 높이를 바꿔 가며 찍어 보니
+# z=+0.15 는 천장, z=-0.25 는 바닥이었고, z=-0.05 에서 복도와 사람 눈높이가
+# 화면 가운데에 왔다. 여기가 기준점이고, idle 도 말하기도 여기로 돌아온다.
+#
+# 주의: point_head(tilt=True) 는 여기에 GAZE_TILT 를 더한다. 그래서 서비스는
+# --gaze-tilt 0 으로 띄운다. 예전에는 +0.15 를 넘겨서, 정면이라고 부르는 자세가
+# 실제로는 천장을 보고 있었다.
+NEUTRAL_GAZE = (0.0, -0.05)
+
 
 # Words the TTS engines mispronounce, fixed just before synthesis.
 # The LLM is also told to write these in hangul, but replies slip sometimes.
@@ -633,7 +642,7 @@ def run_head_gesture(reachy, name, distance=0.5, freq=50, seg=0.9, hold=0.35):
         pass
     time.sleep(0.05)
 
-    start = list(getattr(head, '_soft_gaze', (0.0, 0.0)))
+    start = list(getattr(head, '_soft_gaze', NEUTRAL_GAZE))
     path = list(waypoints)
     if path[-1] != (0.0, 0.0):
         path = path + [(0.0, 0.0)]        # always settle looking forward
@@ -701,7 +710,7 @@ class TalkingHead(object):
         Without this, step()/think_step() jump straight to their own targets,
         which reads as a head snap whenever a motion takes over.
         """
-        self._ramp_gaze = getattr(self.reachy.head, '_soft_gaze', (0.0, 0.0))
+        self._ramp_gaze = getattr(self.reachy.head, '_soft_gaze', NEUTRAL_GAZE)
         self._ramp_ant = (self.reachy.head.left_antenna.goal_position,
                           self.reachy.head.right_antenna.goal_position)
         self._ramp_d = duration
@@ -852,8 +861,8 @@ class TalkingHead(object):
             self.step(t)
             time.sleep(1 / self.freq)
 
-    # 중립 자세의 시선. point_head 와 같은 좌표계(거리 0.5)로 적어 둔다.
-    HOME_GAZE = (0.0, -0.05)
+    # 중립 자세의 시선 (모듈 상단 NEUTRAL_GAZE 와 같은 곳을 본다).
+    HOME_GAZE = NEUTRAL_GAZE
 
     def home(self, duration=1.8):
         """Bring the head back to its neutral pose, slowly and gently.
@@ -867,7 +876,7 @@ class TalkingHead(object):
         self.reachy.head.left_antenna.goto(0, duration, interpolation_mode='minjerk')
         self.reachy.head.right_antenna.goto(0, duration, interpolation_mode='minjerk')
 
-        y0, z0 = getattr(self.reachy.head, '_soft_gaze', (0.0, 0.0))
+        y0, z0 = getattr(self.reachy.head, '_soft_gaze', NEUTRAL_GAZE)
         ty, tz = self.HOME_GAZE
         t0 = time.time()
         while True:
@@ -943,12 +952,13 @@ class IdleMotion(object):
                 return
 
             # Continue from wherever the head is currently pointing.
-            self._gaze = list(getattr(self.reachy.head, '_soft_gaze', (0.0, 0.0)))
+            self._gaze = list(getattr(self.reachy.head, '_soft_gaze', NEUTRAL_GAZE))
 
             self._running = Event()
             self._running.set()
 
             def loop():
+                was_person = False
                 while self._running.is_set():
                     # When someone is in view, keep looking at them; otherwise fall
                     # back to the random idle repertoire.
@@ -957,7 +967,18 @@ class IdleMotion(object):
                             self._attend()
                         except Exception:
                             logger.exception('Attend behavior failed')
+                        was_person = True
                         self._pause(random.uniform(0.3, 0.7))
+                        continue
+
+                    if was_person:
+                        # 사람을 놓쳤다. 그 사람을 보던 자세로 굳어 있지 말고
+                        # 정면으로 돌아온다.
+                        was_person = False
+                        try:
+                            self._recenter(duration=1.6)
+                        except Exception:
+                            logger.exception('Recenter failed')
                         continue
 
                     # No face, but the scene just moved (someone passing by):
@@ -1025,8 +1046,9 @@ class IdleMotion(object):
     def _glance_around(self):
         """Look somewhere nearby, slowly, and linger there."""
         import random
-        y = random.uniform(-0.22, 0.22)
-        z = random.uniform(-0.12, 0.15)
+        # 두리번거림도 정면을 중심으로 한다.
+        y = NEUTRAL_GAZE[0] + random.uniform(-0.22, 0.22)
+        z = NEUTRAL_GAZE[1] + random.uniform(-0.07, 0.20)
         self._move_gaze(y, z, duration=random.uniform(1.8, 3.0))
         self._pause(random.uniform(0.8, 2.0))
 
@@ -1065,9 +1087,9 @@ class IdleMotion(object):
             time.sleep(1 / self.freq)
         self._set_antennas(0, 0)
 
-    def _recenter(self):
-        """Drift back to looking straight ahead."""
-        self._move_gaze(0.0, 0.0, duration=2.0)
+    def _recenter(self, duration=2.0):
+        """정면으로 돌아온다."""
+        self._move_gaze(NEUTRAL_GAZE[0], NEUTRAL_GAZE[1], duration=duration)
 
     def _motion_nearby(self):
         """Scene movement worth glancing at (fresh, above noise, not too often)."""
