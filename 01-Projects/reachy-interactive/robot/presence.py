@@ -26,8 +26,11 @@ logger = logging.getLogger('reachy.presence')
 # 얼굴 없이 '움직임'만으로 촬영할 조건 (실측 기준값).
 # 화면 변화 넓이가 이 사이에 있을 때만 사람으로 본다. 너무 작으면 센서 잡음,
 # 너무 크면 조명 변화나 미처 못 거른 카메라 흔들림이다.
-MOTION_MAX = 0.60      # 이보다 크게 변하면 조명 변화나 카메라 흔들림으로 본다
+MOTION_MIN = 0.03      # 이보다 작으면 센서 잡음. 사람이면 화면의 몇 %는 바뀐다
+MOTION_MAX = 0.30      # 이보다 크면 사람이 아니라 화면 전체가 흔들린 것이다
 HEAD_SETTLE = 0.8      # 목이 멈춘 뒤 이만큼 지나야 화면을 믿는다(초)
+HEAD_MOVE_TOL = 0.3    # 목 디스크가 이보다 움직였으면 '움직인 것'(도).
+                       # 실측: 정지 상태로 20회 읽었을 때 변동폭 최대 0.081도.
 MOTION_RECENT = 4.0    # 최근 이 시간 안에 움직임이 있었으면 아직 사람이 있다고 본다
 DIAG_EVERY = 30.0      # 수집 조건이 왜 막혔는지 이따금 남긴다(튜닝용)
 
@@ -92,9 +95,14 @@ class PresenceWatcher(object):
         # 콜백은 person_db 로 사진을 모으는 데 쓴다 (voice_chat 에서 연결).
         self.face_box_rel = None
         self.on_person = None
-        # 머리가 멈춰 있는지 알려 주는 함수(say_and_move.head_still_for).
+        # 목 디스크의 '실측' 위치를 돌려주는 함수. 명령을 어디서 넣었는지
+        # 쫓아다니는 대신, 카메라가 실제로 움직였는지를 본다. 명령 경로를
+        # 계측하는 방식은 한 군데만 놓쳐도 조용히 틀린다(실제로 그랬다).
         # 없으면 얼굴이 보일 때만 촬영한다 - 오탐보다 놓치는 편이 낫다.
-        self.head_still = None
+        self.head_pose = None
+        self._pose_prev = None
+        self._head_moved_at = 0.0
+        self._still = False
         self._diag_at = 0.0
 
         self._stop = None
@@ -124,6 +132,23 @@ class PresenceWatcher(object):
     def seen_within(self, seconds):
         """True if a face was detected within the last `seconds`."""
         return self.person and (time.time() - self.last_seen) <= seconds
+
+    def _update_head_state(self):
+        """목이 실제로 움직였는지 갱신한다 (디스크 실측 위치 비교)."""
+        if self.head_pose is None:
+            self._still = False        # 알 수 없으면 화면을 믿지 않는다
+            return
+        try:
+            pose = self.head_pose()
+        except Exception:
+            self._still = False
+            return
+        now = time.time()
+        if self._pose_prev is not None and any(
+                abs(a - b) > HEAD_MOVE_TOL for a, b in zip(pose, self._pose_prev)):
+            self._head_moved_at = now
+        self._pose_prev = pose
+        self._still = (now - self._head_moved_at) > HEAD_SETTLE
 
     def _to_gray(self, frame):
         """Downscale + grayscale a BGR frame for detection/differencing."""
@@ -163,14 +188,23 @@ class PresenceWatcher(object):
         그래서 목이 멎어 있는 동안 연속으로 찍힌 두 프레임만 비교한다.
         """
         cv = self._cv
-        still = self.head_still() > HEAD_SETTLE if self.head_still else True
+        still = self._still
         prev = self._prev_gray
         # 목이 움직였으면 직전 프레임은 기준으로 못 쓴다. 버리고 다시 모은다.
         self._prev_gray = gray if still else None
         if prev is None or not still or prev.shape != gray.shape:
             return
 
-        diff = cv.absdiff(gray, prev)
+        import numpy as np
+
+        # 복도 끝이 유리문이라 역광이 세고, 카메라가 자동노출을 계속 조정한다.
+        # 그러면 화면 전체 밝기가 통째로 출렁여 프레임 차이가 크게 나온다
+        # (실측 0.52~0.67 - 사람이 지나갈 때 0.12~0.18 보다 훨씬 크다).
+        # 밝기가 통째로 바뀐 만큼(중앙값)을 빼서, 국소적으로 변한 곳만 남긴다.
+        d = gray.astype(np.int16) - prev.astype(np.int16)
+        d -= int(np.median(d))
+        diff = np.abs(d).astype('uint8')
+
         level = float(diff.mean()) / 255.0
         self.motion_level = level
         self.motion_area = float((diff > 25).mean())
@@ -180,7 +214,6 @@ class PresenceWatcher(object):
         cols = diff.sum(axis=0).astype('float64')
         total = cols.sum()
         if total > 0:
-            import numpy as np
             cx = float((cols * np.arange(len(cols))).sum() / total) / len(cols)
             self.motion_x = (cx - 0.5) * 2.0
         self.motion_at = time.time()
@@ -189,6 +222,7 @@ class PresenceWatcher(object):
         while not self._stop.is_set():
             t0 = time.time()
             try:
+                self._update_head_state()
                 frame = self.grab()
                 if frame is None:
                     # 프레임이 안 오면 얼굴 검출도 수집도 전부 멈춘 것이다.
@@ -226,10 +260,10 @@ class PresenceWatcher(object):
                         # 그 동안은 화면을 믿을 수 없다. 고개가 멎은 직후를 노려
                         # 찍어야 그 사람을 놓치지 않는다. 멈춰 선 사람도 잡힌다.
                         if (self.on_person is not None
-                                and self.head_still is not None
-                                and self.motion_area < MOTION_MAX
+                                and self.head_pose is not None
+                                and MOTION_MIN < self.motion_area < MOTION_MAX
                                 and now - self.motion_at < MOTION_RECENT
-                                and self.head_still() > HEAD_SETTLE):
+                                and self._still):
                             try:
                                 self.on_person(frame, None)
                             except Exception:
@@ -241,13 +275,12 @@ class PresenceWatcher(object):
                             # 안 찍힌 건지 '조건이 계속 막혀서'인지 알 수 없다.
                             self._diag_at = now
                             since = now - self.motion_at if self.motion_at else -1
-                            still = self.head_still() if self.head_still else -1
                             logger.info(
                                 '수집 대기: 변화넓이 %.3f · 마지막 움직임 %s · '
-                                '목 멈춘 지 %.1fs',
+                                '목 %s',
                                 self.motion_area,
                                 ('%.1fs 전' % since) if since >= 0 else '없음',
-                                min(still, 999.0))
+                                '정지' if self._still else '움직이는 중')
 
                     if self.person and now - self.last_seen > self.forget:
                         logger.info('Person gone')

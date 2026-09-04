@@ -506,6 +506,7 @@ def grab_frame(reachy, side='left', camera_index=0):
 
 
 SDK_CAMERA_WARMUP = 4.0   # 연결 직후 첫 프레임을 기다려 주는 최대 시간(초)
+_SDK_CAMERA_READY = False  # SDK 카메라에서 한 번이라도 프레임을 받았는가
 
 
 def check_sdk_camera(camera_index='main'):
@@ -539,19 +540,26 @@ def _grab_frame_locked(cv, reachy, side, camera_index):
     # 않는다(실측: VideoCapture 생성에서 무한 대기). 그러면 presence 스레드가
     # 첫 프레임에서 멎어 얼굴 검출·복도 인사·사람 수집이 전부 조용히 죽는다.
     # 이미 열려 있는 스트림을 그대로 쓰는 것이 유일하게 안전한 길이다.
+    global _SDK_CAMERA_READY
     camera = getattr(head, 'camera', None)
     if camera is not None and hasattr(camera, 'read'):
         success, frame = camera.read()
         if success and frame is not None:
+            _SDK_CAMERA_READY = True
             return frame
         # 연결 직후에는 백그라운드 스레드가 아직 첫 프레임을 못 받았을 수 있다
-        # (실측 약 2.4초). 잠깐만 기다려 준다.
-        for _ in range(int(SDK_CAMERA_WARMUP / 0.3)):
-            time.sleep(0.3)
-            success, frame = camera.read()
-            if success and frame is not None:
-                return frame
+        # (실측 약 2.2초). 그때 한 번만 기다린다. 한 번이라도 받은 뒤에는
+        # 기다리지 않는다 - 매 호출마다 4초씩 멈추면 사람이 지나가는 동안
+        # 감시 스레드가 사실상 멎어 버린다.
+        if not _SDK_CAMERA_READY:
+            for _ in range(int(SDK_CAMERA_WARMUP / 0.3)):
+                time.sleep(0.3)
+                success, frame = camera.read()
+                if success and frame is not None:
+                    _SDK_CAMERA_READY = True
+                    return frame
         logger.warning('SDK 카메라에서 프레임을 못 받았습니다')
+        return None
 
     # 1) left_camera / right_camera attributes (this repo's head.py)
     other = 'right' if side == 'left' else 'left'
@@ -1661,10 +1669,16 @@ def main():
                     logger.info('Head will attend to detected people')
 
                 # 카메라가 머리에 달려 있어서, 목이 도는 동안에는 화면 전체가
-                # 흐른다(사람이 지나가는 것보다도 크게). 목이 언제 움직였는지
-                # 알려 주면, 화면이 안정된 순간에만 움직임을 사람으로 본다.
-                from say_and_move import head_still_for
-                watcher.head_still = head_still_for
+                # 흐른다(사람이 지나가는 것보다도 크게). 목 디스크의 '실측'
+                # 위치를 넘겨주면, 화면이 안정된 순간에만 움직임을 사람으로 본다.
+                # 명령을 넣는 코드 경로를 계측하는 방식은 한 군데만 놓쳐도
+                # 조용히 틀린다 - 실제로 그래서 빈 복도 사진이 쌓였다.
+                try:
+                    disks = reachy.head.neck.disks
+                    watcher.head_pose = lambda: tuple(d.rot_position for d in disks)
+                except Exception:
+                    logger.warning('목 위치를 읽을 수 없어 움직임 촬영은 끕니다',
+                                   exc_info=True)
                 check_sdk_camera(args.camera_index)
 
                 # 지나가는 사람을 데이터셋으로 모은다. 저장 여부(간격·장수·용량·
