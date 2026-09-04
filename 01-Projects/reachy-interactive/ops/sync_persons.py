@@ -83,10 +83,17 @@ def ensure_db(path):
             x INTEGER, y INTEGER, w INTEGER, h INTEGER,
             conf     REAL,
             source   TEXT,                 -- 누가 잡았나 ('dgx-frcnn')
+            -- 나중에 임베딩으로 군집을 지어 같은 사람을 엮을 자리.
+            -- 지금은 비어 있고, 군집 도구가 채운다.
+            identity_id TEXT,
             UNIQUE(photo_id, seq)
         )''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_boxes_photo '
                  'ON person_boxes(photo_id)')
+    try:
+        conn.execute('ALTER TABLE person_boxes ADD COLUMN identity_id TEXT')
+    except Exception:
+        pass                            # 이미 있는 칼럼
     conn.execute('CREATE INDEX IF NOT EXISTS idx_day ON persons(day)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_visit ON persons(robot, visit_id)')
     conn.commit()

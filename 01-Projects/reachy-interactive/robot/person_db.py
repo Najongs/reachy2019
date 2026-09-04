@@ -31,7 +31,12 @@ MIN_FREE_MB = 700        # SD 여유가 이보다 적으면 촬영 중단
 PER_VISIT_MAX = 6        # 한 사람이 머무는 동안 최대 장수
 VISIT_INTERVAL = 4.0     # 같은 방문 중 촬영 간격(초)
 DAILY_MAX = 800          # 하루 총 장수
-FACELESS_INTERVAL = 12.0 # 얼굴이 안 보이는(움직임만) 사진은 더 드물게
+# 검출기가 사람도 얼굴도 못 잡았는데 찍는 경우에만 드물게 (지금은 그런 경로가
+# 없다). 예전에 '화면이 움직이면 찍기'가 있을 때의 방어책이었는데, 그 경로를
+# 없앤 뒤에도 남아 있어서 SSD 가 확인한 촬영까지 12초로 묶고 있었다.
+# 평균 통행이 11초라 한 사람당 한 장밖에 안 남았다 - 같은 사람의 여러 각도가
+# 있어야 나중에 군집으로 동일 인물을 엮을 수 있다.
+FACELESS_INTERVAL = 12.0
 AUTO_VISIT_GAP = 90.0    # 이만큼 조용하면 다음 사진은 새 방문으로 친다
 MIN_SHARPNESS = 60.0     # 이보다 흐리면 버린다 (머리가 도는 중에 찍힌 사진)
 
@@ -190,7 +195,8 @@ class PersonDB(object):
         if frame is None:
             return None
         self._autostart_visit()
-        if not self.should_capture(faceless=(face is None)):
+        # 얼굴이든 몸이든 검출기가 사람을 확인했으면 보통 간격(4초)으로 찍는다.
+        if not self.should_capture(faceless=(face is None and person is None)):
             return None
 
         import cv2

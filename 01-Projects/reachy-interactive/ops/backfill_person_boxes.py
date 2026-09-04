@@ -107,6 +107,26 @@ def main():
         return 1
 
     conn = sqlite3.connect(args.db)
+    # 보통은 sync_persons 가 먼저 만들어 두지만, 이것만 따로 돌릴 수도 있다.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS person_boxes (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            photo_id INTEGER NOT NULL,     -- persons.id
+            seq      INTEGER,              -- 그 사진에서 몇 번째 사람(큰 순)
+            x INTEGER, y INTEGER, w INTEGER, h INTEGER,
+            conf     REAL,
+            source   TEXT,                 -- 누가 잡았나 ('dgx-frcnn')
+            -- 나중에 임베딩으로 군집을 지어 같은 사람을 엮을 자리.
+            -- 지금은 비어 있고, 군집 도구가 채운다.
+            identity_id TEXT,
+            UNIQUE(photo_id, seq)
+        )''')
+    try:
+        conn.execute('ALTER TABLE person_boxes ADD COLUMN identity_id TEXT')
+    except Exception:
+        pass                               # 이미 있는 칼럼
+    conn.commit()
+
     # 로봇이 잡은 상자(pi-ssd)도 다시 잡는다. 인식 DB 는 여기서 만드는 것이
     # 원칙이고, 실측 차이가 크다(15장 중 4장 대 13장).
     where = ('' if args.all else
