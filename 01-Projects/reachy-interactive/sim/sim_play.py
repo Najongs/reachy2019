@@ -113,6 +113,15 @@ def main():
         for i, cd in enumerate(cands):
             print('\n[%d/%d] %s' % (i+1, len(cands), cd['idea']))
             print('   say:', cd.get('say'))
+            # 재생하기 전에 시연 안전 등급을 먼저 보여 준다. 실행기의 검증기는
+            # 팔을 굵기 없는 중심선으로만 보므로, 통과했다고 시연에서 안전한
+            # 것은 아니다 - 사람 앞에서 돌리기 전에 알고 있어야 한다.
+            try:
+                import sim_safety
+                print('   시연 안전:', sim_safety.describe(
+                    sim_safety.audit(cd['moves'], hz=40)))
+            except Exception:
+                pass
             play(executor, validate, cd['moves'], 'cand%d' % i)
             ans = input('   채택? 프리셋 이름 입력(엔터=건너뜀, r=다시, q=종료): ').strip()
             while ans == 'r':

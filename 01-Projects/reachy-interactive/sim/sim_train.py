@@ -35,6 +35,9 @@ sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
 
 import sim_eval                                  # noqa: E402
 import sim_opt                                   # noqa: E402
+import sim_safety                                # noqa: E402
+
+SAFETY_HZ = 40      # 학습 중 안전 감사 표본율. 확인용이라 100Hz 까지는 필요 없다
 
 CONFIG = os.path.join(HERE, '..', 'config')
 GOOD_SCORE = 90          # 이 점수를 넘고 지적이 없으면 그만 고친다
@@ -58,6 +61,9 @@ LESSON_MAP = [
      '동작이 길다 - 12초를 넘기지 마라'),
     ('한계를 넘은 각도',
      '관절 한계를 넘겨 적는다 - 프롬프트의 범위 안에서만 써라'),
+    ('시연 안전',
+     '팔이 몸통·머리·반대 팔에 너무 붙는다 - 검증기는 팔 두께를 안 보므로 '
+     '중심선 기준으로 10cm 이상 띄워라'),
 ]
 
 
@@ -197,6 +203,19 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
                 seed=attempt)
         result = sim_eval.evaluate(polished)
         moves = polished
+
+        # 시연 안전: 실행기는 팔을 굵기 없는 중심선으로만 본다. 선분 대 선분에
+        # 팔 두께까지 넣어 다시 보고, 여유가 없으면 지적에 얹는다. 새로 만드는
+        # 동작만이라도 시연에서 아슬아슬하지 않게 한다.
+        if result['ok']:
+            safe = sim_safety.audit(polished, hz=SAFETY_HZ)
+            result['safety'] = safe
+            if safe.get('ok') and safe['grade'] != '안전':
+                result['findings'] = list(result['findings']) + [
+                    '시연 안전 %s: %s. 금지 구역과 반대 팔에서 더 떨어뜨려라.'
+                    % (safe['grade'], sim_safety.describe(safe)[5:110])]
+                result['score'] = max(0, result['score']
+                                      - (25 if safe['grade'] == '위험' else 10))
 
         history.append({'attempt': attempt,
                         'score_raw': raw['score'],

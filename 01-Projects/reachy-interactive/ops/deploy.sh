@@ -8,7 +8,7 @@ FILES="$ROBOT/base_pose.py $ROBOT/custom_hands.py $ROBOT/llm_client.py \
 $ROBOT/motion_exec.py $ROBOT/motion_presets.py $ROBOT/say_and_move.py \
 $ROBOT/snap_view.py $ROBOT/voice_chat.py $ROBOT/state_mirror.py $ROBOT/calibrate_real.py \
 $ROBOT/quick_notes.py $ROBOT/presence.py $ROBOT/hallway.py $ROBOT/sleep_mode.py $ROBOT/object_vision.py $ROBOT/music.py $ROBOT/camera_check.py $ROBOT/person_db.py \
-$SIM/sim_play.py $SIM/sim_viewer.html \
+$SIM/sim_play.py $SIM/sim_viewer.html $SIM/sim_eval.py $SIM/sim_safety.py \
 $CFG/quick_notes.json $CFG/stt_corrections.json $CFG/cached_lines.json \
 $CFG/campaign_lines.json \
 $OPS/pi_tunnel.service $OPS/pi_viewer.service $OPS/respeaker_gain.py \
