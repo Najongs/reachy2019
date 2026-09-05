@@ -57,6 +57,33 @@ GRASP_SECONDS = 1.2     # 힘센서로 쥐거나 펴는 한 단계에 걸리는 
 ARM_PREFIXES = ('right_arm.', 'left_arm.')
 
 
+def _chain_points(chain, pose):
+    """이 팔의 링크별 위치를 한 번에. motion_exec._arm_points 와 같은 결과.
+
+    원래 것은 링크마다 forward_kinematics(upto=i) 를 불러 사슬을 처음부터 다시
+    계산한다 - 링크가 7개면 FK 를 7번, 실질적으로 O(n^2) 이다. 실물에서는 한
+    동작에 몇 번뿐이라 문제가 없지만, 탐색은 같은 동작을 수만 번 채점하므로
+    여기가 통째로 병목이 된다. 한 번 훑으면 중간 위치가 전부 나온다.
+    """
+    p = (0.0, 0.0, 0.0)
+    r = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+    nodes = [(0.0, chain[0][1][1], 0.0)]        # 어깨 밑동
+    for name, translation, axis, _limits in chain:
+        tv = me._mat_vec(r, translation)
+        p = (p[0] + tv[0], p[1] + tv[1], p[2] + tv[2])
+        r = me._mat_mul(r, me._rot(axis, pose.get(name, 0.0)))
+        nodes.append(p)
+
+    pts = []
+    for a, b in zip(nodes[:-1], nodes[1:]):
+        for t in (0.0, 0.34, 0.67):
+            pts.append((a[0] + (b[0] - a[0]) * t,
+                        a[1] + (b[1] - a[1]) * t,
+                        a[2] + (b[2] - a[2]) * t))
+    pts.append(nodes[-1])
+    return pts, nodes[-1]
+
+
 def _clearance(point, side):
     """이 점이 금지 구역에서 얼마나 떨어져 있나(m). 음수면 이미 안쪽."""
     x, y, z = point
@@ -88,7 +115,7 @@ def _clearance(point, side):
     return min(gaps)
 
 
-def simulate(moves, seed=None, hz=SAMPLE_HZ):
+def simulate(moves, seed=None, hz=SAMPLE_HZ, check_collision=True):
     """검증하고 궤적을 샘플링한다.
 
     Returns:
@@ -104,7 +131,8 @@ def simulate(moves, seed=None, hz=SAMPLE_HZ):
                 if isinstance(m, dict))
 
     try:
-        segments = me.validate(moves, seed, JOINTS)
+        segments = me.validate(moves, seed, JOINTS,
+                               check_collision=check_collision)
     except me.ValidationError as e:
         out['error'] = str(e)
         return out
@@ -136,6 +164,14 @@ def simulate(moves, seed=None, hz=SAMPLE_HZ):
                                        'used': round(pose[joint], 1),
                                        'cut_deg': round(gap, 1)})
 
+    # 양팔이 다 움직이는 동작인지 미리 본다 (팔-팔 간섭 검사를 켤지 결정).
+    touched = set()
+    for m in moves:
+        if isinstance(m, dict):
+            touched |= set((m.get('pose') or {}).keys())
+    both_arms_move = (any(j.startswith('right_arm.') for j in touched)
+                      and any(j.startswith('left_arm.') for j in touched))
+
     # 궤적 샘플링 - 실행기와 같은 minjerk 보간
     current = dict(seed)
     t = 0.0
@@ -152,14 +188,25 @@ def simulate(moves, seed=None, hz=SAMPLE_HZ):
             sample = {j: current.get(j, 0.0)
                       + (targets.get(j, 0.0) - current.get(j, 0.0)) * k
                       for j in set(current) | set(targets)}
-            hands, clear = {}, {}
+            hands, clear, allpts = {}, {}, {}
             for side, chain in me.CHAINS.items():
-                hands[side] = me.forward_kinematics(chain, sample)
-                clear[side] = min(_clearance(p, side)
-                                  for p in me._arm_points(chain, sample))
+                pts, hand = _chain_points(chain, sample)
+                hands[side] = hand
+                allpts[side] = pts
+                clear[side] = min(_clearance(q, side) for q in pts)
+
+            # 팔끼리 부딪히는 것은 금지 구역과 별개다. validate 의 충돌 검사를
+            # 끄고 도는 탐색 모드에서는 여기서 대신 봐야 한다. 양팔이 다
+            # 움직일 때만 본다 - 한쪽이 옆에 늘어져 있으면 닿을 수 없다.
+            gap = None
+            if both_arms_move:
+                gap = min(me._dist(a, b)
+                          for a in allpts['right_arm']
+                          for b in allpts['left_arm'])
             out['samples'].append({
                 't': round(t + duration * step / float(steps), 3),
-                'pose': sample, 'hands': hands, 'clearance': clear})
+                'pose': sample, 'hands': hands, 'clearance': clear,
+                'arm_gap': gap})
         current = targets
         t += duration
 
@@ -214,9 +261,18 @@ def _path_stats(samples, side):
             'reversals': max(reversals, _joint_reversals(samples, side))}
 
 
-def evaluate(moves, intent=None):
-    """동작을 평가한다. dict(ok, score, metrics, findings)."""
-    sim = simulate(moves)
+FAST_HZ = 10        # 탐색용 샘플링. 채점 순위가 뒤집히지 않을 만큼만 성기게
+
+
+def evaluate(moves, intent=None, fast=False):
+    """동작을 평가한다. dict(ok, score, metrics, findings).
+
+    fast=True 는 탐색용이다. validate 의 충돌 검사를 끄고(같은 판정을 여기서
+    직접 한다) 성기게 샘플링해 수십 배 빨라진다. 최종 채택 전에는 반드시
+    fast=False 로 다시 확인한다 - 실물이 쓰는 검증기를 그대로 통과해야 한다.
+    """
+    sim = simulate(moves, hz=FAST_HZ if fast else SAMPLE_HZ,
+                   check_collision=not fast)
     findings = []
 
     if not sim['ok']:
@@ -234,6 +290,20 @@ def evaluate(moves, intent=None):
         metrics[side] = _path_stats(samples, side)
         metrics[side]['min_clearance_cm'] = round(
             min(s['clearance'][side] for s in samples) * 100, 1)
+
+    gaps = [s['arm_gap'] for s in samples if s['arm_gap'] is not None]
+    metrics['arm_gap_cm'] = round(min(gaps) * 100, 1) if gaps else None
+
+    # 탐색 모드에서는 validate 가 안 본 것을 여기서 본다. 금지 구역 안으로
+    # 들어갔거나 두 팔이 규정보다 가까우면 실물 검증기가 거부할 동작이다.
+    if fast:
+        worst = min(metrics['right_arm']['min_clearance_cm'],
+                    metrics['left_arm']['min_clearance_cm'])
+        if worst < 0 or (metrics['arm_gap_cm'] is not None
+                         and metrics['arm_gap_cm'] < me.ARM_CLEARANCE * 100):
+            return {'ok': False, 'score': 0,
+                    'error': '금지 구역 또는 두 팔이 부딪힙니다',
+                    'metrics': metrics, 'findings': ['충돌합니다']}
 
     # 마무리: 마지막 자세가 휴식에서 얼마나 떨어져 있나
     last = samples[-1]['pose'] if samples else REST
