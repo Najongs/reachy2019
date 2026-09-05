@@ -50,8 +50,27 @@ def _body_name(joint):
     return joint.replace('.', '_')
 
 
-def build_mjcf():
-    """motion_exec.CHAINS 를 그대로 MJCF 로. 모델과 검증기가 갈라지지 않게."""
+MESH_DIR = os.path.join(HERE, 'meshes')
+
+
+def _meshes():
+    """링크별 CAD 메시가 뽑혀 있으면 그 목록. 없으면 빈 dict."""
+    if not os.path.isdir(MESH_DIR):
+        return {}
+    return {f[:-4]: os.path.join(MESH_DIR, f)
+            for f in os.listdir(MESH_DIR) if f.endswith('.obj')}
+
+
+def build_mjcf(use_mesh=True, keepout=True):
+    """motion_exec.CHAINS 를 그대로 MJCF 로. 모델과 검증기가 갈라지지 않게.
+
+    CAD 메시(sim/extract_meshes.py 로 reachy.glb 에서 뽑은 것)가 있으면 그것을
+    **보이는 용도로만** 붙인다. 충돌은 계속 캡슐로 본다 - 캡슐은 실측 반지름을
+    쓰고 sim_safety 의 기하 계산과 일치가 확인된 것이라, 보기 좋자고 바꿀
+    이유가 없다. 메시는 MuJoCo 에서 볼록 껍질로 취급되기도 해서 충돌용으로는
+    오히려 부정확하다.
+    """
+    mesh = _meshes() if use_mesh else {}
     box = me.TORSO_BOX
     hx = (box['x_max'] + 0.25) / 2.0        # 뒤쪽으로 조금 두께를 준다
     cx = box['x_max'] - hx
@@ -72,12 +91,19 @@ def build_mjcf():
            # 몸통·머리는 실제 외형이 아니라 검증기의 금지 구역이다(뒤로 25cm
            # 나 뻗은 큰 상자). 불투명하게 그리면 팔이 통째로 가려지므로
            # 반투명으로 두어 '피해야 할 부피' 로 보이게 한다.
-           '    <material name="body" rgba=".70 .74 .80 .30"/>',
+           '    <material name="body" rgba=".70 .74 .80 %s"/>'
+           % ('.30' if keepout else '0'),
            '    <material name="core" rgba=".55 .58 .64 1" specular=".3"/>',
            '    <material name="rightm" rgba=".85 .28 .25 1" specular=".4"/>',
            '    <material name="leftm"  rgba=".23 .45 .82 1" specular=".4"/>',
            '    <material name="ant"    rgba=".95 .78 .25 1"/>',
-           '  </asset>',
+           '    <material name="cad"    rgba=".78 .80 .84 1" specular=".35" '
+           'shininess=".4"/>',
+           # 메시를 쓰면 충돌용 캡슐은 안 보이게 한다 (둘 다 그리면 겹쳐 보인다)
+           '    <material name="hidden" rgba="0 0 0 0"/>']
+    for name, path in sorted(mesh.items()):
+        out.append('    <mesh name="m_%s" file="%s"/>' % (name, path))
+    out += ['  </asset>',
            '  <worldbody>',
            '    <light pos="0.8 0.6 1.2" dir="-.5 -.4 -1" directional="true"/>',
            '    <light pos="-0.6 -0.8 0.9" dir=".4 .5 -1" diffuse=".3 .3 .3"/>',
@@ -89,28 +115,35 @@ def build_mjcf():
            '          contype="4" conaffinity="3"',
            '          pos="%.4f %.4f %.4f" size="%.4f"/>'
            % (me.HEAD_SPHERE_CENTER + (me.HEAD_SPHERE_RADIUS,)),
-           # 안쪽에 실제 몸통에 가까운 크기의 불투명한 심을 둔다. 로봇이
-           # 어디 있는지 눈으로 잡히게 하는 용도라 충돌에는 넣지 않는다.
-           '    <geom name="core" type="box" material="core" contype="0" '
-           'conaffinity="0" pos="-0.02 0 -0.22" size=".055 .085 .26"/>',
-           '    <geom name="headcore" type="sphere" material="core" contype="0" '
-           'conaffinity="0" pos="0 0 %.3f" size=".075"/>'
-           % (me.HEAD_SPHERE_CENTER[2] + 0.02),
+           # 몸통·머리의 실제 모습. CAD 메시가 있으면 그것을, 없으면 대충의
+           # 상자와 구를. 어느 쪽이든 충돌에는 넣지 않는다(금지 구역이 본다).
+           ('    <geom name="core" type="mesh" mesh="m_world" material="cad" '
+            'contype="0" conaffinity="0"/>' if 'world' in mesh else
+            '    <geom name="core" type="box" material="core" contype="0" '
+            'conaffinity="0" pos="-0.02 0 -0.22" size=".055 .085 .26"/>'),
+           ('' if 'world' in mesh else
+            '    <geom name="headcore" type="sphere" material="core" '
+            'contype="0" conaffinity="0" pos="0 0 %.3f" size=".075"/>'
+            % (me.HEAD_SPHERE_CENTER[2] + 0.02)),
            # 안테나는 사슬에 없다(머리 위 별도 모터). 감정 표현이 잘 보이므로
            # 힌지로 붙여 준다.
            '    <body name="left_antenna" pos="-0.02 0.06 %.3f">'
            % (me.HEAD_SPHERE_CENTER[2] + me.HEAD_SPHERE_RADIUS - 0.01),
            '      <inertial pos="0 0 .05" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
            '      <joint name="head.left_antenna" axis="0 1 0" range="-140 140"/>',
-           '      <geom type="capsule" material="ant" contype="0" conaffinity="0" '
-           'fromto="0 0 0 0 0 .1" size=".008"/>',
+           ('      <geom type="mesh" mesh="m_left_antenna" material="cad" '
+            'contype="0" conaffinity="0"/>' if 'left_antenna' in mesh else
+            '      <geom type="capsule" material="ant" contype="0" '
+            'conaffinity="0" fromto="0 0 0 0 0 .1" size=".008"/>'),
            '    </body>',
            '    <body name="right_antenna" pos="-0.02 -0.06 %.3f">'
            % (me.HEAD_SPHERE_CENTER[2] + me.HEAD_SPHERE_RADIUS - 0.01),
            '      <inertial pos="0 0 .05" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
            '      <joint name="head.right_antenna" axis="0 1 0" range="-140 140"/>',
-           '      <geom type="capsule" material="ant" contype="0" conaffinity="0" '
-           'fromto="0 0 0 0 0 .1" size=".008"/>',
+           ('      <geom type="mesh" mesh="m_right_antenna" material="cad" '
+            'contype="0" conaffinity="0"/>' if 'right_antenna' in mesh else
+            '      <geom type="capsule" material="ant" contype="0" '
+            'conaffinity="0" fromto="0 0 0 0 0 .1" size=".008"/>'),
            '    </body>']
 
     # 충돌 그룹. 같은 팔의 이웃 링크는 팔꿈치에서 늘 겹치므로(캡슐 끝이
@@ -136,6 +169,11 @@ def build_mjcf():
                 out.append('%s<joint name="%s" axis="%d %d %d" range="%g %g"/>'
                            % (pad, jname, axis[0], axis[1], axis[2],
                               lim[0], lim[1]))
+            # CAD 메시는 보이는 용도로만. 충돌은 아래 캡슐이 계속 맡는다.
+            bname = _body_name(jname)
+            if bname in mesh:
+                out.append('%s<geom type="mesh" mesh="m_%s" material="cad" '
+                           'contype="0" conaffinity="0"/>' % (pad, bname))
             # 다음 링크까지 길이가 있으면 그 구간을 캡슐로 그린다
             nxt = chain[i + 1][1] if i + 1 < len(chain) else None
             if nxt and any(abs(v) > 1e-6 for v in nxt):
@@ -145,14 +183,16 @@ def build_mjcf():
                            'material="%s" contype="%d" conaffinity="%d" '
                            'fromto="0 0 0 %.4f %.4f %.4f" size="%.4f"/>'
                            % (pad, side, order[min(seg, len(order) - 1)],
-                              mat, ct, ca, nxt[0], nxt[1], nxt[2], r))
+                              'hidden' if mesh else mat, ct, ca,
+                              nxt[0], nxt[1], nxt[2], r))
                 seg += 1
         # 마지막(손)은 작은 구로
         pad = '    ' + '  ' * depth
         ct, ca = GROUP[side]
         out.append('%s<geom name="%s_tip" type="sphere" material="%s" '
                    'contype="%d" conaffinity="%d" size="%.4f"/>'
-                   % (pad, side, mat, ct, ca, RADII['hand']))
+                   % (pad, side, 'hidden' if mesh else mat, ct, ca,
+                      RADII['hand']))
         while depth > 0:
             depth -= 1
             out.append('    ' + '  ' * depth + '</body>')
@@ -161,9 +201,14 @@ def build_mjcf():
     return '\n'.join(out)
 
 
+_USE_MESH = True
+_KEEPOUT = True
+
+
 def _load():
     import mujoco
-    model = mujoco.MjModel.from_xml_string(build_mjcf())
+    model = mujoco.MjModel.from_xml_string(
+        build_mjcf(use_mesh=_USE_MESH, keepout=_KEEPOUT))
     return mujoco, model
 
 
@@ -198,8 +243,8 @@ def frames_of(moves, fps=FPS):
 # 로봇은 +x 를 바라본다. MuJoCo 카메라 azimuth 0 이 +x 쪽에서 보는 각도라,
 # 사람이 로봇 앞에 서서 보는 그림이 된다. 살짝 틀어 3/4 로 본다.
 def render_video(moves_list, path, labels=None, fps=FPS, header=None,
-                 width=WIDTH, height=HEIGHT, azimuth=45, elevation=-10,
-                 distance=1.7):
+                 width=WIDTH, height=HEIGHT, azimuth=40, elevation=-14,
+                 distance=1.62):
     """동작을 MuJoCo 로 렌더링해 mp4 로. 여러 개를 주면 가로로 붙인다."""
     import imageio.v2 as imageio
     import numpy as np
@@ -221,7 +266,9 @@ def render_video(moves_list, path, labels=None, fps=FPS, header=None,
     cam = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(cam)
     cam.azimuth, cam.elevation, cam.distance = azimuth, elevation, distance
-    cam.lookat[:] = [0.05, 0.0, -0.22]
+    # 로봇은 안테나 끝(z≈+0.35)부터 늘어뜨린 손끝(z≈-0.64)까지 걸친다.
+    # 그 가운데를 봐야 위아래가 잘리지 않는다.
+    cam.lookat[:] = [0.06, 0.0, -0.14]
 
     writer = imageio.get_writer(path, fps=fps, macro_block_size=1)
     try:
@@ -308,10 +355,17 @@ def main():
     ap.add_argument('--contacts', action='store_true',
                     help='영상 대신 접촉 검사만 한다')
     ap.add_argument('--dump-xml', action='store_true', help='MJCF 만 출력')
+    ap.add_argument('--no-mesh', action='store_true',
+                    help='CAD 메시 대신 캡슐 모형으로 그린다 (가볍다)')
+    ap.add_argument('--no-keepout', action='store_true',
+                    help='금지 구역(반투명 상자·구)을 그리지 않는다 - 발표용')
     args = ap.parse_args()
 
+    global _USE_MESH, _KEEPOUT
+    _USE_MESH = not args.no_mesh
+    _KEEPOUT = not args.no_keepout
     if args.dump_xml:
-        print(build_mjcf())
+        print(build_mjcf(use_mesh=_USE_MESH, keepout=_KEEPOUT))
         return
 
     def load(spec):

@@ -44,3 +44,5 @@ dist/
 **/sim_commands.json
 **/sim_lessons.json
 **/sim_gallery/
+# reachy.glb 에서 뽑아 낸 링크별 메시 (29MB, extract_meshes.py 로 재생성)
+**/sim/meshes/
