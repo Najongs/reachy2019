@@ -41,12 +41,11 @@ DONE_CM = 3.0                    # 손끝-표적 거리가 이 안이면 성공
 
 
 def look_at(pose, point):
-    """시선(팬/틸트)을 그 점으로. 실물의 point_head 와 같은 기하."""
-    vx = point[0] - EYE[0]
-    vy = point[1] - EYE[1]
-    vz = point[2] - EYE[2]
-    pose['eye.pan'] = math.degrees(math.atan2(vy, vx))
-    pose['eye.tilt'] = -math.degrees(math.atan2(vz, math.hypot(vx, vy)))
+    """시선을 그 점으로 - 실물 Orbita 기구학 그대로 (롤 포함).
+
+    None 이면 실물 목이 그 방향을 못 본다는 뜻이다.
+    """
+    return sm.set_gaze(pose, point[1], point[2], x=max(point[0], 0.05))
 
 
 def hand_of(pose):
@@ -112,8 +111,15 @@ def servo(target, steps=60, noise_px=0.0, seed=0, record=None,
     # 오차로 쓴다 (잡음도 같이 준다).
     SIZE_GAIN = 220.0        # 픽셀 축과 규모를 맞추는 계수
 
-    def screen_error(p):
-        """(u오차, v오차, 크기오차). 시선은 표적을 따라간다."""
+    def screen_error(p, measured=True):
+        """(u오차, v오차, 크기오차). 시선은 표적을 따라간다.
+
+        measured=False 는 자코비안 프로브용 - 잡음을 넣지 않는다. 유한차분을
+        잡음 낀 측정으로 하면 1도 차이의 몇 픽셀에 2px 잡음이 얹혀 미분이
+        엉망이 된다(실제로 성공률이 절반으로 떨어졌다). 실물도 마찬가지다:
+        검출은 흔들려도 자기 팔의 기구학(FK)은 정확히 아니까, 화면 자코비안은
+        모델에서 깨끗하게 뽑고 잡음은 오차 측정에만 있다.
+        """
         look_at(p, target)
         sm._set_pose(data, idx, p)
         mujoco.mj_forward(model, data)
@@ -126,7 +132,7 @@ def servo(target, steps=60, noise_px=0.0, seed=0, record=None,
         dt_ = me._dist(tuple(cam), target)
         dh_ = me._dist(tuple(cam), hand_of(p))
         size = SIZE_GAIN * math.log(dh_ / max(dt_, 1e-6))
-        n = rng.normal(0, noise_px, 5) if noise_px else (0,) * 5
+        n = rng.normal(0, noise_px, 5) if (noise_px and measured) else (0,) * 5
         return (tp[0] + n[0] - hp[0] - n[2],
                 tp[1] + n[1] - hp[1] - n[3],
                 size + n[4])
@@ -158,15 +164,18 @@ def servo(target, steps=60, noise_px=0.0, seed=0, record=None,
 
         # 화면 자코비안: 각 관절을 조금 움직이면 화면 오차가 얼마나 변하나.
         # 실물과 같은 FK 로 수치 미분 - 캘리브레이션 없이도 방향은 맞다.
+        base = screen_error(pose, measured=False)
+        if base is None:
+            break
         J = []
         for j in SERVO_JOINTS:
             trial = dict(pose)
             trial[j] = pose[j] + 1.0
-            e2 = screen_error(trial)
+            e2 = screen_error(trial, measured=False)
             if e2 is None:
                 J.append((0.0, 0.0, 0.0))
             else:
-                J.append((e2[0] - err[0], e2[1] - err[1], e2[2] - err[2]))
+                J.append((e2[0] - base[0], e2[1] - base[1], e2[2] - base[2]))
         J = np.array(J).T                       # 3 x n
         # 최소제곱으로 관절 변화량. 감쇠를 넣어 특이점에서 날뛰지 않게.
         dq, *_ = np.linalg.lstsq(J.T @ J + 4.0 * np.eye(len(SERVO_JOINTS)),

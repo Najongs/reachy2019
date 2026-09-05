@@ -50,6 +50,74 @@ def _body_name(joint):
     return joint.replace('.', '_')
 
 
+# --- 실물 목(Orbita) 기구학 -------------------------------------------------
+#
+# 목은 팔과 달리 관절각이 아니라 시선 (y, z at x=0.5) 으로 제어되는 3디스크
+# 병렬 기구다. 시뮬 카메라는 팬/틸트 두 힌지로 시선을 맞추는데, 실제 Orbita
+# 방향과 비교해 보면 **보는 방향은 정확히 일치(0.000도)** 하고 차이는 시선축
+# 둘레의 롤(화면 기울어짐)뿐이다 - 대각 시선에서 최대 12.4도. 그래서 롤 힌지
+# 하나를 더 두고, SDK 와 같은 orbita 패키지로 실제 방향을 계산해 그 잔차를
+# 넣는다. 패키지가 없으면 롤 0 으로 조용히 내려간다 (방향은 여전히 정확).
+_NECK = None
+
+
+def _neck_model():
+    global _NECK
+    if _NECK is not None:
+        return _NECK
+    try:
+        sys.path.insert(0, '/home/kiro-ai/miniconda/lib/python3.14/site-packages')
+        import numpy as np
+        from orbita import Actuator
+
+        def rot(axis, deg):
+            a = math.radians(deg)
+            c, sn = math.cos(a), math.sin(a)
+            return {'y': np.array([[c, 0, sn], [0, 1, 0], [-sn, 0, c]]),
+                    'z': np.array([[c, -sn, 0], [sn, c, 0], [0, 0, 1]])}[axis]
+
+        # reachy/parts/head.py 의 orbita_config 그대로.
+        _NECK = Actuator(Pc_z=[0, 0, 23], Cp_z=[0, 0, 0], R=35.9,
+                         R0=rot('z', 60) @ rot('y', 10))
+    except Exception:
+        _NECK = False
+    return _NECK
+
+
+def set_gaze(pose, y, z, x=0.5):
+    """시선을 실물 목과 같은 방향·롤로. 디스크 각도(도 3개) 또는 None.
+
+    None 이면 실물 목이 그 방향을 거부한다는 뜻이다 - 시뮬도 똑같이 안 본다.
+    """
+    import numpy as np
+
+    pan = math.degrees(math.atan2(y, x))
+    tilt = -math.degrees(math.atan2(z, math.hypot(x, y)))
+    pose['eye.pan'], pose['eye.tilt'], pose['eye.roll'] = pan, tilt, 0.0
+
+    model = _neck_model()
+    if not model:
+        return (0.0, 0.0, 0.0)
+    try:
+        q = model.find_quaternion_transform([1, 0, 0], [x, y, z])
+        disks = model.get_angles_from_quaternion(q.w, q.x, q.y, q.z)
+    except ValueError:
+        return None                     # 실물 목이 못 보는 방향
+    from pyquaternion import Quaternion
+    Ro = Quaternion(q.w, q.x, q.y, q.z).rotation_matrix
+
+    def _rot(axis, deg):
+        a = math.radians(deg)
+        c, sn = math.cos(a), math.sin(a)
+        return {'y': np.array([[c, 0, sn], [0, 1, 0], [-sn, 0, c]]),
+                'z': np.array([[c, -sn, 0], [sn, c, 0], [0, 0, 1]])}[axis]
+
+    Rp = _rot('z', pan) @ _rot('y', tilt)
+    Rd = Rp.T @ Ro                      # 남는 것은 시선축(x) 둘레 롤뿐
+    pose['eye.roll'] = math.degrees(math.atan2(Rd[2, 1], Rd[1, 1]))
+    return tuple(float(v) for v in disks)
+
+
 MESH_DIR = os.path.join(HERE, 'meshes')
 
 
@@ -134,8 +202,17 @@ def build_mjcf(use_mesh=True, keepout=True):
            '      <body name="eye_tilt" pos="0.06 0 0.02">',
            '        <inertial pos="0 0 0" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
            '        <joint name="eye.tilt" axis="0 1 0" range="-60 60"/>',
-           # zaxis 가 카메라의 '뒤' 방향이다. -x 를 zaxis 로 주면 +x(정면)를 본다.
-           '        <camera name="robot_eye" pos="0 0 0" zaxis="-1 0 0" fovy="58"/>',
+           # 실물 Orbita 는 시선축 둘레로도 살짝 돈다(대각 시선에서 최대 12도).
+           # set_gaze 가 orbita 기구학으로 그 잔차를 채운다.
+           '        <body name="eye_roll" pos="0 0 0">',
+           '          <inertial pos="0 0 0" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
+           '          <joint name="eye.roll" axis="1 0 0" range="-45 45"/>',
+           # zaxis 만 주면 화면의 '위쪽' 을 MuJoCo 가 임의로 잡는다 - 실측해
+           # 보니 화면이 90도 돌아가 있었다. xyaxes 로 완전히 지정한다:
+           # 보는 방향 +x (즉 카메라 -z = +x), 화면 위 = +z, 화면 오른쪽 = -y.
+           '          <camera name="robot_eye" pos="0 0 0" '
+           'xyaxes="0 -1 0 0 0 1" fovy="58"/>',
+           '        </body>',
            '      </body>',
            '    </body>',
            # 안테나는 사슬에 없다(머리 위 별도 모터). 감정 표현이 잘 보이므로
@@ -237,12 +314,18 @@ def _set_pose(data, idx, pose):
 
 
 def _qpos_index(mujoco, model):
-    """관절 이름 -> qpos 위치."""
+    """관절 이름 -> qpos 위치. 모델의 **모든** 관절.
+
+    처음에는 팔 관절 목록(sim_eval.JOINTS)만 돌았는데, 그 목록에 없는
+    eye.pan/tilt/roll 이 조용히 빠졌다 - set_gaze 가 값을 넣어도 qpos 에
+    닿지 않아 카메라가 계속 정면만 봤다. 시선을 표적으로 돌렸다고 믿었지만
+    실제로는 한 번도 돌지 않았던 것이다.
+    """
     out = {}
-    for j in sim_eval.JOINTS:
-        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, j)
-        if jid >= 0:
-            out[j] = model.jnt_qposadr[jid]
+    for jid in range(model.njnt):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jid)
+        if name:
+            out[name] = model.jnt_qposadr[jid]
     return out
 
 
