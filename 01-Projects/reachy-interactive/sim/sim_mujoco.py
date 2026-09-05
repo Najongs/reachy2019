@@ -129,7 +129,7 @@ def _meshes():
             for f in os.listdir(MESH_DIR) if f.endswith('.obj')}
 
 
-def build_mjcf(use_mesh=True, keepout=True):
+def build_mjcf(use_mesh=True, keepout=True, scene=False):
     """motion_exec.CHAINS 를 그대로 MJCF 로. 모델과 검증기가 갈라지지 않게.
 
     CAD 메시(sim/extract_meshes.py 로 reachy.glb 에서 뽑은 것)가 있으면 그것을
@@ -139,6 +139,21 @@ def build_mjcf(use_mesh=True, keepout=True):
     오히려 부정확하다.
     """
     mesh = _meshes() if use_mesh else {}
+
+    # 실측 기반 장면 (motion_prompt.txt 와 같은 값): 테이블 면 z=-0.27,
+    # 물건은 몸 앞 x 0.25~0.35, 왼쪽 보관함(쟁반)은 (0.30, +0.14).
+    # 전부 충돌 없음(contype 0) - 팔 충돌은 검증기와 캡슐이 계속 맡고,
+    # 컵은 집었을 때 코드가 손끝을 따라 옮긴다.
+    scene_xml = []
+    if scene:
+        scene_xml = [
+            '    <geom name="table" type="box" material="wood" contype="0" '
+            'conaffinity="0" pos="0.37 0 -0.285" size="0.19 0.35 0.015"/>',
+            '    <geom name="cup" type="cylinder" material="cup" contype="0" '
+            'conaffinity="0" pos="0.31 -0.14 -0.225" size="0.03 0.045"/>',
+            '    <geom name="tray" type="box" material="tray" contype="0" '
+            'conaffinity="0" pos="0.30 0.14 -0.265" size="0.06 0.05 0.005"/>',
+        ]
     box = me.TORSO_BOX
     hx = (box['x_max'] + 0.25) / 2.0        # 뒤쪽으로 조금 두께를 준다
     cx = box['x_max'] - hx
@@ -168,13 +183,17 @@ def build_mjcf(use_mesh=True, keepout=True):
            '    <material name="cad"    rgba=".78 .80 .84 1" specular=".35" '
            'shininess=".4"/>',
            # 메시를 쓰면 충돌용 캡슐은 안 보이게 한다 (둘 다 그리면 겹쳐 보인다)
-           '    <material name="hidden" rgba="0 0 0 0"/>']
+           '    <material name="hidden" rgba="0 0 0 0"/>',
+           '    <material name="wood" rgba=".55 .42 .28 1"/>',
+           '    <material name="cup"  rgba=".85 .35 .20 1" specular=".4"/>',
+           '    <material name="tray" rgba=".25 .55 .35 1"/>']
     for name, path in sorted(mesh.items()):
         out.append('    <mesh name="m_%s" file="%s"/>' % (name, path))
     out += ['  </asset>',
            '  <worldbody>',
            '    <light pos="0.8 0.6 1.2" dir="-.5 -.4 -1" directional="true"/>',
-           '    <light pos="-0.6 -0.8 0.9" dir=".4 .5 -1" diffuse=".3 .3 .3"/>',
+           '    <light pos="-0.6 -0.8 0.9" dir=".4 .5 -1" diffuse=".3 .3 .3"/>'] \
+        + scene_xml + [
            '    <geom name="torso_keepout" type="box" material="body"',
            '          contype="4" conaffinity="3"',
            '          pos="%.4f 0 %.4f" size="%.4f %.4f %.4f"/>'
