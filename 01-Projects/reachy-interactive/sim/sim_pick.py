@@ -54,6 +54,7 @@ class PickWorld(object):
         self.width, self.height = width, height
         self.renderer = mujoco.Renderer(self.model, height=height, width=width)
         self.frames = []
+        self.clearances = []        # 프레임마다 (clearance cm, 부위쌍)
         self.held = False
         self._grip_offset = None
 
@@ -108,24 +109,48 @@ class PickWorld(object):
                 return True
         return False
 
-    def penetrating(self):
-        """손이 컵/테이블 안으로 파고들었나 - 옆에서 뚫고 들어가면 True.
+    def _arm_gids(self):
+        if getattr(self, '_agids', None) is None:
+            mj = self.mujoco
+            self._agids = []
+            for i in range(self.model.ngeom):
+                n = mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_GEOM, i)
+                if n and n.startswith('right_arm'):
+                    self._agids.append((i, n))
+        return self._agids
 
-        서보가 화면 오차만 보면 컵을 '투과' 해 곧장 중심으로 갈 수 있다.
-        실물에서는 그러면 컵을 쳐서 넘어뜨린다. 손끝-컵중심 수평거리가 컵
-        반지름보다 작은데 손이 컵 높이 안에 있으면(위에서 잡으러 내려온 게
-        아니라 옆구리로 들어온 것) 투과로 본다.
+    def clearance(self, exclude_held=True):
+        """팔의 모든 지오메트리와 장면(컵·테이블) 사이 최소 표면거리(cm).
+
+        손끝 한 점이 아니라 팔 전체를 본다 - 팔뚝이나 손 옆면이 컵을 스치는
+        것도 잡아야 하기 때문이다(그게 못 잡던 부분이다). MuJoCo 의 정확한
+        지오메트리간 거리(mj_geomDistance)를 쓴다. 음수면 파고든 것.
+
+        컵을 잡고 있으면(exclude_held) 손과 컵의 접촉은 정상이므로 뺀다.
         """
-        hx, hy, hz = self.hand()
-        cx, cy, cz = self.cup
-        horiz = math.hypot(hx - cx, hy - cy)
-        cup_r, cup_top = 0.03, cz + 0.045
-        # 손이 컵 옆면 안(수평 반지름 안 + 컵 몸통 높이)에 들어와 있으면 투과.
-        if horiz < cup_r + 0.02 and cz - 0.045 < hz < cup_top - 0.01:
-            return 'cup'
-        if hz < TABLE_TOP + 0.01 and 0.18 < hx < 0.56 and abs(hy) < 0.35:
-            return 'table'
-        return None
+        mj = self.mujoco
+        cup = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, 'cup')
+        table = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, 'table')
+        worst = (9.0, None)
+        for gid, name in self._arm_gids():
+            for oid, oname in ((cup, 'cup'), (table, 'table')):
+                if oid < 0:
+                    continue
+                if self.held and exclude_held and oname == 'cup':
+                    continue
+                d = mj.mj_geomDistance(self.model, self.data, gid, oid, 1.0, None)
+                if d < worst[0]:
+                    worst = (d * 100, '%s~%s' % (name.replace('right_arm_', ''),
+                                                 oname))
+        return worst
+
+    def penetrating(self, margin_cm=0.0):
+        """팔 어느 부위든 컵/테이블을 파고들었으면 그 쌍 이름, 아니면 None.
+
+        margin_cm 을 주면 '이만큼 가까워도 위험' 으로 본다.
+        """
+        d, pair = self.clearance()
+        return pair if d < margin_cm else None
 
     def grip(self):
         """집기 판정. 실물에서는 hand.close() 의 힘센서 판정이 이 자리다."""
@@ -149,6 +174,7 @@ class PickWorld(object):
         import numpy as np
 
         self.sync(look=look)
+        self.clearances.append(self.clearance())    # 이 프레임의 팔<->장면 여유
         cam = self.renderer
         cam.update_scene(self.data, camera='robot_eye')
         eye = cam.render().copy()
@@ -160,6 +186,12 @@ class PickWorld(object):
                                          self.width, self.height), (70, 200, 90))
         cam.update_scene(self.data, camera=sv._third_person(self.mujoco))
         world = cam.render().copy()
+        # 이 프레임에서 팔이 장면을 파고들면 테두리를 붉게 - 프레임을 넘겨
+        # 보다가 바로 눈에 띄게.
+        if self.clearances and self.clearances[-1][0] < 0:
+            for img in (eye, world):
+                img[:6, :] = [200, 40, 40]; img[-6:, :] = [200, 40, 40]
+                img[:, :6] = [200, 40, 40]; img[:, -6:] = [200, 40, 40]
         frame = np.concatenate([eye, world], axis=1)
         if note:
             try:
@@ -174,11 +206,13 @@ class PickWorld(object):
     # -- 서보 한 구간 -------------------------------------------------------
 
     def servo_to(self, target, label, steps=40, done_cm=3.0, noise_px=2.0,
-                 seed=0, stop_on_hit=False):
+                 seed=0, stop_gap=None):
         """화면 오차로 손을 target 까지. sim_servo 와 같은 방식.
 
-        stop_on_hit 이면 컵/테이블을 파고드는 순간 멈춘다 - 위에서 하강할 때
-        컵에 닿으면 거기서 집으면 되기 때문이다.
+        stop_gap(cm) 을 주면 팔이 컵/테이블에 그만큼 가까워지는 순간 멈춘다 -
+        위에서 하강할 때 손이 컵을 감싸는 높이가 여기다. 그 이상 내려가면
+        파고든다. clearance() 로 팔 전체를 보므로 손끝뿐 아니라 손 옆면·
+        팔뚝이 스치는 것도 잡는다.
         """
         import numpy as np
 
@@ -220,8 +254,10 @@ class PickWorld(object):
             self.snap('%s  %.1fcm' % (label, d), look=target)
             if d <= done_cm:
                 return True
-            if stop_on_hit and self.penetrating():
-                return True                     # 컵에 닿았다 - 여기서 집는다
+            if stop_gap is not None:
+                gap, _ = self.clearance()
+                if gap <= stop_gap:
+                    return True                 # 이미 감쌀 높이 - 여기서 집는다
             err = err_of({})
             base = err_of({}, measured=False)
             if err is None or base is None:
@@ -239,12 +275,24 @@ class PickWorld(object):
             for j, dv in zip(sv.SERVO_JOINTS, dq):
                 lo, hi = me.ALL_LIMITS[j]
                 trial[j] = min(hi, max(lo, trial[j] + float(dv)))
-            if sv.in_bounds(trial):
-                self.pose = trial
-            else:
+            applied_stop = False
+            if not sv.in_bounds(trial):
                 for j, dv in zip(sv.SERVO_JOINTS, dq):
                     lo, hi = me.ALL_LIMITS[j]
-                    self.pose[j] = min(hi, max(lo, self.pose[j] + float(dv) * 0.4))
+                    trial[j] = min(hi, max(lo, self.pose[j] + float(dv) * 0.4))
+            # 이 스텝을 적용하면 컵/테이블을 파고드나? 미리 본다.
+            if stop_gap is not None:
+                saved = dict(self.pose)
+                self.pose = trial
+                self.sync()
+                gap, _ = self.clearance()
+                if gap < stop_gap:
+                    # 파고든다 - 스텝을 취소하고 여기서 멈춘다(닿기 직전).
+                    self.pose = saved
+                    self.sync()
+                    return True
+            else:
+                self.pose = trial
         return me._dist(self.hand(), target) * 100 <= done_cm
 
     def hold(self, label, n=6):
@@ -259,8 +307,9 @@ def run(cup_xy=(0.31, -0.14), noise_px=2.0, record=None):
     cup = w.cup
     # 접근은 반드시 컵 '위' 를 경유한다. 컵 옆으로 곧장 가면 컵을 쳐서
     # 넘어뜨린다(투과). 위에서 수직으로 내려와 집는다.
-    above_cup = (cup[0], cup[1], cup[2] + 0.13)
-    grasp_at = (cup[0], cup[1], cup[2] + 0.04)
+    GRASP_GAP = 0.3    # 팔<->컵 표면이 이만큼 남으면 잡는다 (cm)
+    above_cup = (cup[0], cup[1], cup[2] + 0.15)
+    grasp_at = (cup[0], cup[1], cup[2] - 0.04)
     above_tray = (TRAY[0], TRAY[1] - 0.02, TRAY[2] + CUP_H / 2 + 0.12)
     place_at = (TRAY[0], TRAY[1] - 0.02, TRAY[2] + CUP_H / 2 + 0.03)
 
@@ -270,13 +319,10 @@ def run(cup_xy=(0.31, -0.14), noise_px=2.0, record=None):
 
     ok1 = w.servo_to(above_cup, 'approach', done_cm=3.0, noise_px=noise_px, seed=1)
     log.append(('컵 상공(위)', ok1, me._dist(w.hand(), above_cup) * 100))
-    # 하강 중 컵/테이블을 파고들면 즉시 멈춘다.
-    ok2 = w.servo_to(grasp_at, 'descend', done_cm=2.5, noise_px=noise_px, seed=2,
-                     stop_on_hit=True)
-    log.append(('수직 하강', ok2, me._dist(w.hand(), grasp_at) * 100))
-    hit = w.penetrating()
-    if hit:
-        log.append(('투과 감지: %s 를 침범 - 중단' % hit, False, 0.0))
+    ok2 = w.servo_to(grasp_at, 'descend', done_cm=1.0, noise_px=noise_px, seed=2,
+                     stop_gap=GRASP_GAP)
+    gap, pair = w.clearance()
+    log.append(('수직 하강 (팔<->컵 %.1fcm 남기고 정지)' % gap, gap >= -0.5, 0.0))
 
     d = w.grip()
     log.append(('집기 (손끝-컵 %.1fcm, 기준 %.0fcm)' % (d, GRIP_CM),
@@ -295,6 +341,16 @@ def run(cup_xy=(0.31, -0.14), noise_px=2.0, record=None):
         log.append(('놓기 -> %s' % ('쟁반 위' if placed else '쟁반 밖'),
                     placed, 0.0))
         w.hold('released' if placed else 'missed tray')
+
+    # 프레임별 최소 clearance - '어느 프레임에서 얼마나 파고들었나' 를 자동
+    # 보고한다. 이게 원래 부탁받은 것: 결과만 보지 말고 중간 프레임을 훑어라.
+    pierce = [(i, c, p) for i, (c, p) in enumerate(w.clearances) if c < 0]
+    if pierce:
+        worst = min(pierce, key=lambda x: x[1])
+        log.append(('투과: %d/%d 프레임에서 팔이 장면을 파고듦 (최악 프레임 %d: '
+                    '%s %.1fcm)' % (len(pierce), len(w.clearances),
+                                    worst[0], worst[2], worst[1]),
+                    False, 0.0))
 
     if record and w.frames:
         import imageio.v2 as imageio

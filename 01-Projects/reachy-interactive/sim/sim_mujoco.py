@@ -154,7 +154,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False):
             '    <geom name="table" type="box" material="wood" contype="8" '
             'conaffinity="0" pos="0.37 0 -0.285" size="0.19 0.35 0.015"/>',
             '    <geom name="cup" type="cylinder" material="cup" contype="8" '
-            'conaffinity="0" pos="0.31 -0.14 -0.225" size="0.03 0.045"/>',
+            'conaffinity="0" pos="0.31 -0.14 -0.225" size="0.015 0.05"/>',
             '    <geom name="tray" type="box" material="tray" contype="0" '
             'conaffinity="0" pos="0.30 0.14 -0.265" size="0.06 0.05 0.005"/>',
         ]
