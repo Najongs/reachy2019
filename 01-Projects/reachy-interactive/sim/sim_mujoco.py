@@ -129,7 +129,7 @@ def _meshes():
             for f in os.listdir(MESH_DIR) if f.endswith('.obj')}
 
 
-def build_mjcf(use_mesh=True, keepout=True, scene=False):
+def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None):
     """motion_exec.CHAINS 를 그대로 MJCF 로. 모델과 검증기가 갈라지지 않게.
 
     CAD 메시(sim/extract_meshes.py 로 reachy.glb 에서 뽑은 것)가 있으면 그것을
@@ -137,20 +137,31 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False):
     쓰고 sim_safety 의 기하 계산과 일치가 확인된 것이라, 보기 좋자고 바꿀
     이유가 없다. 메시는 MuJoCo 에서 볼록 껍질로 취급되기도 해서 충돌용으로는
     오히려 부정확하다.
+
+    objects 를 주면(sim_world 가 만든 임의 장면) 그것을 그린다. 각 원소는
+    {name, type, pos, size, rgba, collide} 다. collide 인 물체는 충돌군 8 로
+    둬서 clearance() 가 팔과의 거리를 잰다(팔 자동충돌은 캡슐이 맡음).
+    objects 가 없고 scene=True 면 예전 고정 장면(컵·테이블·쟁반).
     """
     mesh = _meshes() if use_mesh else {}
 
     # 실측 기반 장면 (motion_prompt.txt 와 같은 값): 테이블 면 z=-0.27,
     # 물건은 몸 앞 x 0.25~0.35, 왼쪽 보관함(쟁반)은 (0.30, +0.14).
-    # 전부 충돌 없음(contype 0) - 팔 충돌은 검증기와 캡슐이 계속 맡고,
-    # 컵은 집었을 때 코드가 손끝을 따라 옮긴다.
-    scene_xml = []
-    if scene:
+    scene_xml, obj_mats = [], []
+    if objects:
+        for o in objects:
+            mat = 'obj_%s' % o['name']
+            obj_mats.append('    <material name="%s" rgba="%s" specular=".3"/>'
+                            % (mat, ' '.join('%.3f' % c for c in o['rgba'])))
+            size = ' '.join('%.4f' % s for s in o['size'])
+            pos = ' '.join('%.4f' % p for p in o['pos'])
+            ct = 8 if o.get('collide', True) else 0
+            scene_xml.append(
+                '    <geom name="%s" type="%s" material="%s" contype="%d" '
+                'conaffinity="0" pos="%s" size="%s"/>'
+                % (o['name'], o['type'], mat, ct, pos, size))
+    elif scene:
         scene_xml = [
-            # 컵과 테이블은 충돌군 8 로 둔다. 오른팔(conaffinity 6=군2,3)은
-            # 이걸 안 보지만, sim_pick 이 손 지오메트리와의 거리로 '옆에서
-            # 뚫고 들어갔나' 를 직접 검사한다(팔 자동충돌은 캡슐이 맡음).
-            # 쟁반은 얇아 접근을 방해하지 않으므로 표시용(contype 0)으로 둔다.
             '    <geom name="table" type="box" material="wood" contype="8" '
             'conaffinity="0" pos="0.37 0 -0.285" size="0.19 0.35 0.015"/>',
             '    <geom name="cup" type="cylinder" material="cup" contype="8" '
@@ -190,7 +201,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False):
            '    <material name="hidden" rgba="0 0 0 0"/>',
            '    <material name="wood" rgba=".55 .42 .28 1"/>',
            '    <material name="cup"  rgba=".85 .35 .20 1" specular=".4"/>',
-           '    <material name="tray" rgba=".25 .55 .35 1"/>']
+           '    <material name="tray" rgba=".25 .55 .35 1"/>'] + obj_mats
     for name, path in sorted(mesh.items()):
         out.append('    <mesh name="m_%s" file="%s"/>' % (name, path))
     out += ['  </asset>',

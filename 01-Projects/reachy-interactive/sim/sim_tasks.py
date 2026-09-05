@@ -1,0 +1,193 @@
+"""태스크 예시들을 만들어 둔다 - MuJoCo 장면 + 지시문 + 성공 판정.
+
+파이프라인의 목표는 이 태스크들을 문제없이 수행하는 것이다. 한 태스크는:
+  scene         테이블 위 물체 목록 (sim_world.make_object)
+  instruction   로봇에게 주는 한국어 지시 (opus 가 읽는다)
+  kind          유형 (look/point/reach/pick) - 성공 판정과 계획에 쓴다
+  target        관련 물체 이름
+  success(world) 실행 뒤 성공했는지 (참값으로 판정)
+
+유형:
+  look    지정 물체를 시선 중앙에 담기        (목/시선만)
+  point   지정 물체 쪽으로 팔을 뻗어 가리키기  (팔)
+  reach   손끝을 물체 근처로 가져가기          (팔)
+  pick    물체를 집어 쟁반에 놓기              (팔, 어려움)
+
+성공 판정은 전부 참값 기반이다 - 실물이 아니라 '시뮬에서 태스크가 됐나' 를
+객관적으로 재기 위한 것. opus 는 이 참값을 보지 못하고 카메라만 본다.
+
+사용:
+    python3 sim/sim_tasks.py --list          # 예시 태스크를 만들어 보여준다
+    python3 sim/sim_tasks.py --out tasks.json
+"""
+
+import json
+import math
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
+
+import sim_world as world                          # noqa: E402
+import motion_exec as me                           # noqa: E402
+
+# 오른손 작업 영역(책상 오른쪽). 물체는 이 안에 놓는다.
+X_RANGE = (0.26, 0.35)
+Y_RANGE = (-0.24, 0.06)
+TRAY_XY = (0.30, 0.15)          # 왼쪽 보관함 자리
+
+
+def _rng(seed):
+    import random
+    return random.Random(seed)
+
+
+def _place_objects(rng, kinds, min_gap=0.09):
+    """물체들을 겹치지 않게 작업 영역에 흩는다."""
+    placed = []
+    for i, kind in enumerate(kinds):
+        for _try in range(200):
+            xy = (rng.uniform(*X_RANGE), rng.uniform(*Y_RANGE))
+            if all(math.hypot(xy[0] - p[1][0], xy[1] - p[1][1]) > min_gap
+                   for p in placed):
+                placed.append((kind, xy))
+                break
+        else:
+            placed.append((kind, xy))
+    return [world.make_object('%s%d' % (k, n), k, xy)
+            for n, (k, xy) in enumerate(placed)]
+
+
+# --- 성공 판정들 (참값) -----------------------------------------------------
+
+def _succ_look(name):
+    def f(w):
+        # 물체가 시선 화면의 가운데 30% 안에 오면 성공.
+        px = w.pixel_of(w.object_pos(name))
+        if px is None:
+            return False
+        return (abs(px[0] - w.width / 2) < w.width * 0.15
+                and abs(px[1] - w.height / 2) < w.height * 0.15)
+    return f
+
+
+def _succ_point(name):
+    def f(w):
+        # 손끝에서 어깨로의 방향이 물체를 향하고, 팔이 뻗어 있으면 성공.
+        hand = w.hand()
+        obj = w.object_pos(name)
+        shoulder = (0.0, -0.19, 0.0)
+        v_arm = [hand[i] - shoulder[i] for i in range(3)]
+        v_obj = [obj[i] - shoulder[i] for i in range(3)]
+        na = math.sqrt(sum(c * c for c in v_arm)) or 1
+        no = math.sqrt(sum(c * c for c in v_obj)) or 1
+        cos = sum(v_arm[i] * v_obj[i] for i in range(3)) / (na * no)
+        reach = math.sqrt(sum((hand[i] - shoulder[i]) ** 2 for i in range(3)))
+        clean = w.clearance(ignore=('table',))[0] > -0.5
+        return cos > 0.94 and reach > 0.35 and clean
+    return f
+
+
+def _succ_reach(name, within=0.14):
+    def f(w):
+        # 손이 물체 근처에 오되, 물체를 뚫지 않아야 진짜 성공.
+        near = me._dist(w.hand(), w.object_pos(name)) < within
+        clean = w.clearance(ignore=('table',))[0] > -0.5
+        return near and clean
+    return f
+
+
+def _succ_pick(name, tray):
+    def f(w):
+        op = w.object_pos(name)
+        tp = w.object_pos(tray)
+        return (abs(op[0] - tp[0]) < 0.08 and abs(op[1] - tp[1]) < 0.07
+                and op[2] > world.TABLE_TOP + 0.02)
+    return f
+
+
+SUCCESS = {'look': _succ_look, 'point': _succ_point,
+           'reach': _succ_reach, 'pick': _succ_pick}
+
+
+# --- 태스크 생성 ------------------------------------------------------------
+
+KO = {'cup': '컵', 'block': '블록', 'ball': '공', 'can': '캔'}
+
+
+def generate(n=8, seed=0):
+    """다양한 태스크 n 개. 각 태스크는 직렬화 가능한 dict."""
+    rng = _rng(seed)
+    kinds_pool = ['cup', 'block', 'ball', 'can']
+    tasks = []
+    templates = ['look', 'point', 'reach', 'pick']
+    for i in range(n):
+        kind = templates[i % len(templates)]
+        # 장면에 물체 1~3개. 하나가 대상.
+        n_obj = rng.randint(1, 3)
+        chosen = [rng.choice(kinds_pool) for _ in range(n_obj)]
+        scene = _place_objects(rng, chosen)
+        if kind == 'pick':
+            scene.append(world.make_object('tray0', 'tray', TRAY_XY))
+        target = scene[0]['name']
+        tko = KO.get(scene[0]['kind'], '물건')
+        instr = {
+            'look': '책상 위 %s 을(를) 똑바로 바라봐.' % tko,
+            'point': '%s 이(가) 있는 쪽을 손으로 가리켜 봐.' % tko,
+            'reach': '%s 에 손을 가까이 가져가 봐.' % tko,
+            'pick': '%s 을(를) 집어서 왼쪽 쟁반에 놓아 줘.' % tko,
+        }[kind]
+        tasks.append({
+            'id': 'task%02d_%s' % (i, kind),
+            'kind': kind,
+            'instruction': instr,
+            'target': target,
+            'tray': 'tray0' if kind == 'pick' else None,
+            'scene': [{'name': o['name'], 'kind': o['kind'],
+                       'xy': [round(o['pos'][0], 3), round(o['pos'][1], 3)]}
+                      for o in scene],
+        })
+    return tasks
+
+
+def build_world(task, **kw):
+    """태스크의 scene 을 실제 World 로."""
+    objs = [world.make_object(o['name'], o['kind'], tuple(o['xy']))
+            for o in task['scene']]
+    return world.World(objs, **kw)
+
+
+def success_fn(task):
+    kind = task['kind']
+    if kind == 'pick':
+        return SUCCESS['pick'](task['target'], task['tray'])
+    return SUCCESS[kind](task['target'])
+
+
+def main():
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('-n', type=int, default=8)
+    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--list', action='store_true')
+    ap.add_argument('--out')
+    args = ap.parse_args()
+
+    tasks = generate(args.n, args.seed)
+    if args.list or not args.out:
+        for t in tasks:
+            objs = ', '.join('%s@(%.2f,%.2f)' % (o['name'], *o['xy'])
+                             for o in t['scene'])
+            print('  [%s] %s' % (t['kind'], t['instruction']))
+            print('        대상 %s | 장면: %s' % (t['target'], objs))
+    if args.out:
+        with open(args.out, 'w', encoding='utf-8') as fh:
+            json.dump({'tasks': tasks}, fh, ensure_ascii=False, indent=2)
+        print('\n저장: %s (%d개)' % (args.out, len(tasks)))
+
+
+if __name__ == '__main__':
+    main()
