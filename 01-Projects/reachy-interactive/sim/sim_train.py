@@ -404,7 +404,7 @@ def main():
                     help='opus 대화 세션. 같은 세션이면 앞 과제의 지적을 기억한다')
     ap.add_argument('--keep-images', help='시도마다의 궤적 그림도 남긴다')
     ap.add_argument('--video', action='store_true',
-                    help='과제마다 초안/최종 비교 영상도 만든다 (편당 1~2분, 느림)')
+                    help='과제마다 초안/최종 비교 영상도 만든다 (MuJoCo, 편당 5~10초)')
     ap.add_argument('--gallery', metavar='DIR',
                     default=os.path.join(CONFIG, '..', 'sim_gallery'),
                     help='과제별 before/after 와 진행 그래프를 남길 폴더. '
@@ -489,7 +489,7 @@ def main():
             # 영상은 느리다(비교 한 편에 1~2분). 그래서 기본은 꺼 두고,
             # 정말 눈으로 봐야 할 때만 --video 로 켠다.
             try:
-                import sim_video
+                import sim_mujoco as sim_video      # MuJoCo 판이 15배 빠르다
                 sim_video.render_video(
                     [r['first_moves'], r['moves']],
                     os.path.join(gallery, '%02d-%s.mp4' % (i, _slug(task['say']))),
