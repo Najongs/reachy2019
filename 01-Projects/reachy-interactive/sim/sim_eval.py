@@ -144,10 +144,16 @@ def simulate(moves, seed=None, hz=SAMPLE_HZ, check_collision=True):
     out['segments'] = segments
     # validate 는 그리퍼 단계를 ('grasp', 'close'|'open') 으로 내보낸다 -
     # duration 자리에 숫자가 아니라 명령이 온다. 각도 키프레임이 아니므로
-    # 궤적에서는 빼고, 실제로 걸리는 시간만 얹는다.
+    # 궤적에서는 뺀다.
+    #
+    # **쥐고 펴는 시간은 stretched_s 에 넣지 않는다.** 힘센서가 물건을 잡을
+    # 때까지 걸리는 고유 시간이지 속도 상한에 걸려 늘어난 것이 아니다.
+    # 넣었더니 그리퍼를 쓰는 동작마다 자동으로 1.2초씩(단계 수만큼) 감점되고
+    # "duration 을 처음부터 늘려 잡으라" 는 틀린 조언까지 나갔다 - 물건 조작
+    # 동작이 62~94점에 몰려 있던 이유다.
     out['grasps'] = [a for kind, a in segments if kind == 'grasp']
+    out['grasp_s'] = round(GRASP_SECONDS * len(out['grasps']), 2)
     got = sum(d for kind, d in segments if kind != 'grasp')
-    got += GRASP_SECONDS * len(out['grasps'])
     out['stretched_s'] = round(max(0.0, got - asked), 2)
 
     # 각도를 얼마나 깎았나: 요청한 값과 검증 뒤 값의 차이
@@ -472,6 +478,7 @@ def evaluate(moves, intent=None, fast=False, request=None):
     samples = sim['samples']
     metrics = {
         'duration_s': round(samples[-1]['t'], 2) if samples else 0.0,
+        'grasp_s': sim.get('grasp_s', 0.0),
         'keyframes': len(sim['segments']),
         'stretched_s': sim['stretched_s'],
         'clamped': sim['clamped'],
