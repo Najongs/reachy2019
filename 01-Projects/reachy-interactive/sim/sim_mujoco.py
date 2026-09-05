@@ -240,11 +240,16 @@ def frames_of(moves, fps=FPS):
     return sim['samples'], None
 
 
-# 로봇은 +x 를 바라본다. MuJoCo 카메라 azimuth 0 이 +x 쪽에서 보는 각도라,
-# 사람이 로봇 앞에 서서 보는 그림이 된다. 살짝 틀어 3/4 로 본다.
+# 카메라 각도는 실측으로 정했다. 로봇이 +x 를 본다고 azimuth 0 이 정면일
+# 거라 짐작했는데 반대였다 - 오른팔을 앞으로 뻗어 놓고 네 각도를 찍어 보니
+# **azimuth 180 이 정면**(얼굴의 카메라 렌즈 두 개가 보인다)이고 0 은 등이다.
+VIEWS = {'front': 180, 'side': 90, 'back': 0, 'other_side': 270}
+DEFAULT_VIEWS = ('front', 'side')      # 평가에는 이 둘이면 충분하다
+
+
 def render_video(moves_list, path, labels=None, fps=FPS, header=None,
-                 width=WIDTH, height=HEIGHT, azimuth=40, elevation=-14,
-                 distance=1.62):
+                 width=WIDTH, height=HEIGHT, azimuth=None, elevation=-14,
+                 distance=1.62, views=None):
     """동작을 MuJoCo 로 렌더링해 mp4 로. 여러 개를 주면 가로로 붙인다."""
     import imageio.v2 as imageio
     import numpy as np
@@ -262,10 +267,15 @@ def render_video(moves_list, path, labels=None, fps=FPS, header=None,
     total = max(len(s) for s in seqs)
     labels = labels or [''] * len(seqs)
 
+    # azimuth 를 직접 주면 그 한 각도만, 아니면 정면+측면 두 화면.
+    angles = ([azimuth] if azimuth is not None
+              else [VIEWS[v] for v in (views or DEFAULT_VIEWS)])
+    names = ([''] if azimuth is not None else list(views or DEFAULT_VIEWS))
+
     renderer = mujoco.Renderer(model, height=height, width=width)
     cam = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(cam)
-    cam.azimuth, cam.elevation, cam.distance = azimuth, elevation, distance
+    cam.elevation, cam.distance = elevation, distance
     # 로봇은 안테나 끝(z≈+0.35)부터 늘어뜨린 손끝(z≈-0.64)까지 걸친다.
     # 그 가운데를 봐야 위아래가 잘리지 않는다.
     cam.lookat[:] = [0.06, 0.0, -0.14]
@@ -278,10 +288,12 @@ def render_video(moves_list, path, labels=None, fps=FPS, header=None,
                 s = seq[min(k, len(seq) - 1)]
                 _set_pose(data, idx, s['pose'])
                 mujoco.mj_forward(model, data)
-                renderer.update_scene(data, camera=cam)
-                panes.append(renderer.render())
+                for az in angles:
+                    cam.azimuth = az
+                    renderer.update_scene(data, camera=cam)
+                    panes.append(renderer.render())
             img = np.concatenate(panes, axis=1) if len(panes) > 1 else panes[0]
-            img = _label(img, labels, seqs, k, header)
+            img = _label(img, labels, seqs, k, header, names)
             h, w = img.shape[:2]
             writer.append_data(img[:h - h % 2, :w - w % 2])
     finally:
@@ -290,7 +302,7 @@ def render_video(moves_list, path, labels=None, fps=FPS, header=None,
     return path, None
 
 
-def _label(img, labels, seqs, k, header):
+def _label(img, labels, seqs, k, header, view_names=None):
     """프레임 위에 글자를 얹는다. 한글 폰트가 없으므로 아스키만."""
     try:
         from PIL import Image, ImageDraw
@@ -298,12 +310,18 @@ def _label(img, labels, seqs, k, header):
         return img
     im = Image.fromarray(img)
     d = ImageDraw.Draw(im)
-    n = len(seqs)
-    w = im.width // n
-    for i, (lab, seq) in enumerate(zip(labels, seqs)):
+    views = view_names or ['']
+    panes = len(seqs) * len(views)
+    w = im.width // panes
+    for i in range(panes):
+        seq = seqs[i // len(views)]
+        lab = labels[i // len(views)]
+        view = views[i % len(views)]
         t = seq[min(k, len(seq) - 1)]['t']
         d.text((i * w + 12, 10), '%s  t=%.1fs' % (_ascii(lab), t),
                fill=(235, 235, 235))
+        if view:
+            d.text((i * w + 12, 26), view, fill=(150, 170, 200))
     if header:
         d.text((12, im.height - 20), _ascii(header), fill=(190, 200, 215))
     import numpy as np
@@ -350,8 +368,11 @@ def main():
     ap.add_argument('-o', '--out', default='motion.mp4')
     ap.add_argument('--fps', type=int, default=FPS)
     ap.add_argument('--size', type=int, default=WIDTH)
-    ap.add_argument('--azimuth', type=float, default=45,
-                    help='카메라 각도. 0=정면, 45=3/4(기본), 90=로봇의 왼쪽')
+    ap.add_argument('--azimuth', type=float,
+                    help='한 각도만 쓴다 (180=정면, 90=측면, 0=등). '
+                         '기본은 정면+측면 두 화면')
+    ap.add_argument('--views', default='front,side',
+                    help='보여 줄 시점: front/side/back/other_side 중 쉼표로')
     ap.add_argument('--contacts', action='store_true',
                     help='영상 대신 접촉 검사만 한다')
     ap.add_argument('--dump-xml', action='store_true', help='MJCF 만 출력')
@@ -409,6 +430,8 @@ def main():
     out, err = render_video(lst, args.out, labels=labs, fps=args.fps,
                             width=args.size, height=args.size,
                             azimuth=args.azimuth,
+                            views=[v.strip() for v in args.views.split(',')
+                                   if v.strip() in VIEWS],
                             header='%d pts' % score['score'])
     if err:
         print('영상 실패: %s' % err)
