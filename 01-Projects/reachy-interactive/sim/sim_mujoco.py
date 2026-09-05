@@ -125,6 +125,19 @@ def build_mjcf(use_mesh=True, keepout=True):
             '    <geom name="headcore" type="sphere" material="core" '
             'contype="0" conaffinity="0" pos="0 0 %.3f" size=".075"/>'
             % (me.HEAD_SPHERE_CENTER[2] + 0.02)),
+           # 로봇 눈 카메라. 실물은 Orbita 목이 시선 (y, z at x=0.5) 로
+           # 움직이므로, 팬(z축)과 틸트(y축) 관절 두 개로 같은 시선을 흉내낸다.
+           # 위치는 실물 카메라 자리(목 위 머리 앞면, NECK_POS 기준).
+           '    <body name="eye_pan" pos="%.3f 0 %.3f">' % (0.0, 0.09),
+           '      <inertial pos="0 0 0" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
+           '      <joint name="eye.pan" axis="0 0 1" range="-90 90"/>',
+           '      <body name="eye_tilt" pos="0.06 0 0.02">',
+           '        <inertial pos="0 0 0" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
+           '        <joint name="eye.tilt" axis="0 1 0" range="-60 60"/>',
+           # zaxis 가 카메라의 '뒤' 방향이다. -x 를 zaxis 로 주면 +x(정면)를 본다.
+           '        <camera name="robot_eye" pos="0 0 0" zaxis="-1 0 0" fovy="58"/>',
+           '      </body>',
+           '    </body>',
            # 안테나는 사슬에 없다(머리 위 별도 모터). 감정 표현이 잘 보이므로
            # 힌지로 붙여 준다.
            '    <body name="left_antenna" pos="-0.02 0.06 %.3f">'
