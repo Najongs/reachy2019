@@ -36,15 +36,24 @@ import motion_exec as me                          # noqa: E402
 import sim_eval                                   # noqa: E402
 
 
-# 팔의 굵기(반지름, m). **실측이 아니라 어림값이다** - Reachy 2019 의 프린트
-# 파트를 눈대중한 값이라, 등급이 이 숫자에 그대로 좌우된다. 자로 재서
-# --link-radius / --hand-radius 로 넣으면 판정이 정확해진다.
+# 팔의 굵기(반지름, m). **3D 모델에서 잰 값이다** - reachy.glb 가 순기구학과
+# 같은 좌표계의 휴식 자세로 되어 있어서, 링크 축 둘레의 정점까지 거리를 재면
+# 그게 반지름이다 (sim/measure_arm.py). 처음에는 눈대중 두 값(3.5/4.5cm)을
+# 썼는데, 판정이 그 숫자에 그대로 뒤집혀서(pick_to_tray: 3.0cm 안전 /
+# 3.5cm 위험) 추측으로 둘 수 없었다.
 #
 # 이게 중요한 이유: 실행기의 검증기는 팔을 **굵기 없는 중심선**으로만 본다.
-# 중심선이 금지 영역에서 5cm 떨어져 있어도, 전완 반지름이 4.5cm 면 실제
-# 공기 틈은 0.5cm 다. 시연에서 조립 오차와 처짐까지 생각하면 닿는다.
-LINK_RADIUS = 0.035
-HAND_RADIUS = 0.045
+# 중심선이 금지 영역에서 5cm 떨어져 있어도, 전완 반지름이 3.6cm 면 실제
+# 공기 틈은 1.4cm 다. 시연에서 조립 오차와 처짐까지 생각하면 아슬아슬하다.
+try:
+    import measure_arm
+    RADII, RADII_SOURCE = measure_arm.measure()
+except Exception:
+    RADII = {'upper_arm': 0.044, 'forearm': 0.037, 'hand': 0.041}
+    RADII_SOURCE = '재어 둔 값'
+
+# 링크 순서대로 (길이 0 인 링크는 _links 에서 이미 빠진다)
+_ORDER = ['upper_arm', 'forearm', 'hand']
 
 AUDIT_HZ = 100          # 시간 방향 표본. 실행기의 10Hz 보다 촘촘히 본다
 SAFE_CM = 5.0
@@ -104,10 +113,11 @@ def _links(chain, pose):
         nodes.append(p)
 
     segs = []
-    for i, (a, b) in enumerate(zip(nodes[:-1], nodes[1:])):
+    for a, b in zip(nodes[:-1], nodes[1:]):
         if me._dist(a, b) < 1e-6:
             continue
-        segs.append((a, b, HAND_RADIUS if i >= len(nodes) - 3 else LINK_RADIUS))
+        key = _ORDER[min(len(segs), len(_ORDER) - 1)]
+        segs.append((a, b, RADII[key]))
     return segs
 
 
@@ -244,7 +254,7 @@ def audit(moves, hz=AUDIT_HZ):
             'arm_arm_cm': gaps['arm_arm'][0], 'self_cm': gaps['self'][0],
             # 굵기를 빼기 전 값. 실행기가 보는 것이 이쪽이라, 두 숫자를
             # 나란히 놓아야 '두께 때문에 좁아진 것' 이 드러난다.
-            'centerline_cm': {k: round((v[0] + 2 * LINK_RADIUS) * 100, 1)
+            'centerline_cm': {k: round((v[0] + 2 * RADII['forearm']) * 100, 1)
                               for k, v in gaps.items()}}
 
 
@@ -273,7 +283,7 @@ def describe(a):
 def main():
     import argparse
 
-    global LINK_RADIUS, HAND_RADIUS
+    global RADII
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--preset')
@@ -283,17 +293,20 @@ def main():
                                        'motion_candidates.json'))
     ap.add_argument('--json')
     ap.add_argument('--hz', type=int, default=AUDIT_HZ)
-    ap.add_argument('--link-radius', type=float, default=LINK_RADIUS,
-                    help='상완/전완 반지름(m). 기본값은 눈대중이다')
-    ap.add_argument('--hand-radius', type=float, default=HAND_RADIUS,
-                    help='손·그리퍼 반지름(m)')
+    ap.add_argument('--percentile', type=float,
+                    help='모델에서 다시 잰다 (기본 90, 보수적으로 보려면 95)')
     args = ap.parse_args()
 
-    LINK_RADIUS, HAND_RADIUS = args.link_radius, args.hand_radius
+    if args.percentile:
+        import measure_arm
+        RADII, source = measure_arm.measure(percentile=args.percentile)
+        globals()['RADII'] = RADII
+    else:
+        source = RADII_SOURCE
     _BASELINE.clear()
-    print('팔 굵기 가정: 링크 반지름 %.1fcm, 손 %.1fcm  '
-          '(자로 잰 값이 있으면 --link-radius 로 넣어라)\n'
-          % (LINK_RADIUS * 100, HAND_RADIUS * 100))
+    print('팔 굵기 (%s): 상완 %.1fcm, 전완 %.1fcm, 손 %.1fcm\n'
+          % (source, RADII['upper_arm'] * 100, RADII['forearm'] * 100,
+             RADII['hand'] * 100))
 
     items = []
     if args.all_presets or args.preset:

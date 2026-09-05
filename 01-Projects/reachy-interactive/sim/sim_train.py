@@ -23,7 +23,9 @@ GPU 는 ollama 가 이미 올라가 있는 한 장만 쓴다. 채점은 순기�
 """
 
 import json
+import logging
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -39,6 +41,11 @@ import sim_safety                                # noqa: E402
 
 SAFETY_HZ = 40      # 학습 중 안전 감사 표본율. 확인용이라 100Hz 까지는 필요 없다
 NOVEL_CM = 8.0      # 이미 있는 동작과 손끝 기준 이만큼도 안 다르면 같은 것으로 본다
+
+
+def _slug(text):
+    """파일 이름으로 쓸 수 있게. 한글은 그대로 두되 경로 문자만 뺀다."""
+    return re.sub(r'[^0-9A-Za-z가-힣]+', '-', text).strip('-')[:28] or 'task'
 
 
 def build_library():
@@ -208,6 +215,7 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
 
     history = []
     best = None
+    first_moves = None
 
     motion = ask_motion(url, token, prompt, session)
     if motion is None:
@@ -270,6 +278,8 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
             attempt, result['score'], gain,
             result['findings'][0][:48] if result['findings'] else '지적 없음'))
 
+        if attempt == 0:
+            first_moves = list(moves)
         if best is None or result['score'] > best['score']:
             best = {'score': result['score'], 'moves': moves,
                     'say': motion.get('say'), 'result': result}
@@ -298,6 +308,7 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
     return {'say': say, 'scene': task.get('scene'), 'who': task.get('who'),
             'best_score': best['score'] if best else 0,
             'first_score': history[0]['score'] if history else 0,
+            'first_moves': first_moves,
             'say_line': best['say'] if best else None,
             'moves': best['moves'] if best else None,
             'findings': best['result']['findings'] if best else [],
@@ -381,7 +392,11 @@ def main():
     ap.add_argument('--tasks', help='미리 만들어 둔 과제 json (없으면 즉석 생성)')
     ap.add_argument('--session', default='sim-train',
                     help='opus 대화 세션. 같은 세션이면 앞 과제의 지적을 기억한다')
-    ap.add_argument('--keep-images', help='궤적 그림을 이 폴더에 남긴다')
+    ap.add_argument('--keep-images', help='시도마다의 궤적 그림도 남긴다')
+    ap.add_argument('--gallery', metavar='DIR',
+                    default=os.path.join(CONFIG, '..', 'sim_gallery'),
+                    help='과제별 before/after 와 진행 그래프를 남길 폴더 '
+                         "('off' 로 끔)")
     ap.add_argument('--opt-iters', type=int, default=10,
                     help='초안 하나를 탐색으로 몇 세대 다듬을지 (0=끔)')
     ap.add_argument('--opt-pop', type=int, default=40,
@@ -404,6 +419,9 @@ def main():
 
     if args.keep_images:
         os.makedirs(args.keep_images, exist_ok=True)
+    gallery = None if args.gallery in (None, 'off') else args.gallery
+    if gallery:
+        os.makedirs(gallery, exist_ok=True)
 
     if args.tasks:
         with open(args.tasks, encoding='utf-8') as fh:
@@ -451,6 +469,16 @@ def main():
         if r.get('error'):
             print('    %s' % r['error'])
         results.append(r)
+        if gallery and r.get('moves') and r.get('first_moves'):
+            try:
+                sim_eval.render_pair(
+                    r['first_moves'], r['moves'],
+                    os.path.join(gallery, '%02d-%s.png'
+                                 % (i, _slug(task['say']))),
+                    labels=('draft  %d pts' % r['first_score'],
+                            'final  %d pts' % r['best_score']))
+            except Exception:
+                logging.getLogger(__name__).debug('그림 저장 실패', exc_info=True)
         print()
 
     # --- 요약 -------------------------------------------------------------
@@ -472,6 +500,15 @@ def main():
     failed = [r for r in results if r.get('error')]
     if failed:
         print('\n설계를 못 받은 과제 %d개' % len(failed))
+
+    if gallery:
+        rows = [(r['say'][:20], r['first_score'], r['best_score'])
+                for r in results if r.get('best_score')]
+        out = sim_eval.render_progress(rows, os.path.join(gallery,
+                                                          '00-progress.png'))
+        if out:
+            print('\n진행 그래프: %s' % out)
+            print('과제별 before/after 그림: %s/NN-*.png' % gallery)
 
     if lessons is not None:
         save_lessons(lessons)

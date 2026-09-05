@@ -506,6 +506,83 @@ def render(moves, path, title=None):
     return path
 
 
+def render_pair(before, after, path, labels=('before', 'after')):
+    """두 궤적을 위아래로 붙여 한 장으로. 개선된 정도를 눈으로 보려는 것.
+
+    숫자로 "75점 -> 100점" 이라고만 하면 무엇이 달라졌는지 모른다. 손이 더
+    크게 움직였는지, 왕복이 생겼는지, 몸에서 멀어졌는지는 궤적을 봐야 한다.
+    """
+    import tempfile
+
+    tmps = []
+    try:
+        for moves, label in ((before, labels[0]), (after, labels[1])):
+            fd, png = tempfile.mkstemp(suffix='.png')
+            os.close(fd)
+            if render(moves, png, title=label) is None:
+                return None
+            tmps.append(png)
+        try:
+            from PIL import Image
+            ims = [Image.open(t) for t in tmps]
+            w = max(i.width for i in ims)
+            out = Image.new('RGB', (w, sum(i.height for i in ims)), 'white')
+            y = 0
+            for i in ims:
+                out.paste(i, (0, y))
+                y += i.height
+            out.save(path)
+            return path
+        except Exception:
+            return None
+    finally:
+        for t in tmps:
+            try:
+                os.unlink(t)
+            except OSError:
+                pass
+
+
+def render_progress(rows, path):
+    """한 번의 학습 전체를 한 장으로 - 과제별 첫 점수와 최종 점수.
+
+    rows: [(이름, 첫점수, 최종점수), ...]
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    xs = list(range(1, len(rows) + 1))
+    first = [r[1] for r in rows]
+    final = [r[2] for r in rows]
+
+    fig, ax = plt.subplots(figsize=(max(7, len(rows) * 0.45), 4.2))
+    ax.plot(xs, first, 'o--', color='0.65', ms=4, label='first draft')
+    ax.plot(xs, final, 'o-', color='tab:blue', ms=5, label='after search + redesign')
+    for x, a, b in zip(xs, first, final):
+        if b > a:
+            ax.annotate('', xy=(x, b), xytext=(x, a),
+                        arrowprops=dict(arrowstyle='->', color='tab:green',
+                                        lw=1.2))
+    ax.set_xlabel('task #')
+    ax.set_ylabel('score')
+    ax.set_ylim(min(min(first), min(final)) - 5, 103)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    ax.set_title('training progress  (mean %.1f -> %.1f)'
+                 % (sum(first) / len(first), sum(final) / len(final)),
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+    return path
+
+
 def render_b64(moves, title=None):
     """그림을 base64 jpeg 로. 브로커 /motion 에 그대로 실어 보낼 수 있다."""
     import base64
