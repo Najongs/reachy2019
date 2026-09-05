@@ -22,6 +22,7 @@ import os
 import sys
 
 os.environ.setdefault('MUJOCO_GL', 'egl')
+os.environ.setdefault('MUJOCO_EGL_DEVICE_ID', '0')   # GPU0 만 쓴다 (ollama 와 동거)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -64,54 +65,127 @@ class OraclePlanner(object):
 
 
 class BrokerPlanner(object):
-    """opus 에게 눈 그림 + 지시를 보내 행동을 받는다.
+    """opus 시각 접지로 계획한다 - 참값 없이 카메라와 기억만.
 
-    브로커의 /motion 이 이미 이미지를 받아 동작 JSON 을 돌려주므로 그대로
-    쓴다. 여기서는 opus 에게 '무엇을 향해 움직일지' 를 물어 화면 좌표나
-    방향을 받고, 그 방향으로 서보한다. (엄밀한 3D 좌표를 요구하지 않는다 -
-    opus 는 그림만 보므로.)
+    분업이 핵심이다. opus 는 **어느 박스가 대상인지**만 고른다(시각·언어 판단).
+    박스를 3D 목표로 바꾸는 기하(픽셀+크기 -> 방향+거리)와 서보는 결정론이다.
+    opus 에게 좌표 계산을 시키면 그림만 보고 지어내게 된다.
 
-    지금은 뼈대다: opus 응답을 파싱해 목표를 잡는 부분은 프롬프트와 함께
-    다음 단계에서 채운다. 응답이 없으면 그 태스크는 '계획 실패' 로 둔다.
+    인지: sim_perceive.sweep 으로 시선을 훑어 SceneMemory 를 채우고, 대상
+    종류가 기억에 잡히면 그 방향으로 시선을 되돌린 뒤 현재 프레임의 검출로
+    접지를 요청한다.
     """
 
     name = 'broker'
 
-    def __init__(self, url='http://127.0.0.1:8080', token=None, session='sim-agent'):
+    def __init__(self, url='http://127.0.0.1:8080', token=None,
+                 session='sim-agent', noise_px=2.0, dropout=0.05, seed=0):
+        import random
         sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
         from llm_client import BrokerClient
+        import sim_perceive as P
+        self.P = P
         self.client = BrokerClient(url, token=token, session=session)
+        self.noise_px, self.dropout = noise_px, dropout
+        self.rng = random.Random(seed)
+        self.lessons = []          # 배치 안에서 누적되는 지적 (7->4 되먹임)
 
-    def _ask(self, world, task, extra=''):
+    def _jpeg(self, img):
         import base64
         import io as _io
-        try:
-            from PIL import Image
-        except Exception:
-            return None
-        img = world.render_eye()
+        from PIL import Image
         buf = _io.BytesIO()
-        Image.fromarray(img).convert('RGB').save(buf, format='JPEG', quality=75)
-        b64 = base64.b64encode(buf.getvalue()).decode('ascii')
-        prompt = (task['instruction'] + '\n' + extra +
-                  '\n로봇 눈으로 본 장면 사진이야. 대상이 화면 어디에 있는지 '
-                  '보고, 어떻게 움직일지 정해 줘.')
-        return self.client.ask_motion(prompt, image=b64)
+        Image.fromarray(img).convert('RGB').save(buf, format='JPEG', quality=80)
+        return base64.b64encode(buf.getvalue()).decode('ascii')
 
     def perceive(self, world, task):
-        # 먼저 좌우로 시선을 훑어 대상을 화면에 담는다(카메라 조정).
-        for pan in (-30, -15, 0, 15, 30):
-            world.set_gaze(0.5 * math.tan(math.radians(pan)),
-                           W.TABLE_TOP - 0.05)
-            if world.visible(task['target']):
-                world.look_at(world.object_pos(task['target']))
-                return {'seen': True}
-        return {'seen': False}
+        """시선을 훑어 기억을 채우고, 대상 종류 방향으로 시선을 되돌린다."""
+        mem = self.P.SceneMemory()
+        self.P.sweep(world, mem, noise_px=self.noise_px,
+                     dropout=self.dropout, rng=self.rng)
+        kind = next((o['kind'] for o in task['scene']
+                     if o['name'] == task['target']), None)
+        item = mem.find(kind) if kind else None
+        if item is not None:
+            self.P.gaze_toward(world, item)
+        dets = self.P.detect(world, self.noise_px, self.dropout, self.rng)
+        return {'seen': bool(dets), 'memory': mem, 'dets': dets}
 
     def plan(self, world, task, view):
-        # opus 에게 물어본다. 응답 파싱/활용은 다음 단계에서 채운다.
-        reply = self._ask(world, task)
-        return {'mode': 'opus', 'raw': reply}
+        """opus 에게 '몇 번 박스인가' 를 묻고, 그 박스로 3D 목표를 만든다."""
+        dets = view.get('dets') or []
+        mem = view.get('memory')
+        img = self.P.overlay(world, dets)
+        prompt = '지시: %s' % task['instruction']
+        if self.lessons:
+            prompt = ('지난 시도의 지적: %s\n' % ' / '.join(self.lessons[-3:])
+                      ) + prompt
+        if mem is not None:
+            prompt += '\n' + mem.summary()
+        raw = self.client.ask_vision(prompt, image=self._jpeg(img))
+        choice = _parse_grounding(raw)
+        if choice is None:
+            return {'mode': 'noop', 'raw': raw, 'why': '접지 응답 해석 불가'}
+
+        box = choice.get('box')
+        if box is not None and 0 <= int(box) < len(dets):
+            det = dets[int(box)]
+            point = _det_to_3d(world, det)
+            mode = 'gaze' if task['kind'] == 'look' else 'reach'
+            done = 12.0 if task['kind'] == 'point' else 8.0
+            return {'mode': mode, 'point': point, 'done_cm': done,
+                    'raw': raw, 'grounded_det': det}
+        if choice.get('memory') and mem is not None:
+            item = mem.find(choice['memory'])
+            if item is not None:
+                self.P.gaze_toward(world, item)
+                dets2 = self.P.detect(world, self.noise_px, self.dropout,
+                                      self.rng)
+                if dets2:
+                    det = max(dets2, key=lambda d: d['size_px'])
+                    point = _det_to_3d(world, det)
+                    mode = 'gaze' if task['kind'] == 'look' else 'reach'
+                    return {'mode': mode, 'point': point, 'done_cm': 8.0,
+                            'raw': raw, 'grounded_det': det}
+        return {'mode': 'noop', 'raw': raw, 'why': '대상을 찾지 못함'}
+
+
+def _parse_grounding(raw):
+    """접지 응답 JSON 을 관대하게 파싱. {'box':.., 'memory':..} 또는 None."""
+    if not raw:
+        return None
+    start = raw.find('{')
+    end = raw.rfind('}')
+    if start < 0 or end <= start:
+        return None
+    try:
+        out = json.loads(raw[start:end + 1])
+    except ValueError:
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def _det_to_3d(world, det):
+    """검출(픽셀+크기) -> 대략적 3D 점. 참값을 쓰지 않는다.
+
+    방향은 시선+픽셀 오프셋으로, 거리는 화면 크기(가까울수록 크다)로 추정 -
+    servo 의 크기 단서와 같은 원리다. 서보가 화면 오차로 계속 고치므로 이
+    초기 추정은 대충이어도 된다.
+    """
+    import sim_perceive as P
+    f = (world.height / 2.0) / math.tan(math.radians(58 / 2.0))
+    dist = P.KIND_SIZE.get(det['kind'], 0.08) * f / max(det['size_px'], 8.0)
+    du = math.atan2(det['u'] - world.width / 2, f)
+    dv = math.atan2(det['v'] - world.height / 2, f)
+    pan = math.radians(world.pose.get('eye.pan', 0.0)) - du
+    tilt = math.radians(world.pose.get('eye.tilt', 0.0)) + dv
+    # 카메라 위치에서 그 방향으로 dist 만큼
+    mj = world.mujoco
+    cid = mj.mj_name2id(world.model, mj.mjtObj.mjOBJ_CAMERA, 'robot_eye')
+    cam = world.data.cam_xpos[cid]
+    return (float(cam[0] + dist * math.cos(tilt) * math.cos(pan)),
+            float(cam[1] + dist * math.cos(tilt) * math.sin(pan)),
+            float(cam[2] - dist * math.sin(tilt)))
 
 
 # ============================================================ 실행 ============
@@ -222,9 +296,6 @@ def execute(world, plan, frames=None):
                       frames=frames, note='reach')
     if mode == 'pick':
         return _pick(world, plan['object'], plan['tray'], frames=frames)
-    if mode == 'opus':
-        # opus 계획 활용은 다음 단계. 지금은 미실행.
-        return False
     return False
 
 

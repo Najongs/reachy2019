@@ -270,6 +270,22 @@ class BrokerClient(BaseClient):
             logger.warning('Motion endpoint sent invalid json: %s', e)
             return None
 
+    def ask_vision(self, text, image=None, timeout=90):
+        """시각 접지 세션에 묻는다. 원문 텍스트 또는 None. 절대 안 던진다."""
+        body = {'text': text, 'session': self.session + '-vision'}
+        if image:
+            body['image'] = image
+        try:
+            out = _post_json(self.url + '/vision', body, self._headers(), timeout)
+            return out.get('text')
+        except urllib.error.HTTPError as e:
+            logger.warning('Vision endpoint returned %s: %s', e.code,
+                           e.read()[:200])
+            return None
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            logger.warning('Cannot reach vision endpoint: %s', e)
+            return None
+
     def reset(self):
         BaseClient.reset(self)
         try:

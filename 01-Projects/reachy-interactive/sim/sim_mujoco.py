@@ -28,6 +28,7 @@ import os
 import sys
 
 os.environ.setdefault('MUJOCO_GL', 'egl')
+os.environ.setdefault('MUJOCO_EGL_DEVICE_ID', '0')   # GPU0 만 쓴다 (ollama 와 동거)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

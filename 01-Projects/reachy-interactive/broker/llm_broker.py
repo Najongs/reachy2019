@@ -741,7 +741,8 @@ def extract_motion_json(text):
     return {'say': payload['say'], 'preset': preset, 'moves': moves}
 
 
-def make_handler(backend, conversations, token, motion_backend=None, stats=None):
+def make_handler(backend, conversations, token, motion_backend=None,
+                 vision_backend=None, stats=None):
     stats = stats if stats is not None else Stats()
     health_cache = {'at': 0.0, 'value': None}
 
@@ -922,6 +923,30 @@ def make_handler(backend, conversations, token, motion_backend=None, stats=None)
                 self._send(200, motion)
                 return
 
+            if self.path == '/vision':
+                if vision_backend is None:
+                    self._send(404, {'error': 'vision backend not enabled'})
+                    return
+                text = (payload.get('text') or '').strip()
+                if not text:
+                    self._send(400, {'error': 'missing "text"'})
+                    return
+                t0 = time.time()
+                try:
+                    raw = vision_backend.reply(
+                        text, [], payload.get('session', 'vision'),
+                        image=payload.get('image') or None)
+                except Exception as e:
+                    logger.exception('Vision backend failed')
+                    stats.record('vision', time.time() - t0, error=e)
+                    self._send(502, {'error': '{}: {}'.format(
+                        type(e).__name__, e)})
+                    return
+                stats.record('vision', time.time() - t0)
+                # 모션과 달리 파싱하지 않는다 - caller 가 형식을 정한다.
+                self._send(200, {'text': (raw or '').strip()})
+                return
+
             if self.path != '/reply':
                 self._send(404, {'error': 'not found'})
                 return
@@ -988,6 +1013,10 @@ def main():
                         help='model for the motion-generation session')
     parser.add_argument('--motion-prompt-file',
                         help='enable POST /motion using this system prompt file')
+    parser.add_argument('--vision-model', default='opus',
+                        help='model for the visual-grounding session')
+    parser.add_argument('--vision-prompt-file',
+                        help='enable POST /vision using this system prompt file')
     parser.add_argument('--token', help='shared secret clients must send as X-Auth-Token')
     args = parser.parse_args()
 
@@ -1027,8 +1056,21 @@ def main():
         logger.info('Motion backend enabled (model=%s, prompt %d chars)',
                     args.motion_model, len(motion_prompt))
 
+    # 시각 접지용 전용 opus CLI 세션. 모션 CLI 와 분리한다 - 프롬프트도
+    # 대화 맥락도 다르고, 세션이 섞이면 접지 답이 모션 JSON 형식에 오염된다.
+    vision_backend = None
+    if args.vision_prompt_file:
+        with open(args.vision_prompt_file, encoding='utf-8') as f:
+            vision_prompt = f.read().strip()
+        vision_backend = ClaudeCliBackend(model=args.vision_model,
+                                          timeout=90,
+                                          system_prompt=vision_prompt)
+        logger.info('Vision backend enabled (model=%s, prompt %d chars)',
+                    args.vision_model, len(vision_prompt))
+
     handler = make_handler(backend, Conversations(), args.token,
-                           motion_backend=motion_backend, stats=Stats())
+                           motion_backend=motion_backend,
+                           vision_backend=vision_backend, stats=Stats())
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
     logger.info('Broker listening on %s:%d (backend=%s)', args.host, args.port, args.backend)

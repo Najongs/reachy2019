@@ -46,3 +46,6 @@ dist/
 **/sim_gallery/
 # reachy.glb 에서 뽑아 낸 링크별 메시 (29MB, extract_meshes.py 로 재생성)
 **/sim/meshes/
+# 파이프라인 실행 생성물
+**/sim_data/
+**/docs/eval/

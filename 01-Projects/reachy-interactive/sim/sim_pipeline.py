@@ -1,0 +1,188 @@
+"""7-역할 파이프라인의 최상위 러너 - 한 배치를 끝까지 돌린다.
+
+  1 명령    sim_tasks (템플릿) / 지시문
+  2 환경    sim_tasks.generate_feasible - 실현가능성 필터 통과한 장면만
+  3 답변    ollama /reply 한 줄 ("네, 컵으로 손을 가져갈게요")
+  4 동작    opus /vision 접지 -> 결정론 서보 (sim_agent.BrokerPlanner)
+  5 피드백  객관 검증 실패 시 지적을 만들어 1회 재시도 (lessons 되먹임)
+  6 오케스트라  배치 끝에 지표 감사 + 커리큘럼 + opus 총평 1회
+  7 데이터  시도별 레코드 -> sim_data/<run>/ -> docs/eval/<run>.md
+
+사용:
+    python3 sim/sim_pipeline.py -n 6 --planner oracle          # harness 검증
+    python3 sim/sim_pipeline.py -n 6 --planner broker --token reachy2019
+"""
+
+import json
+import os
+import sys
+
+os.environ.setdefault('MUJOCO_GL', 'egl')
+os.environ.setdefault('MUJOCO_EGL_DEVICE_ID', '0')   # GPU0 만 쓴다
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
+
+import motion_exec as me                           # noqa: E402
+import sim_agent as A                              # noqa: E402
+import sim_orchestra as O                          # noqa: E402
+import sim_record as R                             # noqa: E402
+import sim_tasks as T                              # noqa: E402
+
+
+def _answer_line(client, instruction):
+    """역할 3: ollama 가 지시에 짧게 응답 (로봇이 말할 한 줄)."""
+    if client is None:
+        return None
+    out = client.ask('다음 지시에 로봇으로서 한 문장으로만 응답해: ' + instruction)
+    return (out or '').strip() or None
+
+
+def run_episode(task, planner, run_id, answer_client=None, retry=True):
+    """한 에피소드: 인지->계획->행동->검증(->재시도)->레코드."""
+    world = T.build_world(task)
+    frames = []
+    rec = {'task': task, 'instruction': task['instruction'], 'seed': task.get('seed')}
+
+    try:
+        rec['answer'] = _answer_line(answer_client, task['instruction'])
+
+        view = planner.perceive(world, task)
+        dets = view.get('dets') or []
+        mem = view.get('memory')
+        rec['perception'] = {
+            'seen': bool(view.get('seen')),
+            'dets': [{k: round(v, 1) if isinstance(v, float) else v
+                      for k, v in d.items() if k != 'name'} for d in dets],
+            'memory': mem.summary() if mem is not None else None,
+        }
+
+        plan = planner.plan(world, task, view)
+        rec['plan'] = {'mode': plan.get('mode'), 'raw': plan.get('raw'),
+                       'why': plan.get('why')}
+
+        A.execute(world, plan, frames=frames)
+        verdict = _verdict(world, task)
+
+        # 역할 5: 실패면 지적을 만들어 1회 재시도. 지적은 결정론(검증 결과)에서.
+        if retry and not verdict['success'] and plan.get('mode') != 'noop':
+            finding = verdict.get('why') or '목표에 닿지 못함'
+            if hasattr(planner, 'lessons'):
+                planner.lessons.append(finding)
+            view2 = planner.perceive(world, task)
+            plan2 = planner.plan(world, task, view2)
+            A.execute(world, plan2, frames=frames)
+            v2 = _verdict(world, task)
+            if v2['success']:
+                verdict = v2
+                rec['plan']['retry'] = plan2.get('mode')
+            verdict['retried'] = True
+
+        rec['verdict'] = verdict
+        rec['execution'] = {
+            'final_dist_cm': round(me._dist(
+                world.hand(), world.object_pos(task['target'])) * 100, 1),
+            'frames': len(frames),
+        }
+        rec['findings'] = ([] if verdict['success']
+                           else [verdict.get('why') or '실패'])
+    except Exception as e:
+        rec['verdict'] = {'success': False, 'why': '%s: %s'
+                          % (type(e).__name__, e)}
+        rec['findings'] = [rec['verdict']['why']]
+    finally:
+        art = {}
+        if frames:
+            vid = os.path.join(R.run_dir(run_id), task['id'] + '.mp4')
+            try:
+                A._write_video(frames, vid)
+                art['video'] = vid
+            except Exception:
+                pass
+        rec['artifacts'] = art
+        world.close()
+    R.write(run_id, rec)
+    return rec
+
+
+def _verdict(world, task):
+    ok = bool(T.success_fn(task)(world))
+    obj_gap, obj_pair = world.clearance(ignore=('table',))
+    out = {'success': ok, 'object_clearance_cm': round(obj_gap, 1)}
+    if obj_gap < -0.5:
+        out['success'] = False
+        out['why'] = '물체 투과: %s %.1fcm' % (obj_pair, obj_gap)
+    elif not ok:
+        d = me._dist(world.hand(), world.object_pos(task['target'])) * 100
+        out['why'] = '판정 미달 (손-대상 %.0fcm)' % d
+    return out
+
+
+def run_batch(n=6, kinds=('look', 'reach'), planner_name='oracle',
+              url='http://127.0.0.1:8080', token=None, seed=0, tag=''):
+    run_id = R.new_run(tag or planner_name)
+    print('run %s | 계획자 %s | 태스크 %d개 생성(실현가능성 필터)...'
+          % (run_id, planner_name, n))
+    tasks = T.generate_feasible(n, seed=seed, kinds=kinds)
+
+    answer_client = None
+    if planner_name == 'broker':
+        from llm_client import BrokerClient
+        planner = A.BrokerPlanner(url, token=token, seed=seed)
+        answer_client = BrokerClient(url, token=token, session='sim-answer')
+    else:
+        planner = A.OraclePlanner()
+
+    records = []
+    for t in tasks:
+        rec = run_episode(t, planner, run_id, answer_client=answer_client)
+        v = rec['verdict']
+        ans = (' | "%s"' % rec['answer'][:30]) if rec.get('answer') else ''
+        print('  %s [%-5s] %-34s %s%s' % (
+            '✓' if v['success'] else '✗', t['kind'], t['instruction'][:34],
+            v.get('why', '')[:40], ans))
+        records.append(rec)
+
+    # 역할 6+7: 감사 -> 커리큘럼 -> 총평 -> 리포트
+    summary = R.aggregate(run_id)
+    flags = O.audit(records)
+    cur = O.curriculum(summary)
+    review = O.review(summary, flags,
+                      client=answer_client if planner_name == 'broker' else None)
+
+    orchestra_md = '\n'.join(
+        ['**지표 감사**: ' + ('깨끗함' if not flags else '')] +
+        ['- ⚠ ' + f for f in flags] +
+        ['', '**커리큘럼**: ' + cur['note']] +
+        (['', '**opus 총평**: ' + review] if review else []))
+    doc = R.report(run_id, orchestra=orchestra_md)
+
+    print('\n성공 %d/%d | 감사 %s | %s'
+          % (summary['success'], summary['n'],
+             '깨끗' if not flags else '⚠ %d건' % len(flags), cur['note']))
+    for f in flags:
+        print('  ⚠ %s' % f)
+    print('리포트: %s' % os.path.relpath(doc))
+    return run_id, summary, flags
+
+
+def main():
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('-n', type=int, default=6)
+    ap.add_argument('--kinds', default='look,reach')
+    ap.add_argument('--planner', choices=['oracle', 'broker'], default='oracle')
+    ap.add_argument('--url', default='http://127.0.0.1:8080')
+    ap.add_argument('--token')
+    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--tag', default='')
+    args = ap.parse_args()
+
+    run_batch(args.n, tuple(k.strip() for k in args.kinds.split(',')),
+              args.planner, args.url, args.token, args.seed, args.tag)
+
+
+if __name__ == '__main__':
+    main()

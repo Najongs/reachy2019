@@ -152,6 +152,54 @@ def generate(n=8, seed=0):
     return tasks
 
 
+def feasible(task, quick_steps=25):
+    """이 태스크에 '안전한 해가 존재하는가' 를 오라클 서보로 빠르게 확인.
+
+    이 로봇은 물리적으로 못 하는 게 많다(작은 컵 위에서 집기, 정중선 왼쪽,
+    좁은 작업영역). 못 푸는 태스크를 배치에 넣으면 opus 호출만 낭비되고
+    데이터도 실패 더미가 된다. 통과한 태스크만 채택한다.
+    """
+    import sim_agent as A
+
+    w = build_world(task)
+    try:
+        planner = A.OraclePlanner()
+        view = planner.perceive(w, task)
+        if not view.get('seen'):
+            return False
+        plan = planner.plan(w, task, view)
+        A.execute(w, plan)
+        ok = success_fn(task)(w)
+        clean = w.clearance(ignore=('table',))[0] > -0.5
+        return bool(ok and clean)
+    except Exception:
+        return False
+    finally:
+        w.close()
+
+
+def generate_feasible(n, seed=0, kinds=('look', 'reach'), max_tries=6):
+    """실현 가능한 태스크만 n 개. 유형은 kinds 를 순환."""
+    out = []
+    attempt = 0
+    # generate 는 look/point/reach/pick 을 순환하므로, 원하는 유형이 고루
+    # 나오게 한 번에 4개(한 순환)씩 만들어 거른다. 유형 균형은 라운드로빈.
+    want_idx = 0
+    while len(out) < n and attempt < n * max_tries:
+        batch = generate(4, seed=seed * 1000 + attempt)
+        wanted = kinds[want_idx % len(kinds)]
+        for t in batch:
+            if t['kind'] != wanted:
+                continue
+            if feasible(t):
+                t['id'] = 'task%02d_%s' % (len(out), t['kind'])
+                out.append(t)
+                want_idx += 1
+                break
+        attempt += 1
+    return out
+
+
 def build_world(task, **kw):
     """태스크의 scene 을 실제 World 로."""
     objs = [world.make_object(o['name'], o['kind'], tuple(o['xy']))
