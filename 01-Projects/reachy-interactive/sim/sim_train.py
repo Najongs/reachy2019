@@ -239,14 +239,14 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
                     'note': '프리셋으로 답했습니다 (고칠 대상 아님)',
                     'history': history}
 
-        raw = sim_eval.evaluate(moves)
+        raw = sim_eval.evaluate(moves, request=say)
         polished, info = (moves, {})
         if raw['ok']:
             # 구조는 그대로 두고 숫자만 다듬는다. opus 호출은 늘지 않는다.
             polished, info = sim_opt.optimize(
                 moves, iters=opt_iters, pop=opt_pop, workers=workers,
-                seed=attempt)
-        result = sim_eval.evaluate(polished)
+                seed=attempt, request=say)
+        result = sim_eval.evaluate(polished, request=say)
         moves = polished
 
         # 시연 안전: 실행기는 팔을 굵기 없는 중심선으로만 본다. 선분 대 선분에
@@ -262,22 +262,8 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
                 result['score'] = max(0, result['score']
                                       - (25 if safe['grade'] == '위험' else 10))
 
-        # 자세 품질: 궤적이 옳아도 그 안의 자세가 한계에 붙어 있거나 과하게
-        # 비틀려 있을 수 있다. 힘이 걸린 자세는 부자연스럽고 모터가 버틴다.
-        if result['ok']:
-            bad = sim_eval.posture_check(polished, say)
-            if bad:
-                result['findings'] = list(result['findings']) + bad
-                result['score'] = max(0, result['score'] - 10 * len(bad))
-
-        # 말과 몸이 따로 노는지: "마주쳐 볼게요" 라면서 두 손이 40cm 떨어진
-        # 채 끝나는 일이 있었다. 채점기는 역학만 보므로 100점을 줬다.
-        if result['ok']:
-            miss = sim_eval.intent_check(polished, say)
-            if miss:
-                result['findings'] = list(result['findings']) + [
-                    '요청과 동작이 어긋납니다: ' + miss + '.']
-                result['score'] = max(0, result['score'] - 30)
+        # 자세 검사와 의도 검사는 evaluate 안에서 이미 했다 - 탐색이
+        # 최적화하는 점수와 여기서 매기는 점수가 같아야 한다.
 
         # 새로움: 이미 가진 동작과 몸이 같으면 이름만 새것이다.
         if result['ok'] and library:

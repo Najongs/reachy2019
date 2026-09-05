@@ -289,20 +289,27 @@ def signature(moves):
 # 검사도 궤적이 다르니 통과시켰다. 요청이 기하학적으로 무엇을 요구하는지
 # 아는 몇 가지는, 그것이 실제로 일어났는지 직접 확인할 수 있다.
 INTENTS = [
-    (('박수', '손뼉', '짝짝', '하이파이브', '마주치', '마주쳐', '손을 모'),
+    (('박수', '손뼉', '짝짝', '하이파이브', '마주치', '마주쳐', '손을 모',
+      '두 손을 모', '팔짱', '가슴 앞으로 모', '앞에 모으'),
      'hands_meet', 0.22,
      '두 손이 %scm 까지밖에 안 가까워집니다. 몸 앞(x>=0.25)에서 중심선 '
      '12~15cm 까지 모았다 벌리기를 2~3회 왕복해야 그렇게 보입니다'),
-    (('얼굴을 가', '얼굴 가', '턱에', '입을 가', '눈을 가', '머리를 감싸'),
+    (('얼굴을 가', '얼굴 가', '턱에', '턱 괴', '턱을 괴', '입을 가', '눈을 가',
+      '머리를 감싸', '경례', '얼굴 옆', '머리 옆', '귀에', '이마에',
+      '관자놀이', '손을 머리'),
      'hand_to_head', 0.32,
      '손이 머리 중심에서 %scm 까지밖에 안 갑니다. 머리는 반지름 15cm 구로 '
      '보호되므로, 그 바깥 5cm(중심에서 20cm) 근처까지 올려야 가리는 것으로 '
      '보입니다'),
-    (('가리키', '가리켜', '앞으로 뻗', '내밀'),
+    (('가리키', '가리켜', '앞으로 뻗', '내밀', '건네', '악수'),
      'reach_forward', 0.30,
      '손이 몸 앞으로 %sm 밖에 안 나갑니다. 가리키는 동작은 팔을 뻗어 '
      'x 0.35 이상까지 나가야 읽힙니다'),
 ]
+
+
+_ELBOW_WORDS = ('알통', '팔꿈치를 접', '팔꿈치 접', '끝까지 접', '굽혀')
+_ELBOW_NEED = 70.0      # 이만큼은 접어야 '접었다' 로 보인다
 
 
 def intent_check(moves, request):
@@ -317,7 +324,14 @@ def intent_check(moves, request):
     sim = simulate(moves, hz=25, check_collision=False)
     if not sim['ok'] or not sim['samples']:
         return None
+    return _intent_from_samples(sim['samples'], request)
 
+
+def _intent_from_samples(samples, request):
+    """이미 뽑아 둔 궤적 표본으로 의도 검사. evaluate 안에서 쓴다."""
+    if not request or not samples:
+        return None
+    sim = {'samples': samples}
     compact = request.replace(' ', '')
     for keys, kind, need, template in INTENTS:
         if not any(k.replace(' ', '') in compact for k in keys):
@@ -337,6 +351,14 @@ def intent_check(moves, request):
                       for s in sim['samples'] for side in ('right_arm', 'left_arm'))
             if got < need:
                 return template % round(got, 2)
+
+    if any(w in compact for w in (w.replace(' ', '') for w in _ELBOW_WORDS)):
+        bent = max(abs(s['pose'].get(j, 0.0))
+                   for s in sim['samples']
+                   for j in ('right_arm.elbow_pitch', 'left_arm.elbow_pitch'))
+        if bent < _ELBOW_NEED:
+            return ('팔꿈치가 %.0f도밖에 안 접힙니다. 접는 동작으로 보이려면 '
+                    '%.0f도 이상 굽혀야 합니다' % (bent, _ELBOW_NEED))
     return None
 
 
@@ -427,12 +449,17 @@ def novelty(moves, library):
     return best, who
 
 
-def evaluate(moves, intent=None, fast=False):
+def evaluate(moves, intent=None, fast=False, request=None):
     """동작을 평가한다. dict(ok, score, metrics, findings).
 
     fast=True 는 탐색용이다. validate 의 충돌 검사를 끄고(같은 판정을 여기서
     직접 한다) 성기게 샘플링해 수십 배 빨라진다. 최종 채택 전에는 반드시
     fast=False 로 다시 확인한다 - 실물이 쓰는 검증기를 그대로 통과해야 한다.
+
+    request 를 주면 자세 검사와 의도 검사까지 이 점수에 넣는다. **탐색도 이
+    점수를 최적화해야 한다** - 안 그러면 탐색은 옛 점수를 올리고 뒤따르는
+    검사가 깎아 내려, 탐색이 도움이 아니라 해가 된다(실제로 54과제에서 평균
+    -9.9점이었다).
     """
     sim = simulate(moves, hz=FAST_HZ if fast else SAMPLE_HZ,
                    check_collision=not fast)
@@ -540,6 +567,17 @@ def evaluate(moves, intent=None, fast=False):
     # 길이도 점수에 넣는다. 안 그러면 '100점인데 지적 있음' 이 나와서
     # 어느 쪽을 믿어야 할지 알 수 없다.
     score -= min(15, max(0, metrics['duration_s'] - 12) * 2)
+
+    # 자세와 의도도 같은 점수 안에서 본다. 이미 뽑아 둔 표본을 재활용하므로
+    # 시뮬레이션을 다시 돌리지 않는다.
+    if request is not None:
+        for bad in posture_check(moves, request):
+            findings.append(bad)
+            score -= 10
+        miss = _intent_from_samples(samples, request)
+        if miss:
+            findings.append('요청과 동작이 어긋납니다: ' + miss + '.')
+            score -= 30
 
     return {'ok': True, 'score': int(max(0, round(score))),
             'metrics': metrics, 'findings': findings}

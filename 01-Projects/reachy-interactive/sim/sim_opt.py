@@ -79,8 +79,13 @@ def _clip(v, lo, hi):
 
 
 def optimize(moves, iters=12, pop=40, elite=8, seed=0, workers=None,
-             max_drift=MAX_DRIFT, verbose=False):
-    """CEM 으로 각도·시간을 다듬는다. (개선된 moves, 기록) 을 돌려준다."""
+             max_drift=MAX_DRIFT, verbose=False, request=None):
+    """CEM 으로 각도·시간을 다듬는다. (개선된 moves, 기록) 을 돌려준다.
+
+    request 를 주면 자세·의도 검사까지 포함한 점수를 최적화한다. **반드시
+    줘야 한다.** 안 주면 탐색은 역학 점수만 올리고, 그 뒤에 따라오는 자세·의도
+    검사가 깎아 내려 탐색이 오히려 해가 된다 - 54과제에서 평균 -9.9점이었다.
+    """
     rng = random.Random(seed)
 
     base_a, base_d, slots = _flatten(moves)
@@ -88,7 +93,7 @@ def optimize(moves, iters=12, pop=40, elite=8, seed=0, workers=None,
         return moves, {'reason': '다듬을 각도가 없습니다', 'curve': []}
 
     limits = _limits_for(slots)
-    start = sim_eval.evaluate(moves, fast=True)
+    start = sim_eval.evaluate(moves, fast=True, request=request)
     if not start['ok']:
         return moves, {'reason': '시작 동작이 이미 실행 불가입니다', 'curve': []}
 
@@ -120,10 +125,11 @@ def optimize(moves, iters=12, pop=40, elite=8, seed=0, workers=None,
                      for k in range(len(base_d))]
                 cands.append(_rebuild(moves, a, d, slots))
 
+            jobs = [(c, request) for c in cands]
             if pool is not None:
-                scored = pool.map(_score_one, cands)
+                scored = pool.map(_score_one, jobs)
             else:
-                scored = [_score_one(c) for c in cands]
+                scored = [_score_one(j) for j in jobs]
 
             ranked = sorted(zip(scored, range(len(cands))),
                             key=lambda x: -x[0])
@@ -153,7 +159,8 @@ def optimize(moves, iters=12, pop=40, elite=8, seed=0, workers=None,
             top_score, top_i = ranked[0]
             if top_score > best['score']:
                 best = {'score': top_score, 'moves': cands[top_i],
-                        'result': sim_eval.evaluate(cands[top_i], fast=True)}
+                        'result': sim_eval.evaluate(cands[top_i], fast=True,
+                                                    request=request)}
             curve.append(best['score'])
             if verbose:
                 print('    탐색 %2d회차: 최고 %d점 (이번 세대 %d점)'
@@ -164,7 +171,7 @@ def optimize(moves, iters=12, pop=40, elite=8, seed=0, workers=None,
             pool.join()
 
     # 채택 전에는 반드시 실물이 쓰는 검증기로 다시 본다.
-    final = sim_eval.evaluate(best['moves'])
+    final = sim_eval.evaluate(best['moves'], request=request)
     if not final['ok'] or final['score'] < start['score']:
         return moves, {'curve': curve, 'kept': False,
                        'reason': '정식 검증에서 원본보다 낫지 않았습니다',
@@ -175,8 +182,9 @@ def optimize(moves, iters=12, pop=40, elite=8, seed=0, workers=None,
                            'evaluations': iters * pop}
 
 
-def _score_one(moves):
-    r = sim_eval.evaluate(moves, fast=True)
+def _score_one(job):
+    moves, request = job
+    r = sim_eval.evaluate(moves, fast=True, request=request)
     return r['score'] if r['ok'] else 0
 
 
@@ -216,7 +224,7 @@ def main():
           % (name, args.iters, args.pop, args.iters * args.pop))
     t = time.time()
     out, info = optimize(moves, iters=args.iters, pop=args.pop,
-                         workers=args.workers, verbose=True)
+                         workers=args.workers, verbose=True, request=name)
     print('  %d점 -> %d점  (%.0f초)' % (info.get('from', 0), info.get('to', 0),
                                         time.time() - t))
     if not info.get('kept'):
