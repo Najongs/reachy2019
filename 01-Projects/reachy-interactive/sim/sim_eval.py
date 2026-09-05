@@ -282,6 +282,64 @@ def signature(moves):
     return out
 
 
+# 말과 몸이 따로 노는 것을 잡는다.
+#
+# "하이파이브! 힘차게 마주쳐 볼게요" 라고 말하면서 두 손이 40cm 떨어진 채로
+# 끝나는 일이 실제로 있었다. 채점기는 역학만 보므로 100점을 줬고, 새로움
+# 검사도 궤적이 다르니 통과시켰다. 요청이 기하학적으로 무엇을 요구하는지
+# 아는 몇 가지는, 그것이 실제로 일어났는지 직접 확인할 수 있다.
+INTENTS = [
+    (('박수', '손뼉', '짝짝', '하이파이브', '마주치', '마주쳐', '손을 모'),
+     'hands_meet', 0.22,
+     '두 손이 %scm 까지밖에 안 가까워집니다. 몸 앞(x>=0.25)에서 중심선 '
+     '12~15cm 까지 모았다 벌리기를 2~3회 왕복해야 그렇게 보입니다'),
+    (('얼굴을 가', '얼굴 가', '턱에', '입을 가', '눈을 가', '머리를 감싸'),
+     'hand_to_head', 0.32,
+     '손이 머리 중심에서 %scm 까지밖에 안 갑니다. 머리는 반지름 15cm 구로 '
+     '보호되므로, 그 바깥 5cm(중심에서 20cm) 근처까지 올려야 가리는 것으로 '
+     '보입니다'),
+    (('가리키', '가리켜', '앞으로 뻗', '내밀'),
+     'reach_forward', 0.30,
+     '손이 몸 앞으로 %sm 밖에 안 나갑니다. 가리키는 동작은 팔을 뻗어 '
+     'x 0.35 이상까지 나가야 읽힙니다'),
+]
+
+
+def intent_check(moves, request):
+    """요청이 요구하는 기하가 실제로 일어났나. 안 일어났으면 지적 문구.
+
+    아는 요청만 본다 - 모르는 요청에는 아무 말도 하지 않는다. 반쪽짜리라도
+    "말로는 마주친다면서 40cm 떨어져 있다" 를 잡는 것이 아무것도 안 보는
+    것보다 낫다.
+    """
+    if not request:
+        return None
+    sim = simulate(moves, hz=25, check_collision=False)
+    if not sim['ok'] or not sim['samples']:
+        return None
+
+    compact = request.replace(' ', '')
+    for keys, kind, need, template in INTENTS:
+        if not any(k.replace(' ', '') in compact for k in keys):
+            continue
+        if kind == 'hands_meet':
+            got = min(me._dist(s['hands']['right_arm'], s['hands']['left_arm'])
+                      for s in sim['samples'])
+            if got > need:
+                return template % round(got * 100)
+        elif kind == 'hand_to_head':
+            got = min(me._dist(s['hands'][side], me.HEAD_SPHERE_CENTER)
+                      for s in sim['samples'] for side in ('right_arm', 'left_arm'))
+            if got > need:
+                return template % round(got * 100)
+        elif kind == 'reach_forward':
+            got = max(s['hands'][side][0]
+                      for s in sim['samples'] for side in ('right_arm', 'left_arm'))
+            if got < need:
+                return template % round(got, 2)
+    return None
+
+
 def novelty(moves, library):
     """이미 있는 동작들과 얼마나 다른가. (가장 가까운 것과의 거리 m, 이름).
 

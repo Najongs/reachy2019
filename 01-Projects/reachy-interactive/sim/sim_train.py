@@ -101,6 +101,9 @@ LESSON_MAP = [
     ('이름만 다른 같은 동작',
      '이미 있는 동작과 몸이 똑같다 - 쓰는 관절·방향·리듬 중 하나는 확실히 '
      '다르게 하라'),
+    ('요청과 동작이 어긋납니다',
+     '말로는 하겠다면서 몸은 그렇게 움직이지 않는다 - 요청이 두 손을 모으는 '
+     '것이면 실제로 모아라'),
 ]
 
 
@@ -254,6 +257,15 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
                     % (safe['grade'], sim_safety.describe(safe)[5:110])]
                 result['score'] = max(0, result['score']
                                       - (25 if safe['grade'] == '위험' else 10))
+
+        # 말과 몸이 따로 노는지: "마주쳐 볼게요" 라면서 두 손이 40cm 떨어진
+        # 채 끝나는 일이 있었다. 채점기는 역학만 보므로 100점을 줬다.
+        if result['ok']:
+            miss = sim_eval.intent_check(polished, say)
+            if miss:
+                result['findings'] = list(result['findings']) + [
+                    '요청과 동작이 어긋납니다: ' + miss + '.']
+                result['score'] = max(0, result['score'] - 30)
 
         # 새로움: 이미 가진 동작과 몸이 같으면 이름만 새것이다.
         if result['ok'] and library:
