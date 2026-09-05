@@ -403,10 +403,12 @@ def main():
     ap.add_argument('--session', default='sim-train',
                     help='opus 대화 세션. 같은 세션이면 앞 과제의 지적을 기억한다')
     ap.add_argument('--keep-images', help='시도마다의 궤적 그림도 남긴다')
+    ap.add_argument('--video', action='store_true',
+                    help='과제마다 초안/최종 비교 영상도 만든다 (편당 1~2분, 느림)')
     ap.add_argument('--gallery', metavar='DIR',
                     default=os.path.join(CONFIG, '..', 'sim_gallery'),
-                    help='과제별 before/after 와 진행 그래프를 남길 폴더 '
-                         "('off' 로 끔)")
+                    help='과제별 before/after 와 진행 그래프를 남길 폴더. '
+                         "실행 시각으로 하위 폴더를 만든다 ('off' 로 끔)")
     ap.add_argument('--opt-iters', type=int, default=10,
                     help='초안 하나를 탐색으로 몇 세대 다듬을지 (0=끔)')
     ap.add_argument('--opt-pop', type=int, default=40,
@@ -429,9 +431,13 @@ def main():
 
     if args.keep_images:
         os.makedirs(args.keep_images, exist_ok=True)
-    gallery = None if args.gallery in (None, 'off') else args.gallery
+    # 실행마다 시각으로 하위 폴더를 만든다. 한 폴더에 쌓으면 다음 실행이
+    # 같은 번호(01-, 02-...)로 덮어써서 지난 결과가 사라진다.
+    gallery = None if args.gallery in (None, 'off') else os.path.join(
+        args.gallery, time.strftime('%Y%m%d-%H%M'))
     if gallery:
         os.makedirs(gallery, exist_ok=True)
+        print('그림 저장 폴더: %s' % os.path.normpath(gallery))
 
     if args.tasks:
         with open(args.tasks, encoding='utf-8') as fh:
@@ -479,6 +485,20 @@ def main():
         if r.get('error'):
             print('    %s' % r['error'])
         results.append(r)
+        if gallery and args.video and r.get('moves') and r.get('first_moves'):
+            # 영상은 느리다(비교 한 편에 1~2분). 그래서 기본은 꺼 두고,
+            # 정말 눈으로 봐야 할 때만 --video 로 켠다.
+            try:
+                import sim_video
+                sim_video.render_video(
+                    [r['first_moves'], r['moves']],
+                    os.path.join(gallery, '%02d-%s.mp4' % (i, _slug(task['say']))),
+                    labels=['draft %d' % r['first_score'],
+                            'final %d' % r['best_score']],
+                    header=sim_video._ascii(task['say']))
+            except Exception:
+                logging.getLogger(__name__).debug('영상 실패', exc_info=True)
+
         if gallery and r.get('moves') and r.get('first_moves'):
             try:
                 sim_eval.render_pair(
