@@ -43,3 +43,4 @@ dist/
 **/sim_results.json
 **/sim_commands.json
 **/sim_lessons.json
+**/sim_gallery/
