@@ -340,6 +340,72 @@ def intent_check(moves, request):
     return None
 
 
+# 자세 자체의 품질. 궤적이 옳아도 그 안의 자세가 부자연스러울 수 있다.
+#
+# 주의: 보간된 궤적이 아니라 **모델이 적은 키프레임 값**만 본다. 궤적을 보면
+# 모든 동작이 '한계 여유 0도' 로 나오는데, 휴식 자세의 elbow_pitch=0 이 그
+# 관절의 한계값이기 때문이다 - 몸통 상자 때와 같은 착시다.
+LIMIT_MARGIN_DEG = 5.0     # 한계에 이보다 붙으면 힘이 걸린 자세다
+TWIST_MAX_DEG = 70.0       # 상완/전완 비틀기가 이보다 크면 부자연스럽고 배선에 무리
+SYMMETRY_TOL_DEG = 12.0    # 좌우 대칭을 요구한 동작의 허용 오차
+
+# 좌우로 짝이 되는 관절. shoulder_roll 은 부호가 반대다(바깥쪽이 서로 반대 방향).
+_MIRROR = [('shoulder_pitch', 1), ('shoulder_roll', -1), ('arm_yaw', -1),
+           ('elbow_pitch', 1), ('hand.forearm_yaw', -1), ('hand.wrist_pitch', 1)]
+# '양팔' 같은 말은 '둘 다 쓴다' 는 뜻이지 '똑같이 움직인다' 는 뜻이 아니다.
+# 그 말만 보고 대칭을 요구하면 지휘하기·저울처럼 번갈아 들기처럼 원래 좌우가
+# 달라야 하는 동작을 잘못 지적한다(실제로 그랬다). 대칭을 명시한 말만 본다.
+_SYMMETRY_WORDS = ('나란히', '대칭', '동시에', '똑같이', '같은 속도',
+                   '양쪽 다 같', '좌우 같')
+
+
+def posture_check(moves, request=None):
+    """자세 품질 문제들. 없으면 빈 리스트."""
+    out = []
+
+    tight, twist = [], []
+    for frame in moves:
+        for joint, value in (frame.get('pose') or {}).items():
+            if joint not in me.ALL_LIMITS or abs(value) < 1e-9:
+                continue                    # 휴식값은 한계 판정에서 뺀다
+            lo, hi = me.ALL_LIMITS[joint]
+            margin = min(value - lo, hi - value)
+            if margin < LIMIT_MARGIN_DEG:
+                tight.append((joint, value, round(margin, 1)))
+            if joint.endswith(('arm_yaw', 'forearm_yaw')) and abs(value) > TWIST_MAX_DEG:
+                twist.append((joint, value))
+
+    if tight:
+        j, v, m = min(tight, key=lambda t: t[2])
+        out.append('관절이 한계에 붙어 있습니다 (%s=%g도, 여유 %g도). 힘이 걸린 '
+                   '자세는 부자연스럽고 모터가 버팁니다 - %g도 정도 물러나세요.'
+                   % (j, v, m, LIMIT_MARGIN_DEG * 2))
+    if twist:
+        j, v = max(twist, key=lambda t: abs(t[1]))
+        out.append('비틀기가 과합니다 (%s=%g도). %g도 넘게 비틀면 사람 팔로는 '
+                   '안 나오는 모양이고 배선에도 무리입니다.'
+                   % (j, v, TWIST_MAX_DEG))
+
+    # 좌우 대칭을 요구한 동작만 대칭을 본다
+    if request and any(w in request for w in _SYMMETRY_WORDS):
+        worst = None
+        for frame in moves:
+            pose = frame.get('pose') or {}
+            for suffix, sign in _MIRROR:
+                r = pose.get('right_arm.' + suffix)
+                l = pose.get('left_arm.' + suffix)
+                if r is None or l is None:
+                    continue
+                gap = abs(r - sign * l)
+                if gap > SYMMETRY_TOL_DEG and (worst is None or gap > worst[1]):
+                    worst = (suffix, round(gap, 1), r, l)
+        if worst:
+            out.append('양팔을 쓰라고 했는데 좌우가 %g도 어긋납니다 '
+                       '(%s: 오른쪽 %g / 왼쪽 %g). 대칭이 아니면 한쪽이 '
+                       '삐뚤어 보입니다.' % (worst[1], worst[0], worst[2], worst[3]))
+    return out
+
+
 def novelty(moves, library):
     """이미 있는 동작들과 얼마나 다른가. (가장 가까운 것과의 거리 m, 이름).
 

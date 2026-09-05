@@ -104,6 +104,10 @@ LESSON_MAP = [
     ('요청과 동작이 어긋납니다',
      '말로는 하겠다면서 몸은 그렇게 움직이지 않는다 - 요청이 두 손을 모으는 '
      '것이면 실제로 모아라'),
+    ('관절이 한계에 붙어',
+     '관절을 한계까지 밀어 쓴다 - 한계에서 10도쯤은 물러나 여유를 둬라'),
+    ('비틀기가 과합니다',
+     '상완/전완 비틀기를 70도 넘게 쓴다 - 사람 팔로는 안 나오는 모양이다'),
 ]
 
 
@@ -257,6 +261,14 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
                     % (safe['grade'], sim_safety.describe(safe)[5:110])]
                 result['score'] = max(0, result['score']
                                       - (25 if safe['grade'] == '위험' else 10))
+
+        # 자세 품질: 궤적이 옳아도 그 안의 자세가 한계에 붙어 있거나 과하게
+        # 비틀려 있을 수 있다. 힘이 걸린 자세는 부자연스럽고 모터가 버틴다.
+        if result['ok']:
+            bad = sim_eval.posture_check(polished, say)
+            if bad:
+                result['findings'] = list(result['findings']) + bad
+                result['score'] = max(0, result['score'] - 10 * len(bad))
 
         # 말과 몸이 따로 노는지: "마주쳐 볼게요" 라면서 두 손이 40cm 떨어진
         # 채 끝나는 일이 있었다. 채점기는 역학만 보므로 100점을 줬다.
