@@ -147,9 +147,13 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False):
     scene_xml = []
     if scene:
         scene_xml = [
-            '    <geom name="table" type="box" material="wood" contype="0" '
+            # 컵과 테이블은 충돌군 8 로 둔다. 오른팔(conaffinity 6=군2,3)은
+            # 이걸 안 보지만, sim_pick 이 손 지오메트리와의 거리로 '옆에서
+            # 뚫고 들어갔나' 를 직접 검사한다(팔 자동충돌은 캡슐이 맡음).
+            # 쟁반은 얇아 접근을 방해하지 않으므로 표시용(contype 0)으로 둔다.
+            '    <geom name="table" type="box" material="wood" contype="8" '
             'conaffinity="0" pos="0.37 0 -0.285" size="0.19 0.35 0.015"/>',
-            '    <geom name="cup" type="cylinder" material="cup" contype="0" '
+            '    <geom name="cup" type="cylinder" material="cup" contype="8" '
             'conaffinity="0" pos="0.31 -0.14 -0.225" size="0.03 0.045"/>',
             '    <geom name="tray" type="box" material="tray" contype="0" '
             'conaffinity="0" pos="0.30 0.14 -0.265" size="0.06 0.05 0.005"/>',

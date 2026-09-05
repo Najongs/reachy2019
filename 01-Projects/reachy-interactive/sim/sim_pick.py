@@ -79,6 +79,54 @@ class PickWorld(object):
         sm._set_pose(self.data, self.idx, self.pose)
         self.mujoco.mj_forward(self.model, self.data)
 
+    def search(self, label='look for the cup', sweep=(-40, 40), steps=9):
+        """팔은 그대로 두고 시선만 좌우로 훑어 컵을 화면에 담는다.
+
+        실물 순서 그대로다: 먼저 눈(목)으로 물체를 찾고 시선을 두고, 그 다음에
+        팔이 움직인다. 바로 팔부터 뻗으면 아직 어디 있는지 모르는 것을 향해
+        움직이는 셈이다. 시야각(fovy 58도) 안에 컵이 들어오면 거기서 멈춘다.
+        """
+        cup = self.cup
+        for k in range(steps):
+            # 시선을 좌우로 쓸며 훑는다. 실물은 이때 SSD 가 매 프레임 돈다.
+            # 책상 위 물건은 눈보다 훨씬 아래(z≈-0.22)에 있으므로, 훑는 시선도
+            # 책상 높이를 향하게 한다(z 방향을 낮춰). 여기가 실측이라 값이
+            # 아니라 '책상 표면을 겨눈다' 로 두는 게 안전하다.
+            frac = k / (steps - 1)
+            pan = sweep[0] + (sweep[1] - sweep[0]) * frac
+            y = 0.5 * math.tan(math.radians(pan))
+            sm.set_gaze(self.pose, y, TABLE_TOP - 0.08)   # 책상보다 더 아래로 겨눔
+            sm._set_pose(self.data, self.idx, self.pose)
+            self.mujoco.mj_forward(self.model, self.data)
+            self.snap('%s' % label)
+            px = sv.pixel_of(self.model, self.data, self.mujoco, 'robot_eye',
+                             cup, self.width, self.height)
+            # 화면 안(가장자리 5% 여백)에 컵이 들어오면 찾은 것.
+            if px is not None and 0.05 * self.width < px[0] < 0.95 * self.width \
+                    and 0.05 * self.height < px[1] < 0.95 * self.height:
+                self.hold('found it', n=4)       # 시선을 컵에 고정하고 응시
+                return True
+        return False
+
+    def penetrating(self):
+        """손이 컵/테이블 안으로 파고들었나 - 옆에서 뚫고 들어가면 True.
+
+        서보가 화면 오차만 보면 컵을 '투과' 해 곧장 중심으로 갈 수 있다.
+        실물에서는 그러면 컵을 쳐서 넘어뜨린다. 손끝-컵중심 수평거리가 컵
+        반지름보다 작은데 손이 컵 높이 안에 있으면(위에서 잡으러 내려온 게
+        아니라 옆구리로 들어온 것) 투과로 본다.
+        """
+        hx, hy, hz = self.hand()
+        cx, cy, cz = self.cup
+        horiz = math.hypot(hx - cx, hy - cy)
+        cup_r, cup_top = 0.03, cz + 0.045
+        # 손이 컵 옆면 안(수평 반지름 안 + 컵 몸통 높이)에 들어와 있으면 투과.
+        if horiz < cup_r + 0.02 and cz - 0.045 < hz < cup_top - 0.01:
+            return 'cup'
+        if hz < TABLE_TOP + 0.01 and 0.18 < hx < 0.56 and abs(hy) < 0.35:
+            return 'table'
+        return None
+
     def grip(self):
         """집기 판정. 실물에서는 hand.close() 의 힘센서 판정이 이 자리다."""
         d = me._dist(self.hand(), self.cup) * 100
@@ -126,8 +174,12 @@ class PickWorld(object):
     # -- 서보 한 구간 -------------------------------------------------------
 
     def servo_to(self, target, label, steps=40, done_cm=3.0, noise_px=2.0,
-                 seed=0):
-        """화면 오차로 손을 target 까지. sim_servo 와 같은 방식."""
+                 seed=0, stop_on_hit=False):
+        """화면 오차로 손을 target 까지. sim_servo 와 같은 방식.
+
+        stop_on_hit 이면 컵/테이블을 파고드는 순간 멈춘다 - 위에서 하강할 때
+        컵에 닿으면 거기서 집으면 되기 때문이다.
+        """
         import numpy as np
 
         rng = np.random.RandomState(seed)
@@ -168,6 +220,8 @@ class PickWorld(object):
             self.snap('%s  %.1fcm' % (label, d), look=target)
             if d <= done_cm:
                 return True
+            if stop_on_hit and self.penetrating():
+                return True                     # 컵에 닿았다 - 여기서 집는다
             err = err_of({})
             base = err_of({}, measured=False)
             if err is None or base is None:
@@ -203,15 +257,26 @@ def run(cup_xy=(0.31, -0.14), noise_px=2.0, record=None):
     log = []
 
     cup = w.cup
-    above_cup = (cup[0], cup[1], cup[2] + 0.10)
-    grasp_at = (cup[0], cup[1], cup[2] + 0.02)
-    above_tray = (TRAY[0], TRAY[1] - 0.02, TRAY[2] + CUP_H / 2 + 0.10)
+    # 접근은 반드시 컵 '위' 를 경유한다. 컵 옆으로 곧장 가면 컵을 쳐서
+    # 넘어뜨린다(투과). 위에서 수직으로 내려와 집는다.
+    above_cup = (cup[0], cup[1], cup[2] + 0.13)
+    grasp_at = (cup[0], cup[1], cup[2] + 0.04)
+    above_tray = (TRAY[0], TRAY[1] - 0.02, TRAY[2] + CUP_H / 2 + 0.12)
     place_at = (TRAY[0], TRAY[1] - 0.02, TRAY[2] + CUP_H / 2 + 0.03)
 
-    ok1 = w.servo_to(above_cup, 'approach', noise_px=noise_px, seed=1)
-    log.append(('상공 접근', ok1, me._dist(w.hand(), above_cup) * 100))
-    ok2 = w.servo_to(grasp_at, 'descend', done_cm=2.5, noise_px=noise_px, seed=2)
-    log.append(('하강', ok2, me._dist(w.hand(), grasp_at) * 100))
+    # 0) 팔을 움직이기 전에 눈으로 먼저 컵을 찾는다.
+    seen = w.search()
+    log.append(('눈으로 컵 찾기', seen, 0.0))
+
+    ok1 = w.servo_to(above_cup, 'approach', done_cm=3.0, noise_px=noise_px, seed=1)
+    log.append(('컵 상공(위)', ok1, me._dist(w.hand(), above_cup) * 100))
+    # 하강 중 컵/테이블을 파고들면 즉시 멈춘다.
+    ok2 = w.servo_to(grasp_at, 'descend', done_cm=2.5, noise_px=noise_px, seed=2,
+                     stop_on_hit=True)
+    log.append(('수직 하강', ok2, me._dist(w.hand(), grasp_at) * 100))
+    hit = w.penetrating()
+    if hit:
+        log.append(('투과 감지: %s 를 침범 - 중단' % hit, False, 0.0))
 
     d = w.grip()
     log.append(('집기 (손끝-컵 %.1fcm, 기준 %.0fcm)' % (d, GRIP_CM),
