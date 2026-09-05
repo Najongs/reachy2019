@@ -262,6 +262,45 @@ def _path_stats(samples, side):
 
 
 FAST_HZ = 10        # 탐색용 샘플링. 채점 순위가 뒤집히지 않을 만큼만 성기게
+SIGNATURE_POINTS = 24   # 궤적을 이만큼의 점으로 요약해 서로 비교한다
+
+
+def signature(moves):
+    """이 동작의 손끝 궤적 요약. 두 동작이 같은 것인지 비교하는 데 쓴다.
+
+    시간 길이가 달라도 비교되도록 일정 개수로 다시 뽑는다. 양손을 이어 붙여
+    한쪽만 움직이는 동작도 구분된다.
+    """
+    sim = simulate(moves, hz=20, check_collision=False)
+    if not sim['ok'] or not sim['samples']:
+        return None
+    out = []
+    for side in ('right_arm', 'left_arm'):
+        pts = [s['hands'][side] for s in sim['samples']]
+        for k in range(SIGNATURE_POINTS):
+            out.append(pts[int(k * (len(pts) - 1) / (SIGNATURE_POINTS - 1))])
+    return out
+
+
+def novelty(moves, library):
+    """이미 있는 동작들과 얼마나 다른가. (가장 가까운 것과의 거리 m, 이름).
+
+    없으면 (무한대, None). 채점기가 포화되면 - 만드는 것마다 100점이면 -
+    남은 구분은 '이미 있는 것과 다른가' 뿐이다. 실제로 "가위바위보 내밀듯이"
+    와 "물건 건네주는 시늉" 이 손끝 기준 1.5cm 차이로 나온 적이 있다.
+    """
+    mine = signature(moves)
+    if mine is None:
+        return 0.0, None
+    best, who = float('inf'), None
+    for name, other in library:
+        if other is None or len(other) != len(mine):
+            continue
+        d = sum(math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
+                for a, b in zip(mine, other)) / len(mine)
+        if d < best:
+            best, who = d, name
+    return best, who
 
 
 def evaluate(moves, intent=None, fast=False):

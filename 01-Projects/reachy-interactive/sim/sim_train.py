@@ -38,6 +38,33 @@ import sim_opt                                   # noqa: E402
 import sim_safety                                # noqa: E402
 
 SAFETY_HZ = 40      # 학습 중 안전 감사 표본율. 확인용이라 100Hz 까지는 필요 없다
+NOVEL_CM = 8.0      # 이미 있는 동작과 손끝 기준 이만큼도 안 다르면 같은 것으로 본다
+
+
+def build_library():
+    """이미 가진 동작들의 궤적 요약. 새로 만든 것이 이것들과 겹치는지 본다.
+
+    채점기가 포화되면 - 만드는 것마다 100점이면 - 남은 구분은 '이미 있는 것과
+    다른가' 뿐이다. 실제로 20개를 만들었더니 뒤쪽 10개 중 8개가 앞쪽과 거의
+    같은 궤적이었다("물건 건네주는 시늉" 과 "가위바위보 내밀듯이" 가 손끝
+    기준 1.3cm 차이). 이름만 다르고 몸은 같은 동작이 쌓이면 시연이 지루해진다.
+    """
+    lib = []
+    try:
+        from motion_presets import PRESETS
+        for name in PRESETS:
+            lib.append((name, sim_eval.signature(PRESETS[name]['moves'])))
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(CONFIG, 'motion_candidates.json'),
+                  encoding='utf-8') as fh:
+            for c in json.load(fh):
+                lib.append((c.get('idea', '후보')[:26],
+                            sim_eval.signature(c['moves'])))
+    except Exception:
+        pass
+    return [(n, sig) for n, sig in lib if sig]
 
 CONFIG = os.path.join(HERE, '..', 'config')
 GOOD_SCORE = 90          # 이 점수를 넘고 지적이 없으면 그만 고친다
@@ -64,6 +91,9 @@ LESSON_MAP = [
     ('시연 안전',
      '팔이 몸통·머리·반대 팔에 너무 붙는다 - 검증기는 팔 두께를 안 보므로 '
      '중심선 기준으로 10cm 이상 띄워라'),
+    ('이름만 다른 같은 동작',
+     '이미 있는 동작과 몸이 똑같다 - 쓰는 관절·방향·리듬 중 하나는 확실히 '
+     '다르게 하라'),
 ]
 
 
@@ -156,7 +186,7 @@ CRITIQUE = """방금 네가 설계한 동작을 시뮬레이터에서 실제로 
 
 
 def improve(task, url, token, session, fix_rounds, keep_images=None,
-            lessons=None, opt_iters=10, opt_pop=40, workers=8):
+            lessons=None, opt_iters=10, opt_pop=40, workers=8, library=None):
     """한 과제를 설계하고, 탐색으로 다듬고, 남은 지적은 다시 설계시킨다.
 
     역할이 셋이다:
@@ -216,6 +246,17 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
                     % (safe['grade'], sim_safety.describe(safe)[5:110])]
                 result['score'] = max(0, result['score']
                                       - (25 if safe['grade'] == '위험' else 10))
+
+        # 새로움: 이미 가진 동작과 몸이 같으면 이름만 새것이다.
+        if result['ok'] and library:
+            dist, who = sim_eval.novelty(polished, library)
+            result['novelty_cm'] = round(dist * 100, 1)
+            if dist * 100 < NOVEL_CM:
+                result['findings'] = list(result['findings']) + [
+                    '이미 있는 "%s" 와 손끝 궤적이 %.1fcm 밖에 다르지 않습니다. '
+                    '이름만 다른 같은 동작입니다 - 쓰는 관절이나 방향, 리듬을 '
+                    '바꿔 확실히 다른 동작으로 만들어라.' % (who, dist * 100)]
+                result['score'] = max(0, result['score'] - 20)
 
         history.append({'attempt': attempt,
                         'score_raw': raw['score'],
@@ -349,6 +390,8 @@ def main():
                     help='탐색에 쓸 CPU 프로세스 수')
     ap.add_argument('--no-lessons', action='store_true',
                     help='되풀이된 지적을 다음 설계에 알려 주지 않는다')
+    ap.add_argument('--no-novelty', action='store_true',
+                    help='이미 있는 동작과 겹치는지 보지 않는다')
     ap.add_argument('--report', metavar='FILE', nargs='?',
                     const=os.path.join(CONFIG, 'sim_results.json'),
                     help='지난 기록을 되짚어 보기만 한다 (새로 돌리지 않음)')
@@ -375,6 +418,10 @@ def main():
           % (len(tasks), args.fix_rounds + 1,
              len(tasks) * (args.fix_rounds + 1)))
 
+    library = None if args.no_novelty else build_library()
+    if library:
+        print('이미 가진 동작 %d개와 겹치는지 함께 봅니다' % len(library))
+
     lessons = None if args.no_lessons else load_lessons()
     if lessons:
         known = sum(1 for v in lessons.values() if v['n'] >= LESSON_MIN)
@@ -388,7 +435,13 @@ def main():
             r = improve(task, args.url, args.token, args.session,
                         args.fix_rounds, args.keep_images, lessons=lessons,
                         opt_iters=args.opt_iters, opt_pop=args.opt_pop,
-                        workers=args.workers)
+                        workers=args.workers, library=library)
+            # 방금 만든 것도 다음 과제의 비교 대상이 된다 - 한 번의 실행
+            # 안에서도 같은 동작이 되풀이되지 않게.
+            if library is not None and r.get('moves'):
+                sig = sim_eval.signature(r['moves'])
+                if sig:
+                    library.append((task['say'][:26], sig))
         except KeyboardInterrupt:
             print('\n중단합니다.')
             break
