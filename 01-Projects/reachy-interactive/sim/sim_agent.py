@@ -439,8 +439,15 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
             for k in range(1, 6):
                 u = k / 5.0
                 wgt = u * u * (3 - 2 * u)
+                saved_bk = dict(world.pose)
                 world.set_arm({j: cur_pose[j] + (via[j] - cur_pose[j])
                                * 0.35 * wgt for j in via})
+                # 백오프 호가 대상을 긁으면 그 스텝은 물리고 그냥 멈춘다
+                # (물러나다 물체를 관통하는 게 최악이다).
+                if (target_name
+                        and world.clearance_of(target_name) <= -0.4):
+                    world.set_arm(saved_bk)
+                    return me._dist(world.hand(), target) * 100 <= done_cm
                 world.nudge_gaze(target, BEHAVIOR['gaze_step_deg'])
                 if trace is not None:
                     trace.append(_trace_entry(world, target, target_name))
@@ -490,7 +497,8 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
             return True                       # 물체에 닿기 직전 - 여기서 멈춘다
         if (target_stop is not None and target_name
                 and world.clearance_of(target_name) <= target_stop):
-            return True                       # 대상 접촉 달성 (스텝 유지)
+            world.set_arm(saved)              # 넘어선 스텝은 되돌리고 멈춤
+            return True
         if tab < table_min:
             half = {j: saved[j] + (trial[j] - saved[j]) * 0.4 for j in trial}
             world.set_arm(half)
@@ -545,6 +553,7 @@ def _retreat(world, frames=None, trace=None, target_name=None):
     # 이탈 목표가 화면 밖이면 무동작이 된다.
     # 접기 전에 가드 있는 서보로 수직 이탈 - 방금 놓은 물체 위 안전
     # 고도까지. (접힘 보간은 개루프라 물체를 감지하지 못한다.)
+    _set_gripper(world, 0.0)               # 그리퍼는 중립으로 닫고 복귀
     h = world.hand()
     # 위로만 빼면 이어지는 스윙 호가 물체 위치에 따라 물체를 지난다 -
     # 몸쪽으로 당기며 올려 호 전체를 물체에서 떼어낸다.
@@ -643,6 +652,7 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
                    steps=15, ignore_objs=(bind,), on_step=follow,
                    carried=True, step_cap=4.0, frames=frames,
                    note='내려놓기', trace=trace, target_name=bind, seed=8)
+            _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
             world.move_object(bind, start)
             if frames is not None:
                 frames.append(_snap(world, '내려놓음'))
@@ -695,6 +705,19 @@ def _reaim(world, guess, kind=None, frames=None, note='re-aim',
     return (pt, det['kind']) if want_kind else pt
 
 
+GRIP_OPEN = 0.032       # 손가락 벌림 (m) - 안쪽 간격 ~8.4cm
+
+
+def _set_gripper(world, v, frames=None, note=None, steps=3):
+    """그리퍼를 v(m) 로 - 몇 스텝에 나눠 영상에 여닫힘이 보이게."""
+    cur = world.pose.get('right_arm.gripper_l', 0.0)
+    for k in range(1, steps + 1):
+        g = cur + (v - cur) * k / steps
+        world.set_arm({'right_arm.gripper_l': g, 'right_arm.gripper_r': g})
+        if frames is not None and note:
+            frames.append(_snap(world, note))
+
+
 def _grasp(world, obj=None, point=None, frames=None, trace=None):
     """접근 -> 재조준 -> 저속 접촉 잡기. (bind, half, 성공여부) 반환.
 
@@ -706,16 +729,23 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
     def _half_of(name):
         for o in world.objects:
             if o['name'] == name:
-                return {'cylinder': o['size'][1], 'sphere': o['size'][0],
-                        'box': o['size'][-1]}.get(o['type'], 0.03)
+                if o['type'] == 'cylinder':
+                    return o['size'][1]
+                if o['type'] == 'sphere':
+                    return o['size'][0]
+                return o['size'][-1]
         return 0.03
 
     # 예비점은 '윗면' 기준이어야 한다. 중심+10cm 고정이면 병처럼 키 큰
     # 물체는 예비점이 꼭대기 바로 위라 손 캡슐이 이미 관통한다.
     half = _half_of(bind) if bind else 0.06
+    # 그리퍼는 접근 '전에' 벌린다 - 닫힌 손가락으로 내려가면 손끝이 이미
+    # 물체 실루엣 안에 든 채 벌어지며 옆면을 관통한다 (병에서 실측 -1.9).
+    _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
     pre = (cup[0], cup[1], cup[2] + half + 0.075)
-    _servo(world, pre, 5.0, obj_stop=1.5, steps=25, frames=frames,
-           note='pre-top', trace=trace, target_name=bind, seed=1)
+    _servo(world, pre, 5.0, obj_stop=1.5, steps=25, target_stop=-0.5,
+           frames=frames, note='pre-top', trace=trace, target_name=bind,
+           seed=1)
     if bind is None:
         # 브로커 경로: 접지 추정은 몇 cm 틀릴 수 있다 - 가까이서 다시
         # 보고 정제한다 (참값이 아니라 카메라 재검출).
@@ -723,18 +753,32 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
         bind = min(world.movable_objects(),
                    key=lambda n: me._dist(world.object_pos(n), cup))
         half = _half_of(bind)
-    _servo(world, (cup[0], cup[1], cup[2] + half), 2.0, steps=30,
-           obj_stop=1.0, ignore_objs=(bind,), target_stop=0.5,
+    # 그리퍼를 벌리고 내려간다 - 손가락 사이에 물체가 들어오게 손바닥이
+    # 물체 윗면 근처까지. 그 다음 손가락을 단계적으로 조여 접촉에서 멈춘다
+    # (실물 force gripper 가 힘 센서로 멈추는 것의 기하 근사).
+    # 하강 깊이는 손바닥 위치로 정한다 (자기 손 = 고유수용감각).
+    # target_stop(대상 여유)으로 멈추면 굵은 물체는 손가락이 옆을 스치는
+    # 순간 일찍 멈춰, 손가락이 물체 '위' 허공에서 닫힌다 (캔·블록 실패).
+    # target_stop=-0.5: 기울어진 손가락이 옆면을 긁기 시작하면(경미한
+    # 관통) 즉시 멈춘다 - 판정 한도(-1cm) 안에서 끊는 안전 정지.
+    # 주의: 키 큰 물체(병)는 이 팔 기하에서 전완이 기대는 경우가 있다
+    # (-1.9cm, 깊이와 무관 실측) - 판정이 충돌로 벌점하고, 회피 자세는
+    # 경유 학습의 몫이다. 파지 깊이를 얕추면 작은 물체를 놓친다.
+    _servo(world, (cup[0], cup[1], cup[2] + half + 0.030), 1.2, steps=30,
+           obj_stop=1.0, ignore_objs=(bind,), target_stop=-0.5,
            step_cap=2.5, frames=frames, note='descend', trace=trace,
            target_name=bind, seed=2)
 
-    grabbed = world.clearance_of(bind) <= 0.9
-    orig = world.object_pos(bind)          # 스냅 '전' 원위치 (되돌려 놓기용)
-    if grabbed:
-        # 시각적 결착: 물체를 손 바로 밑으로 - '쥐었다' 가 보이게.
-        # (시뮬엔 손가락이 없어 그립 닫힘의 근사다. 대상 겹침은 허용.)
-        h = world.hand()
-        world.move_object(bind, (h[0], h[1], h[2] - half - 0.015))
+    orig = world.object_pos(bind)          # 원위치 (되돌려 놓기용)
+    g = GRIP_OPEN
+    for _ in range(10):
+        if world.clearance_of(bind) <= 0.15 or g <= 0.002:
+            break
+        g = max(0.002, g - 0.005)
+        world.set_arm({'right_arm.gripper_l': g, 'right_arm.gripper_r': g})
+        if frames is not None:
+            frames.append(_snap(world, '그리퍼 조임'))
+    grabbed = world.clearance_of(bind) <= 0.5
     if frames is not None:
         frames.append(_snap(world, '잡기 %s' % ('성공' if grabbed else '실패')))
     return bind, half, grabbed, orig
@@ -802,6 +846,7 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
                ignore_objs=(bind,), on_step=follow, carried=True,
                frames=frames, note='over-rim', trace=trace,
                target_name=bind, seed=6)
+        _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
         if frames is not None:
             frames.append(_snap(world, 'drop'))
         # 바구니 바닥 위에 안착 (떠 있지 않게).
@@ -809,6 +854,7 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
         world.move_object(bind, (dest[0], dest[1], floor + half))
     else:
         # 쟁반 면 위에 안착.
+        _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
         world.move_object(bind, (dest[0], dest[1], dest[2] + 0.005 + half))
     if frames is not None:
         frames.append(_snap(world, 'placed'))

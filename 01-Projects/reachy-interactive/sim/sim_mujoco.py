@@ -214,6 +214,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
            'shininess=".4"/>',
            # 메시를 쓰면 충돌용 캡슐은 안 보이게 한다 (둘 다 그리면 겹쳐 보인다)
            '    <material name="hidden" rgba="0 0 0 0"/>',
+           '    <material name="grip" rgba=".72 .73 .78 1" specular=".45"/>',
            '    <material name="wood" rgba=".55 .42 .28 1"/>',
            '    <material name="cup"  rgba=".85 .35 .20 1" specular=".4"/>',
            '    <material name="tray" rgba=".25 .55 .35 1"/>'] + obj_mats
@@ -326,13 +327,36 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
                               'hidden' if mesh else mat, ct, ca,
                               nxt[0], nxt[1], nxt[2], r))
                 seg += 1
-        # 마지막(손)은 작은 구로
         pad = '    ' + '  ' * depth
         ct, ca = GROUP[side]
-        out.append('%s<geom name="%s_tip" type="sphere" material="%s" '
-                   'contype="%d" conaffinity="%d" size="%.4f"/>'
-                   % (pad, side, 'hidden' if mesh else mat, ct, ca,
-                      RADII['hand']))
+        if side == 'right_arm':
+            # 오른손 = 그리퍼. 굵은 구(r 4.1cm)는 물체를 감쌀 수 없어
+            # 파지가 원천 불가였다 - 손바닥(작은 구) + 슬라이드 손가락
+            # 2개로 바꾼다. 벌리고 내려가 물체를 사이에 두고 조인다.
+            # 값 단위는 미터 (qpos 라디안 변환에서 이름으로 예외).
+            out.append('%s<geom name="right_arm_palm" type="sphere" '
+                       'material="%s" contype="%d" conaffinity="%d" '
+                       'size="0.020"/>' % (pad, 'hidden' if mesh else mat,
+                                           ct, ca))
+            for tag, sgn in (('l', 1), ('r', -1)):
+                out += [
+                    '%s<body name="right_finger_%s" pos="0 %.3f 0">'
+                    % (pad, tag, 0.012 * sgn),
+                    '%s  <inertial pos="0 0 0" mass="0.01" '
+                    'diaginertia="1e-5 1e-5 1e-5"/>' % pad,
+                    '%s  <joint name="right_arm.gripper_%s" type="slide" '
+                    'axis="0 %d 0" range="0 0.05"/>' % (pad, tag, sgn),
+                    '%s  <geom name="right_arm_finger_%s" type="box" '
+                    'material="grip" contype="%d" conaffinity="%d" '
+                    'size="0.009 0.006 0.042" pos="0 %.3f -0.050"/>'
+                    % (pad, tag, ct, ca, 0.006 * sgn),
+                    '%s</body>' % pad,
+                ]
+        else:
+            out.append('%s<geom name="%s_tip" type="sphere" material="%s" '
+                       'contype="%d" conaffinity="%d" size="%.4f"/>'
+                       % (pad, side, 'hidden' if mesh else mat, ct, ca,
+                          RADII['hand']))
         while depth > 0:
             depth -= 1
             out.append('    ' + '  ' * depth + '</body>')
@@ -360,7 +384,9 @@ def _set_pose(data, idx, pose):
     40라디안(=132도)으로 돌렸고, 팔이 엉뚱한 데로 갔다.
     """
     for joint, adr in idx.items():
-        data.qpos[adr] = math.radians(pose.get(joint, 0.0))
+        v = pose.get(joint, 0.0)
+        # 슬라이드(그리퍼)는 미터 단위 - 라디안 변환 금지.
+        data.qpos[adr] = v if 'gripper' in joint else math.radians(v)
 
 
 def _qpos_index(mujoco, model):

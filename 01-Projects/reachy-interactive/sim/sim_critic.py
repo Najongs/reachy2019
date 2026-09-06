@@ -91,7 +91,10 @@ def quality(trace):
     score = 0.0
     score += 35 * min(1.0, efficiency / 0.7)          # 0.7 이면 만점 (우회 포함)
     score += 25 * max(0.0, 1.0 - jerk / 6.0)          # 저크 6도/스텝이면 0점
-    score += 20 * max(0.0, min(1.0, (margin - (-0.5)) / 4.0))   # 여유 3.5cm+ 만점
+    # 손가락 파지에서는 손끝이 테이블 ~1cm 까지 가는 게 '올바른' 동작이다.
+    # 만점 기준을 3.5cm 로 두면 파지 자체가 벌점된다 (무동작 기준선 원칙의
+    # 역방향 검사: 올바른 동작이 몇 점인지도 봐야 한다).
+    score += 20 * max(0.0, min(1.0, (margin - (-0.5)) / 1.5))   # 여유 +1cm 만점
     score += 5 * max(0.0, 1.0 - max(0, len(core) - 20) / 40.0)
     score += 10 * (view_ratio if view_ratio is not None else 1.0)
 
