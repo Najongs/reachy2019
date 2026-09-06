@@ -772,16 +772,31 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
 
     orig = world.object_pos(bind)          # 원위치 (되돌려 놓기용)
     g = GRIP_OPEN
-    for _ in range(12):
-        if world.clearance_of(bind) <= 0.15 or g >= GRIP_SHUT:
+    for _ in range(24):
+        c = world.clearance_of(bind)
+        if c <= 0.15 or g >= GRIP_SHUT:
             break
-        g = min(GRIP_SHUT, g + 6.0)
+        # 접촉이 가까워지면 잘게 조인다 - 성큼 조이면 파고든다.
+        g = min(GRIP_SHUT, g + (3.0 if c < 1.0 else 6.0))
         world.set_arm({'right_arm.hand.gripper': g})
         if frames is not None:
             frames.append(_snap(world, '그리퍼 조임'))
+    # 힘-완화: 실물 force gripper 는 과조임이 고장 1순위다. 파고들었으면
+    # 접촉 수준(-0.15cm 이내)까지 살짝 되푼다.
+    for _ in range(8):
+        if world.clearance_of(bind) >= -0.15 or g <= GRIP_OPEN:
+            break
+        g -= 2.0
+        world.set_arm({'right_arm.hand.gripper': g})
+        if frames is not None:
+            frames.append(_snap(world, '조임 완화'))
     # 맞물림 검사: 조임이 '접촉 때문에' 멈췄어야 잡힌 것이다. 끝까지
     # 닫혔는데(허공) 물체가 근처에 있다고 붙으면 자석처럼 보인다.
     grabbed = g < GRIP_SHUT and world.clearance_of(bind) <= 0.4
+    # 조임 상태를 궤적에 남긴다 - 안 남기면 과조임이 판정(대상 관통)을
+    # 그냥 빠져나간다.
+    if trace is not None:
+        trace.append(_trace_entry(world, None, bind))
     if frames is not None:
         frames.append(_snap(world, '잡기 %s' % ('성공' if grabbed else '실패')))
     return bind, half, grabbed, orig

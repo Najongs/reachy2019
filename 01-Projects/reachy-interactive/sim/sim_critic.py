@@ -108,10 +108,16 @@ def quality(trace):
             touch_speed = dist(hands[i], hands[i - 1]) * 100
     metrics['touch_speed_cm'] = (round(touch_speed, 1)
                                  if touch_speed is not None else None)
-    if touch_speed is None:
-        score += 5
-    else:
-        score += 5 * max(0.0, 1.0 - max(0.0, touch_speed - 1.5) / 3.0)
+    # 조임 깊이: 대상 최소 여유. 실물 그리퍼는 과조임이 고장 1순위라
+    # 부드러움 점수가 속도와 깊이 중 나쁜 쪽을 따른다.
+    tgt_min = min((v for v in tgts if v is not None), default=None)
+    metrics['squeeze_cm'] = (round(-min(0.0, tgt_min), 2)
+                             if tgt_min is not None else None)
+    sp = (1.0 if touch_speed is None
+          else max(0.0, 1.0 - max(0.0, touch_speed - 1.5) / 3.0))
+    sq = (1.0 if tgt_min is None
+          else max(0.0, 1.0 - max(0.0, -tgt_min - 0.15) / 0.85))
+    score += 5 * min(sp, sq)
     metrics['score'] = int(round(score))
     return metrics
 

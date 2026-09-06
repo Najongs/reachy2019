@@ -232,7 +232,8 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         for tryn in range(6):
             ts = T.generate_feasible(
                 n_tasks, seed=seed * 977 + k + tryn * 131071,
-                kinds=('reach', 'pick'), env=env)
+                kinds=('pick', 'lift'), env=env)   # 잡기 중심 학습
+                # (사용자: 찍고 돌아오지 말고 잡아서 옮기는 걸 계속 시도)
             if len(ts) >= n_tasks:
                 return ts
         if fallback:
