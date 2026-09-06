@@ -323,7 +323,9 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
 
             # opus 비평 (주기적으로; 실패해도 루프는 계속)
             advice, naturalness, rubric = None, None, None
-            if client is not None and it % CRITIQUE_EVERY == 1:
+            # 감시는 랜덤 표본이다 - 고정 주기는 주기에 맞춰 좋아 보이는
+            # 것만 잡힌다 (사용자 지적). 평균 빈도는 이전과 같게.
+            if client is not None and rng.random() < 1.0 / CRITIQUE_EVERY:
                 try:
                     A.BEHAVIOR.update(current)
                     # 찍는 태스크를 회전시킨다 - tasks[0] 고정이면 라운드

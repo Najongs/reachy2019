@@ -183,19 +183,25 @@ def strip_image(frames, n=FILM_N, cols=4):
     picked = pick_frames(frames, n)
     if not picked:
         return None
-    tiles = []
-    for i, f in enumerate(picked):
-        third = f[:, f.shape[1] // 2:]
-        im = Image.fromarray(third).resize((320, 240))
-        d = ImageDraw.Draw(im)
-        d.rectangle((0, 0, 30, 20), fill=(0, 0, 0))
-        d.text((8, 4), str(i + 1), fill=(255, 255, 90))
-        tiles.append(np.asarray(im))
-    while len(tiles) % cols:
-        tiles.append(np.zeros_like(tiles[0]))
-    rows = [np.concatenate(tiles[r:r + cols], axis=1)
-            for r in range(0, len(tiles), cols)]
-    return np.concatenate(rows, axis=0)
+
+    def _row(side):
+        tiles = []
+        for i, f in enumerate(picked):
+            half = f.shape[1] // 2
+            part = f[:, :half] if side == 'eye' else f[:, half:]
+            im = Image.fromarray(part).resize((320, 240))
+            d = ImageDraw.Draw(im)
+            d.rectangle((0, 0, 30, 20), fill=(0, 0, 0))
+            d.text((8, 4), str(i + 1), fill=(255, 255, 90))
+            tiles.append(np.asarray(im))
+        while len(tiles) % cols:
+            tiles.append(np.zeros_like(tiles[0]))
+        return [np.concatenate(tiles[r:r + cols], axis=1)
+                for r in range(0, len(tiles), cols)]
+
+    # 로봇 눈 시점을 함께 본다 - '지금 안 보이는데 움직인다' 를 비평이
+    # 짚을 수 있어야 한다 (사용자 지적). 위 = 눈, 아래 = 제3자.
+    return np.concatenate(_row('eye') + _row('third'), axis=0)
 
 
 def _encode(img, width=896):
@@ -226,7 +232,7 @@ def _parse_json(raw):
     return out if isinstance(out, dict) else None
 
 
-CRITIQUE_PROMPT = """로봇 팔 동작 품질 비평가다. 이미지는 한 동작의 전 과정을 시간 순으로 담은 필름 스트립이다(번호 1이 시작, 왼쪽 위 -> 오른쪽 아래). 붉은 테두리 프레임은 그 순간 투과가 있었던 것.
+CRITIQUE_PROMPT = """로봇 팔 동작 품질 비평가다. 이미지는 한 동작의 필름 스트립이다: 위쪽 절반 = 로봇 눈 시점, 아래쪽 절반 = 제3자 시점 (같은 순간, 번호 1이 시작). 붉은 테두리 프레임은 그 순간 투과가 있었던 것. 눈 시점에서 대상이 안 보이는데 팔이 움직이는 구간이 있으면 반드시 지적하라.
 
 지시: {instruction}
 계측 지표: {metrics}
