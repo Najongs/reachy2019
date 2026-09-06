@@ -213,8 +213,18 @@ FEEDBACK_FILE = os.path.join(HERE, '..', 'config', 'sim_feedback.json')
 
 
 def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
-        hours=None):
-    """개선 루프. hours 를 주면 그 시간 동안 계속 돈다 (iters 무시)."""
+        hours=None, env0=None, kinds=('pick', 'lift'), natural_min0=55,
+        reset_params=None):
+    """개선 루프. hours 를 주면 그 시간 동안 계속 돈다 (iters 무시).
+
+    감독(sim_director)이 짧은 사이클로 부르며 방향을 바꾼다: env0(환경),
+    kinds(태스크 유형), natural_min0(문턱 시작), reset_params
+    ('defaults'|'best'). 끝나면 요약 dict 를 돌려준다 - 평가가 다음
+    방향 결정의 입력이 되도록.
+    """
+    if reset_params == 'defaults':
+        A.BEHAVIOR.update(A.DEFAULTS)
+        A.save_behavior(A.DEFAULTS)
     rng = random.Random(seed)
     deadline = time.time() + hours * 3600 if hours else None
     label = '%.1f시간' % hours if hours else '%d회' % iters
@@ -235,8 +245,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         for tryn in range(6):
             ts = T.generate_feasible(
                 n_tasks, seed=seed * 977 + k + tryn * 131071,
-                kinds=('pick', 'lift'), env=env)   # 잡기 중심 학습
-                # (사용자: 찍고 돌아오지 말고 잡아서 옮기는 걸 계속 시도)
+                kinds=kinds, env=env)
             if len(ts) >= n_tasks:
                 return ts
         if fallback:
@@ -246,7 +255,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             raise RuntimeError('실현 가능한 태스크를 만들 수 없음')
         return ts
 
-    env = dict(T.ENV_DEFAULT)      # 오케스트라가 experiment 로 바꾼다
+    env = T.clamp_env(env0) if env0 else dict(T.ENV_DEFAULT)
     feedback = load_feedback()
     last_frames = None             # 오케스트라에게 보여줄 최근 스트립
 
@@ -262,7 +271,8 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     center = dict(current)
     sigma = {k: 0.10 * span[k] for k in BOUNDS}
     # 자연스러움 문턱 - 전원 성공이 이어지면 올라간다(평가도 함께 개선).
-    natural_min = 55
+    natural_min = natural_min0
+    run_incidents = set()
 
     def rank(counts):
         """충돌 적게 > 성공 많이 > 목표에 가깝게 > 품질 높게.
@@ -427,6 +437,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             report = evaluate(current, exam, natural_min)
             # 관찰자: 절차가 남긴 사건을 지적 원장으로 자동 승격한다 -
             # 사람이 영상을 봐야만 잡히던 결함(허공 조임 등)의 기계화.
+            run_incidents.update(report.get('incidents') or [])
             for inc in sorted(report.get('incidents') or []):
                 note = '[관찰] ' + inc
                 if not any(f['note'] == note for f in feedback):
@@ -588,6 +599,15 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     print('품질 추이: %.0f -> %.0f (최고 %.0f, 최종 문턱 %d, 반복 %d회)'
           % (qs[0], qs[-1], best_ever['quality'], natural_min,
              len(history) - 1))
+    last = history[-1]
+    return {'checkpoint': out,
+            'quality_first': qs[0], 'quality_last': qs[-1],
+            'exam': last.get('exam'), 'natural_min': natural_min,
+            'incidents': sorted(run_incidents),
+            'duels': sum(1 for h2 in history if h2.get('duel')),
+            'picked': [h2.get('picked') for h2 in history[-8:]],
+            'best_quality': best_ever['quality'],
+            'params': dict(current)}
     print('기록: %s  |  채택 파라미터: config/behavior_params.json' % out)
     return history
 

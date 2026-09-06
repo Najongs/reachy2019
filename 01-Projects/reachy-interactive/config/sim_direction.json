@@ -1,0 +1,18 @@
+{
+ "env": {
+  "table": [
+   -0.34,
+   -0.28
+  ],
+  "objects": [
+   1,
+   2
+  ],
+  "min_gap": 0.12
+ },
+ "kinds": [
+  "lift"
+ ],
+ "natural_min": 48,
+ "reset_params": "defaults"
+}

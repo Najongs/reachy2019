@@ -1,0 +1,213 @@
+"""감독(director) - 짧게 돌리고, 평가를 읽고, 방향을 바꿔 다시 돌린다.
+
+사용자 지적에서 나왔다: docs/eval 에 평가가 쌓여도 그걸 읽고 방향을
+바꾸는 소비자가 없었다. 이 루프가 그 소비자다:
+
+  사이클마다
+    1) 개선 루프를 '짧게' (CYCLE_ITERS 회)
+    2) 실전 배치 1개 (브로커) -> docs/eval/<run>.md + 감사 플래그
+    3) 증거를 모아 opus 에게: 방향 결정 JSON
+       (환경, 태스크 유형, 문턱, 파라미터 리셋, 지적 추가/종결)
+    4) 결정을 '적용' 하고 docs/eval/direction-log.md 에 기록
+    5) 다음 사이클
+
+적용은 전부 한계 안에서(clamp) - 감독이 물리적으로 말이 안 되는 지시를
+내릴 수 없다. 코드 수준의 의심은 로그에 적어 사람에게 넘긴다.
+
+사용:
+    python3 sim/sim_director.py --hours 8 --token reachy2019
+    python3 sim/sim_director.py --cycles 2 --token reachy2019   # 예행
+"""
+
+import argparse
+import glob
+import json
+import os
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
+
+import sim_improve as I                            # noqa: E402
+import sim_critic as C                             # noqa: E402
+import sim_tasks as T                              # noqa: E402
+
+CYCLE_ITERS = 8
+STATE_FILE = os.path.join(HERE, '..', 'config', 'sim_direction.json')
+LOG_MD = os.path.join(HERE, '..', 'docs', 'eval', 'direction-log.md')
+
+DIRECTOR_PROMPT = """로봇 학습 파이프라인의 감독이다. 방금 끝난 짧은 학습 사이클의 평가와 실전 배치 결과를 보고, 다음 사이클의 방향을 정한다. 필름 스트립(위=로봇 눈, 아래=제3자)이 오면 함께 본다.
+
+## 이번 사이클 증거
+{evidence}
+
+## 지금 방향 (이전 결정)
+{direction}
+
+바꿀 수 있는 것 (전부 선택):
+- "env": {{"table": [lo,hi] (-0.40~-0.24), "objects": [lo,hi] (1~4), "min_gap": 0.05~0.14}}
+- "kinds": ["pick","lift"] 부분집합 - 어디에 집중할지
+- "natural_min": 45~75 - 자연스러움 문턱 시작값 (성공이 안 나오면 낮춰 압박을 줄여라)
+- "reset_params": "defaults" | null - 파라미터가 구석에 갇혔다고 보면 리셋
+- "feedback_add": ["동작 지적", ...] / "feedback_done": [번호,...]
+- "code_suspect": "절차/코드 결함 의심이면 한 문장" (사람에게 전달됨)
+
+JSON 한 줄로만:
+{{"env": ... 또는 null, "kinds": [...] 또는 null, "natural_min": n 또는 null, "reset_params": ..., "feedback_add": [], "feedback_done": [], "code_suspect": null, "why": "방향 요약 한 문장"}}"""
+
+
+def _latest(pattern):
+    fs = sorted(glob.glob(pattern))
+    return fs[-1] if fs else None
+
+
+def _load_state():
+    try:
+        return json.load(open(STATE_FILE, encoding='utf-8'))
+    except Exception:
+        return {'env': None, 'kinds': ['pick', 'lift'], 'natural_min': 55}
+
+
+def _save_state(st):
+    json.dump(st, open(STATE_FILE, 'w', encoding='utf-8'),
+              ensure_ascii=False, indent=1)
+
+
+def _log_direction(cyc, summary, batch_line, decision):
+    os.makedirs(os.path.dirname(LOG_MD), exist_ok=True)
+    new = not os.path.exists(LOG_MD)
+    with open(LOG_MD, 'a', encoding='utf-8') as fh:
+        if new:
+            fh.write('# 방향 결정 기록 (감독 루프)\n\n'
+                     '사이클마다: 평가 -> 방향 결정 -> 적용. '
+                     '이 파일이 "평가가 반영되는 증거" 다.\n\n')
+        fh.write('## %s 사이클 %d\n' % (time.strftime('%m-%d %H:%M'), cyc))
+        fh.write('- 학습: 품질 %.0f->%.0f (문턱 %d), 시험 %s\n'
+                 % (summary['quality_first'], summary['quality_last'],
+                    summary['natural_min'], summary.get('exam')))
+        if summary.get('incidents'):
+            fh.write('- 사건: %s\n' % '; '.join(summary['incidents']))
+        fh.write('- 실전 배치: %s\n' % batch_line)
+        fh.write('- **방향**: %s\n' % (decision.get('why') or '유지'))
+        for k in ('env', 'kinds', 'natural_min', 'reset_params'):
+            if decision.get(k):
+                fh.write('  - %s -> %s\n' % (k, decision[k]))
+        if decision.get('code_suspect'):
+            fh.write('  - 코드 의심(사람 확인 필요): %s\n'
+                     % decision['code_suspect'])
+        fh.write('\n')
+
+
+def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
+        seed=1):
+    from llm_client import BrokerClient
+    import sim_pipeline as PL
+    client = BrokerClient(url, token=token, session='sim-director')
+    st = _load_state()
+    deadline = time.time() + hours * 3600 if hours else None
+    cyc = 0
+    print('감독 루프: %s (사이클=학습 %d회 + 배치 + 방향 결정)'
+          % ('%.1f시간' % hours if hours else '%d사이클' % cycles,
+             CYCLE_ITERS), flush=True)
+    while True:
+        cyc += 1
+        if deadline is not None and time.time() >= deadline:
+            break
+        if deadline is None and cyc > (cycles or 1):
+            break
+        try:
+            # 1) 짧은 학습
+            summary = I.run(iters=CYCLE_ITERS, seed=seed * 1000 + cyc,
+                            token=token, url=url,
+                            env0=st.get('env'),
+                            kinds=tuple(st.get('kinds') or ('pick', 'lift')),
+                            natural_min0=int(st.get('natural_min') or 55),
+                            reset_params=st.pop('reset_params', None))
+            # 2) 실전 배치 (평가 리포트 생성)
+            try:
+                rid, bsum, flags = PL.run_batch(
+                    3, tuple(st.get('kinds') or ('pick', 'lift')), 'broker',
+                    url, token, seed=cyc * 37, tag='dir%d' % cyc)
+                batch_line = '%s | 감사 %s | docs/eval/%s.md' % (
+                    bsum.get('stages'), (flags[0][:60] if flags else '깨끗'),
+                    rid)
+            except Exception as e:
+                batch_line = '배치 실패: %s' % e
+            # 3) 증거 -> 방향 결정
+            fb = I.load_feedback()
+            evidence = json.dumps({
+                '학습': {k: summary.get(k) for k in
+                         ('quality_first', 'quality_last', 'exam',
+                          'natural_min', 'incidents', 'duels', 'picked')},
+                '실전배치': batch_line,
+                '미결지적': {i: f['note'] for i, f in enumerate(fb)
+                             if not f.get('done')},
+            }, ensure_ascii=False)
+            strip = _latest(os.path.join(HERE, '..', 'sim_data',
+                                         'improve-*-media', '*_strip.jpg'))
+            img = None
+            if strip:
+                import base64
+                img = base64.b64encode(open(strip, 'rb').read()).decode()
+            raw = client.ask_vision(
+                DIRECTOR_PROMPT.format(
+                    evidence=evidence,
+                    direction=json.dumps(
+                        {k: st.get(k) for k in
+                         ('env', 'kinds', 'natural_min')},
+                        ensure_ascii=False)),
+                image=img)
+            try:
+                dec = json.loads(raw[raw.find('{'):raw.rfind('}') + 1])
+            except Exception:
+                dec = {'why': '결정 해석 불가 - 방향 유지'}
+            # 4) 적용 (한계 안에서)
+            if dec.get('env'):
+                st['env'] = {k: list(v) if isinstance(v, tuple) else v
+                             for k, v in T.clamp_env(dec['env']).items()}
+            if dec.get('kinds'):
+                ks = [k for k in dec['kinds'] if k in ('pick', 'lift',
+                                                       'reach', 'look')]
+                if ks:
+                    st['kinds'] = ks
+            if dec.get('natural_min'):
+                st['natural_min'] = max(45, min(75, int(dec['natural_min'])))
+            if dec.get('reset_params') == 'defaults':
+                st['reset_params'] = 'defaults'
+            for note in (dec.get('feedback_add') or [])[:3]:
+                if isinstance(note, str) and note.strip() and not any(
+                        f['note'] == note.strip() for f in fb):
+                    fb.append({'note': note.strip(), 'done': False})
+            for idx in (dec.get('feedback_done') or []):
+                if isinstance(idx, int) and 0 <= idx < len(fb):
+                    fb[idx]['done'] = True
+            I.save_feedback(fb)
+            _save_state(st)
+            _log_direction(cyc, summary, batch_line, dec)
+            print('[감독] 사이클 %d: %s' % (cyc, dec.get('why')), flush=True)
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print('[감독] 사이클 %d 예외(계속): %s: %s'
+                  % (cyc, type(e).__name__, e), flush=True)
+            time.sleep(5)
+    print('감독 종료: %d사이클. 방향 기록: docs/eval/direction-log.md'
+          % (cyc - 1))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--cycles', type=int)
+    ap.add_argument('--hours', type=float)
+    ap.add_argument('--token')
+    ap.add_argument('--url', default='http://127.0.0.1:8080')
+    ap.add_argument('--seed', type=int, default=1)
+    args = ap.parse_args()
+    run(cycles=args.cycles, hours=args.hours, token=args.token,
+        url=args.url, seed=args.seed)
+
+
+if __name__ == '__main__':
+    main()
