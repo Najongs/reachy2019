@@ -653,7 +653,7 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
                    carried=True, step_cap=4.0, frames=frames,
                    note='내려놓기', trace=trace, target_name=bind, seed=8)
             _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
-            world.move_object(bind, start)
+            _drop_anim(world, bind, start, frames=frames, steps=2)
             if frames is not None:
                 frames.append(_snap(world, '내려놓음'))
         if retreat:
@@ -779,10 +779,23 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
         world.set_arm({'right_arm.hand.gripper': g})
         if frames is not None:
             frames.append(_snap(world, '그리퍼 조임'))
-    grabbed = world.clearance_of(bind) <= 0.5
+    # 맞물림 검사: 조임이 '접촉 때문에' 멈췄어야 잡힌 것이다. 끝까지
+    # 닫혔는데(허공) 물체가 근처에 있다고 붙으면 자석처럼 보인다.
+    grabbed = g < GRIP_SHUT and world.clearance_of(bind) <= 0.4
     if frames is not None:
         frames.append(_snap(world, '잡기 %s' % ('성공' if grabbed else '실패')))
     return bind, half, grabbed, orig
+
+
+def _drop_anim(world, bind, to_pos, frames=None, steps=3):
+    """놓기/드롭을 가속 낙하로 - 순간이동하면 자석처럼 보인다."""
+    p0 = world.object_pos(bind)
+    for k in range(1, steps + 1):
+        u = (k / steps) ** 2                    # 중력 흉내(가속)
+        world.move_object(bind, tuple(p0[i] + (to_pos[i] - p0[i]) * u
+                                      for i in range(3)))
+        if frames is not None:
+            frames.append(_snap(world, '낙하'))
 
 
 def _hold_offset(world, bind):
@@ -850,13 +863,15 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
         _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
         if frames is not None:
             frames.append(_snap(world, 'drop'))
-        # 바구니 바닥 위에 안착 (떠 있지 않게).
+        # 바구니 바닥 위로 낙하.
         floor = dest[2] + W.BASKET_WALL * 2
-        world.move_object(bind, (dest[0], dest[1], floor + half))
+        _drop_anim(world, bind, (dest[0], dest[1], floor + half),
+                   frames=frames)
     else:
-        # 쟁반 면 위에 안착.
+        # 쟁반 면 위로 낙하.
         _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
-        world.move_object(bind, (dest[0], dest[1], dest[2] + 0.005 + half))
+        _drop_anim(world, bind, (dest[0], dest[1], dest[2] + 0.005 + half),
+                   frames=frames)
     if frames is not None:
         frames.append(_snap(world, 'placed'))
     return True
