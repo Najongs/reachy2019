@@ -51,7 +51,7 @@ DIRECTOR_PROMPT = """로봇 학습 파이프라인의 감독이다. 방금 끝�
 - "kinds": ["pick","lift"] 부분집합 - 어디에 집중할지
 - "natural_min": 45~75 - 자연스러움 문턱 시작값 (성공이 안 나오면 낮춰 압박을 줄여라)
 - "reset_params": "defaults" | null - 파라미터가 구석에 갇혔다고 보면 리셋
-- "feedback_add": ["동작 지적", ...] / "feedback_done": [번호,...]
+- "feedback_add": ["동작 지적", ...] / "feedback_done": [번호,...] - 해결됐거나 겹치는 지적은 과감히 종결하라
 - "code_suspect": "절차/코드 결함 의심이면 한 문장" (사람에게 전달됨)
 
 JSON 한 줄로만:
@@ -183,6 +183,12 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
             for idx in (dec.get('feedback_done') or []):
                 if isinstance(idx, int) and 0 <= idx < len(fb):
                     fb[idx]['done'] = True
+            # 원장 위생: 미결이 12건을 넘으면 오래된 것부터 자동 정리 -
+            # 부풀면 비평가는 최근 5건만 보게 되어 나머지가 죽는다.
+            open_idx = [i for i, f in enumerate(fb) if not f.get('done')]
+            for i in open_idx[:-12]:
+                fb[i]['done'] = True
+                fb[i]['note'] += ' [자동정리]'
             I.save_feedback(fb)
             _save_state(st)
             _log_direction(cyc, summary, batch_line, dec)
