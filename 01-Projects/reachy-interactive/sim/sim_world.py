@@ -154,13 +154,23 @@ class World(object):
         sm._set_pose(self.data, self.idx, self.pose)
         self.mujoco.mj_forward(self.model, self.data)
 
-    def step_physics(self, substeps=6):
-        """물리를 적분한다. 팔은 위치 구동(각 하위스텝마다 자세 재고정 +
-        관절 속도 0)이고 자유 바디(물체)만 중력·접촉으로 움직인다.
-        부딪히면 밀려나고, 잡히려면 마찰이 실제로 지탱해야 한다."""
+    def step_physics(self, substeps=8, prev=None):
+        """물리를 적분한다. 팔은 위치 구동, 자유 바디(물체)만 중력·접촉.
+
+        prev 를 주면 팔 자세를 하위스텝에 걸쳐 '보간' 한다 - 최종 자세로
+        한 번에 점프하면 얇은 조/링크가 물체 안으로 텔레포트해 솔버가
+        물체를 박힌 채 끌고 다닌다 (자석처럼 보이는 터널링 유착, 실측:
+        공이 손목에 매달려 상승). 잘게 쓸면 밀려날 뿐 삼켜지지 않는다."""
         mj = self.mujoco
-        for _ in range(substeps):
-            sm._set_pose(self.data, self.idx, self.pose)
+        for k in range(substeps):
+            if prev is not None:
+                u = (k + 1) / substeps
+                pose_k = {j: prev.get(j, 0.0)
+                          + (self.pose.get(j, 0.0) - prev.get(j, 0.0)) * u
+                          for j in self.pose}
+            else:
+                pose_k = self.pose
+            sm._set_pose(self.data, self.idx, pose_k)
             for joint, adr in self.idx.items():
                 if not joint.endswith('_free'):
                     dof = self._dofadr.get(joint)
@@ -171,9 +181,10 @@ class World(object):
         mj.mj_forward(self.model, self.data)
 
     def set_arm(self, pose):
+        prev = dict(self.pose)
         self.pose.update(pose)
         self._forward()
-        self.step_physics()
+        self.step_physics(prev=prev)
 
     def set_gaze(self, y, z, x=0.5):
         """시선을 (y, z at x) 로 즉시. 실물 Orbita 가 못 보는 방향이면 None.
