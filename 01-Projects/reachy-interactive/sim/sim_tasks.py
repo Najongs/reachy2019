@@ -162,6 +162,8 @@ def feasible(task, quick_steps=25):
     import sim_agent as A
 
     w = build_world(task)
+    saved = dict(A.BEHAVIOR)
+    A.BEHAVIOR.update(A.DEFAULTS)      # 기준 파라미터로 판정 (순환 방지)
     try:
         planner = A.OraclePlanner()
         view = planner.perceive(w, task)
@@ -175,6 +177,7 @@ def feasible(task, quick_steps=25):
     except Exception:
         return False
     finally:
+        A.BEHAVIOR.update(saved)
         w.close()
 
 

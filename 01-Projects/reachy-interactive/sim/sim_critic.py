@@ -109,52 +109,54 @@ def stage_verdict(path_min_cm, reached, quality_score, natural_min=55):
     return 'success', None
 
 
-CRITIQUE_PROMPT = """로봇 팔 동작 품질 비평가다. 아래는 한 동작의 프레임(들어올림/중간/도달 순)과 계측 지표다.
-
-지시: {instruction}
-지표: {metrics}
-
-동작이 사람 눈에 자연스러운지 비평하라. 성공 여부는 판정하지 마라(그건 계측이 한다). 오직 '어떻게 움직였는가' 만.
-
-JSON 한 줄로만 답하라:
-{{"naturalness": 1~10, "issues": ["짧은 지적", ...], "advice": {{"파라미터": "up"|"down"}}}}
-
-advice 에 쓸 수 있는 파라미터와 뜻:
-- step_deg: 스텝 크기 (down=더 잘게 움직여 부드럽게, up=시원시원하게)
-- gain: 이득 (down=신중하게, up=민첩하게)
-- damping: 감쇠 (up=떨림 억제)
-- table_min: 테이블 여유 (up=더 높이 돌아 안전하게)
-- lift_steps: 들어올리기 보간 수 (up=더 부드러운 들어올림)
-
-문제가 없으면 issues 를 빈 배열로, advice 를 빈 객체로. JSON 밖 텍스트 금지."""
+FILM_N = 8              # 필름 스트립 프레임 수 - 전체 과정을 한 장에 담는다
 
 
-def critique(client, frame_images, instruction, metrics):
-    """opus 프레임 비평. {'naturalness', 'issues', 'advice'} 또는 None.
+def strip_image(frames, n=FILM_N, cols=4):
+    """프레임들 -> 시간순 격자 한 장 (제3자 시점만, 번호 라벨).
 
-    frame_images: ndarray 3장 내외. 세로로 이어붙여 한 장으로 보낸다.
+    프레임 2~3장만 보면 '중간에 뭘 했는지' 가 빠진다. 전 과정을 균등하게
+    n 장 뽑아 왼쪽 위 -> 오른쪽 아래 시간 순 격자로 만든다. _snap 프레임은
+    [눈|제3자] 가로 결합인데, 자연스러움은 몸 전체가 보이는 제3자 쪽만 쓴다.
+    투과 순간의 붉은 테두리는 그대로 살아 있다.
     """
-    if client is None or not frame_images:
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    picked = pick_frames(frames, n)
+    if not picked:
         return None
+    tiles = []
+    for i, f in enumerate(picked):
+        third = f[:, f.shape[1] // 2:]
+        im = Image.fromarray(third).resize((320, 240))
+        d = ImageDraw.Draw(im)
+        d.rectangle((0, 0, 30, 20), fill=(0, 0, 0))
+        d.text((8, 4), str(i + 1), fill=(255, 255, 90))
+        tiles.append(np.asarray(im))
+    while len(tiles) % cols:
+        tiles.append(np.zeros_like(tiles[0]))
+    rows = [np.concatenate(tiles[r:r + cols], axis=1)
+            for r in range(0, len(tiles), cols)]
+    return np.concatenate(rows, axis=0)
+
+
+def _encode(img, width=896):
+    """ndarray -> JPEG base64 (폭 제한으로 토큰 절약)."""
     import base64
     import io as _io
 
-    import numpy as np
     from PIL import Image
 
-    strip = np.concatenate(list(frame_images), axis=0)
-    im = Image.fromarray(strip).convert('RGB')
-    # 3장 세로면 길다 - 폭 512 로 줄여 토큰을 아낀다.
-    if im.width > 512:
-        im = im.resize((512, int(im.height * 512 / im.width)))
+    im = Image.fromarray(img).convert('RGB')
+    if im.width > width:
+        im = im.resize((width, int(im.height * width / im.width)))
     buf = _io.BytesIO()
-    im.save(buf, format='JPEG', quality=70)
-    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+    im.save(buf, format='JPEG', quality=72)
+    return base64.b64encode(buf.getvalue()).decode('ascii')
 
-    prompt = CRITIQUE_PROMPT.format(
-        instruction=instruction,
-        metrics=json.dumps(metrics, ensure_ascii=False))
-    raw = client.ask_vision(prompt, image=b64)
+
+def _parse_json(raw):
     if not raw:
         return None
     start, end = raw.find('{'), raw.rfind('}')
@@ -164,10 +166,87 @@ def critique(client, frame_images, instruction, metrics):
         out = json.loads(raw[start:end + 1])
     except ValueError:
         return None
-    if not isinstance(out, dict):
+    return out if isinstance(out, dict) else None
+
+
+CRITIQUE_PROMPT = """로봇 팔 동작 품질 비평가다. 이미지는 한 동작의 전 과정을 시간 순으로 담은 필름 스트립이다(번호 1이 시작, 왼쪽 위 -> 오른쪽 아래). 붉은 테두리 프레임은 그 순간 투과가 있었던 것.
+
+지시: {instruction}
+계측 지표: {metrics}
+
+전체 흐름을 보고 사람 눈에 자연스러운지 비평하라. 성공 여부는 판정하지 마라(그건 계측이 한다). 오직 '어떻게 움직였는가' 만.
+
+JSON 한 줄로만 답하라:
+{{"naturalness": 1~10, "rubric": {{"smooth": 1~10, "direct": 1~10, "posture": 1~10, "tempo": 1~10}}, "worst_frame": 번호, "issues": ["짧은 지적", ...], "advice": {{"파라미터": "up"|"down"}}}}
+
+rubric 뜻: smooth=급격한 방향전환·떨림 없음, direct=군더더기 없는 경로, posture=중간 자세가 사람 팔처럼 자연스러운가, tempo=속도가 일정한가. worst_frame=가장 어색한 프레임 번호.
+
+advice 에 쓸 수 있는 파라미터와 뜻:
+- step_deg: 스텝 크기 (down=더 잘게 움직여 부드럽게, up=시원시원하게)
+- gain: 이득 (down=신중하게, up=민첩하게)
+- damping: 감쇠 (up=떨림 억제)
+- table_min: 테이블 여유 (up=더 높이 돌아 안전하게)
+- lift_steps: 들어올리기 보간 수 (up=더 부드러운 들어올림)
+- ready_pitch/ready_roll/ready_yaw/ready_elbow: 들어올리기 경유 자세 각도 - 경로 모양 자체가 어색하면 이걸 지목하라
+
+문제가 없으면 issues 를 빈 배열로, advice 를 빈 객체로. JSON 밖 텍스트 금지."""
+
+
+def critique(client, frames, instruction, metrics):
+    """opus 전과정 비평. {'naturalness','rubric','worst_frame','issues','advice'}.
+
+    frames: 에피소드의 프레임 목록 전체. 내부에서 필름 스트립을 만든다.
+    """
+    if client is None or not frames:
         return None
-    out['raw'] = raw
+    strip = strip_image(frames)
+    if strip is None:
+        return None
+    prompt = CRITIQUE_PROMPT.format(
+        instruction=instruction,
+        metrics=json.dumps(metrics, ensure_ascii=False))
+    out = _parse_json(client.ask_vision(prompt, image=_encode(strip)))
     return out
+
+
+DUEL_PROMPT = """로봇 팔 동작 비교 심판이다. 이미지 위쪽 절반이 동작 A, 아래쪽 절반이 동작 B다. 둘 다 같은 지시를 수행한 전 과정의 필름 스트립이다(각각 시간 순, 번호 순).
+
+지시: {instruction}
+
+어느 쪽이 사람 눈에 더 자연스러운가? 성공 여부가 아니라 움직임의 질만 비교하라 - 부드러움, 경로의 군더더기, 자세, 템포.
+
+JSON 한 줄로만: {{"winner": "A"|"B", "why": "한 문장"}}"""
+
+
+def duel(client, frames_a, frames_b, instruction):
+    """같은 태스크를 수행한 두 동작의 쌍대 비교. {'winner','why'} 또는 None.
+
+    절대 점수는 호출마다 흔들려도 '어느 쪽이 낫나' 는 안정적이다. 결정론
+    품질 점수가 박빙일 때 사람 눈 기준의 심판으로 쓴다.
+    """
+    if client is None or not frames_a or not frames_b:
+        return None
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    strips = []
+    for label, fr in (('A', frames_a), ('B', frames_b)):
+        st = strip_image(fr, n=6, cols=6)      # 한 줄 x 6장 -> A/B 위아래 비교
+        if st is None:
+            return None
+        im = Image.fromarray(st)
+        d = ImageDraw.Draw(im)
+        d.rectangle((0, 0, 44, 30), fill=(20, 20, 120) if label == 'A'
+                    else (120, 20, 20))
+        d.text((14, 6), label, fill=(255, 255, 255))
+        strips.append(np.asarray(im))
+    gap = np.full((12, strips[0].shape[1], 3), 255, dtype=strips[0].dtype)
+    combo = np.concatenate([strips[0], gap, strips[1]], axis=0)
+    out = _parse_json(client.ask_vision(
+        DUEL_PROMPT.format(instruction=instruction), image=_encode(combo, 1152)))
+    if out and out.get('winner') in ('A', 'B'):
+        return out
+    return None
 
 
 def pick_frames(frames, n=3):

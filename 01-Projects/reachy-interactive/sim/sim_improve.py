@@ -104,6 +104,24 @@ def evaluate(params, tasks, natural_min=55):
     return counts
 
 
+def hold_duel(client, task, params_a, params_b, natural_min):
+    """같은 태스크로 A(현재)/B(도전자) 를 돌려 opus 쌍대 심판. 'A'/'B'/None.
+
+    결정론 품질 점수가 DUEL_MARGIN 이내로 갈리는 선택은 점수 잡음 밴드
+    안이다 - 그 안에서는 사람 눈(opus 비교)이 가르게 한다.
+    """
+    saved = dict(A.BEHAVIOR)
+    try:
+        A.BEHAVIOR.update(_clamp(dict(params_a)))
+        _, _, fa = episode(task, keep_frames=True, natural_min=natural_min)
+        A.BEHAVIOR.update(_clamp(dict(params_b)))
+        _, _, fb = episode(task, keep_frames=True, natural_min=natural_min)
+    finally:
+        A.BEHAVIOR.update(saved)
+    r = C.duel(client, fa, fb, task['instruction'])
+    return (r or {}).get('winner')
+
+
 def propose(current, advice, rng, n_random=3, scale=1.0):
     """후보들: 현재 / 조언 반영 / 무작위 흔들기(scale 로 폭 조절)."""
     cands = [('current', dict(current))]
@@ -126,6 +144,7 @@ def propose(current, advice, rng, n_random=3, scale=1.0):
 REFRESH_EVERY = 6       # 이 횟수마다 태스크 묶음을 새로 뽑는다 (과적합 방지)
 VALIDATE_EVERY = 60     # end-to-end 검증 주기
 CRITIQUE_EVERY = 3      # opus 비평 주기 (10시간 기준 시간당 ~20콜 수준)
+DUEL_MARGIN = 4.0       # 이 품질 차 이내면 '박빙' - opus 쌍대 결투로 심판
 
 
 def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
@@ -142,8 +161,23 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         from llm_client import BrokerClient
         client = BrokerClient(url, token=token, session='sim-critic')
 
-    def new_tasks(k):
-        ts = T.generate_feasible(n_tasks, seed=seed * 977 + k, kinds=('reach',))
+    def new_tasks(k, fallback=None):
+        """실현 가능한 태스크 n_tasks 개. 모자라면 시드를 바꿔 재시도.
+
+        빈 목록이 그대로 흘러가면 '성공 0/0' 이 전원 성공(공허참)으로 통해
+        래칫이 폭주한다 - 실제로 겪었다. 끝내 못 만들면 이전 것을 유지.
+        """
+        for tryn in range(6):
+            ts = T.generate_feasible(
+                n_tasks, seed=seed * 977 + k + tryn * 131071,
+                kinds=('reach',))
+            if len(ts) >= n_tasks:
+                return ts
+        if fallback:
+            print('  태스크 생성 부족(%d) - 기존 유지' % len(ts), flush=True)
+            return fallback
+        if not ts:
+            raise RuntimeError('실현 가능한 태스크를 만들 수 없음')
         return ts
 
     tasks = new_tasks(0)
@@ -165,6 +199,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                  'params': dict(current), 'natural_min': natural_min}
     stagnant = 0
     perfect_streak = 0
+    duel_flips = 0      # opus 가 계측 선택을 뒤집은 횟수 (보정 감사 신호)
     out = os.path.join(HERE, '..', 'sim_data',
                        'improve-%s.json' % time.strftime('%Y%m%d-%H%M%S'))
     os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -197,21 +232,23 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         try:
             # 태스크 교체: 같은 4개에 과적합되지 않게. 교체하면 기준 재측정.
             if it % REFRESH_EVERY == 0:
-                tasks = new_tasks(it)
+                tasks = new_tasks(it, fallback=tasks)
                 base = evaluate(current, tasks, natural_min)
                 print('[%s] 반복 %d: 태스크 교체 -> %s'
                       % (time.strftime('%H:%M'), it, fmt(base)), flush=True)
 
             # opus 비평 (주기적으로; 실패해도 루프는 계속)
-            advice, naturalness = None, None
+            advice, naturalness, rubric = None, None, None
             if client is not None and it % CRITIQUE_EVERY == 1:
                 try:
                     A.BEHAVIOR.update(current)
                     ok, q, frames = episode(tasks[0], keep_frames=True)
-                    crit = C.critique(client, C.pick_frames(frames, 3),
+                    # 전 과정을 필름 스트립 한 장으로 - 중간 프레임까지 다 본다.
+                    crit = C.critique(client, frames,
                                       tasks[0]['instruction'], q)
                     if crit:
                         naturalness = crit.get('naturalness')
+                        rubric = crit.get('rubric')
                         advice = crit.get('advice') or None
                 except Exception as e:
                     print('  비평 실패(계속 진행): %s' % e, flush=True)
@@ -220,7 +257,9 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             scale = min(3.0, 1.0 + stagnant * 0.35)
             n_random = 3 + min(3, stagnant // 2)
 
-            best = (rank(base), base, 'current', dict(current))
+            base_rank = rank(base)
+            best = (base_rank, base, 'current', dict(current))
+            runner = None       # 결투 자격 도전자: 충돌·성공 계수가 같은 최고
             for name, cand in propose(current, advice, rng, n_random, scale):
                 c = evaluate(cand, tasks, natural_min)
                 # 문지기: 충돌은 기준보다 늘 수 없다 (안전 후퇴 금지).
@@ -228,8 +267,34 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                     continue
                 if rank(c) > best[0]:
                     best = (rank(c), c, name, cand)
+                if (rank(c)[:2] == base_rank[:2]
+                        and (runner is None or rank(c) > runner[0])):
+                    runner = (rank(c), c, name, cand)
 
-            improved = best[0] > rank(base)
+            # 쌍대 결투: 결정론 품질이 박빙일 때 opus 가 A/B 로 가른다.
+            # 계측이 근소하게 고른 승자를 사람 눈이 거부하면 채택을 물리고
+            # (거부권), 근소하게 진 도전자를 사람 눈이 고르면 승격시킨다.
+            duel_pick = None
+            challenger = best if best[2] != 'current' else runner
+            if (client is not None and challenger is not None
+                    and challenger[2] != 'current'
+                    and challenger[0][:2] == base_rank[:2]
+                    and abs(challenger[1]['quality'] - base['quality'])
+                    <= DUEL_MARGIN):
+                try:
+                    duel_pick = hold_duel(client, tasks[0], current,
+                                          challenger[3], natural_min)
+                except Exception as e:
+                    print('  결투 실패(계속 진행): %s' % e, flush=True)
+                if duel_pick == 'B' and best[2] == 'current':
+                    best = challenger                    # 승격
+                    duel_flips += 1
+                elif duel_pick == 'A' and best[2] != 'current':
+                    best = (base_rank, base, 'current', dict(current))  # 거부권
+                    duel_flips += 1
+
+            improved = best[0] > base_rank or (
+                duel_pick == 'B' and best[2] != 'current')
             stagnant = 0 if improved else stagnant + 1
             base = best[1]
             current = best[3]
@@ -244,7 +309,8 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
 
             # 평가 래칫: 전원 성공이 2회 이어지면 자연스러움 문턱을 올린다.
             # 행동이 좋아질수록 평가도 엄해진다 - '점점 평가 개선'.
-            if base['collision'] == 0 and base['success'] >= len(tasks):
+            if (tasks and base['collision'] == 0
+                    and base['success'] >= len(tasks)):
                 perfect_streak += 1
                 if perfect_streak >= 2 and natural_min < 85:
                     natural_min += 5
@@ -260,11 +326,20 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                             'counts': {k: base[k] for k in C.STAGES},
                             'quality': round(base['quality'], 1),
                             'natural_min': natural_min,
-                            'naturalness': naturalness, 'picked': best[2],
+                            'naturalness': naturalness, 'rubric': rubric,
+                            'duel': duel_pick, 'picked': best[2],
                             'stagnant': stagnant,
                             'params': dict(current),
                             'ts': time.strftime('%H:%M')})
+            # 결투가 계측 선택을 자꾸 뒤집으면 품질 가중치가 사람 눈과
+            # 어긋난 것이다 - 지표 감사 원칙대로 신호를 남긴다.
+            if duel_flips == 3:
+                duel_flips += 1     # 한 번만 알린다
+                print('[감사] 결투가 계측 선택을 3회 뒤집음 - quality() '
+                      '가중치(효율/저크)가 사람 눈과 어긋날 수 있음', flush=True)
             nat = ' 자연 %s/10' % naturalness if naturalness else ''
+            if duel_pick:
+                nat += ' 결투:%s' % duel_pick
             print('[%s] 반복 %d(문턱 %d): %s 채택, %s%s%s'
                   % (time.strftime('%H:%M'), it, natural_min, best[2],
                      fmt(base), nat,

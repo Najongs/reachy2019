@@ -228,6 +228,13 @@ def ready_pose():
 _BEHAVIOR_FILE = os.path.join(HERE, '..', 'config', 'behavior_params.json')
 
 
+# 기준(문헌) 파라미터 - config 로드/루프 갱신 전의 값. 태스크 실현가능성
+# 판정은 이걸로 고정한다: '가능한 태스크' 의 정의가 학습 중인 파라미터를
+# 따라 움직이면, 파라미터가 나빠질수록 가능한 태스크가 사라지는 순환이 된다
+# (실제로 10시간 루프가 이걸로 빈 태스크 -> 0/0 공회전에 빠졌다).
+DEFAULTS = dict(BEHAVIOR)
+
+
 def load_behavior():
     try:
         with open(_BEHAVIOR_FILE, encoding='utf-8') as fh:
