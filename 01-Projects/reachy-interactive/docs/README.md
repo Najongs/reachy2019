@@ -15,6 +15,7 @@ docs/
 │  ├─ improve-loop.md     개선 루프 돌리는 법, 산출물, 복구
 │  ├─ world.md            MuJoCo 월드: 기구학 일치, 카메라, 시선
 │  ├─ motion-presets.md   키프레임 동작 학습 분기 (프리셋 만들기)
+│  ├─ sim-to-real.md      시뮬->실물 전이 로드맵, 다리 도구(sim_bridge)
 │  └─ lessons.md          이 세션이 피로 배운 원칙들 (지표 감사)
 ├─ ops/
 │  ├─ runbook.md          증상 → 볼 곳 (장애 대응)
