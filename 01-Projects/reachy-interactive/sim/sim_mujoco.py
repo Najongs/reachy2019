@@ -317,10 +317,10 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
             out.append('%s<inertial pos="0 0 0" mass="0.05" '
                        'diaginertia="1e-4 1e-4 1e-4"/>' % pad)
             if jname == 'right_arm.hand.gripper':
-                # 실물 그리퍼는 z축 회전 조(claw)다 (viewer right_gripper_joint,
-                # 음수=벌림). 검증기 FK 는 그리퍼 각을 손 위치에 안 쓰므로
-                # CHAINS 축은 (0,0,0)이지만 시뮬은 실제로 돌린다.
-                out.append('%s<joint name="%s" axis="0 0 -1" '
+                # 실물 그리퍼 축: viewer 의 'z' 는 glb 노드 로컬 z 인데,
+                # 휴식 자세에서 그 방향은 몸통 기준 x 다 (glb 실측:
+                # 로컬 z -> 월드 [1,0,0]). 음수=벌림, invert 규약 반영.
+                out.append('%s<joint name="%s" axis="-1 0 0" '
                            'range="%g %g"/>' % (pad, jname, lim[0], lim[1]))
             elif any(axis):                     # 회전축이 있으면 관절
                 out.append('%s<joint name="%s" axis="%d %d %d" range="%g %g"/>'
