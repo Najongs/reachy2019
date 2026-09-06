@@ -105,7 +105,7 @@ def evaluate(params, tasks, natural_min=55):
     return counts
 
 
-def hold_duel(client, task, params_a, params_b, natural_min):
+def hold_duel(client, task, params_a, params_b, natural_min, save_to=None):
     """같은 태스크로 A(현재)/B(도전자) 를 돌려 opus 쌍대 심판. 'A'/'B'/None.
 
     결정론 품질 점수가 DUEL_MARGIN 이내로 갈리는 선택은 점수 잡음 밴드
@@ -119,7 +119,7 @@ def hold_duel(client, task, params_a, params_b, natural_min):
         _, _, fb = episode(task, keep_frames=True, natural_min=natural_min)
     finally:
         A.BEHAVIOR.update(saved)
-    r = C.duel(client, fa, fb, task['instruction'])
+    r = C.duel(client, fa, fb, task['instruction'], save_path=save_to)
     return (r or {}).get('winner')
 
 
@@ -201,9 +201,12 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     stagnant = 0
     perfect_streak = 0
     duel_flips = 0      # opus 가 계측 선택을 뒤집은 횟수 (보정 감사 신호)
-    out = os.path.join(HERE, '..', 'sim_data',
-                       'improve-%s.json' % time.strftime('%Y%m%d-%H%M%S'))
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    out = os.path.join(HERE, '..', 'sim_data', 'improve-%s.json' % stamp)
+    # 개선 과정을 눈으로 볼 수 있게 - 비평 에피소드 영상/스트립, 결투 비교.
+    media = os.path.join(HERE, '..', 'sim_data', 'improve-%s-media' % stamp)
+    os.makedirs(media, exist_ok=True)
+    print('과정 영상: %s' % os.path.normpath(media), flush=True)
 
     def checkpoint():
         with open(out, 'w', encoding='utf-8') as fh:
@@ -251,6 +254,11 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                         naturalness = crit.get('naturalness')
                         rubric = crit.get('rubric')
                         advice = crit.get('advice') or None
+                    if frames:
+                        A._write_video(frames, os.path.join(
+                            media, 'iter%04d.mp4' % it))
+                        C.save_strip(frames, os.path.join(
+                            media, 'iter%04d_strip.jpg' % it))
                 except Exception as e:
                     print('  비평 실패(계속 진행): %s' % e, flush=True)
 
@@ -283,8 +291,9 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                     and abs(challenger[1]['quality'] - base['quality'])
                     <= DUEL_MARGIN):
                 try:
-                    duel_pick = hold_duel(client, tasks[0], current,
-                                          challenger[3], natural_min)
+                    duel_pick = hold_duel(
+                        client, tasks[0], current, challenger[3], natural_min,
+                        save_to=os.path.join(media, 'iter%04d_duel.jpg' % it))
                 except Exception as e:
                     print('  결투 실패(계속 진행): %s' % e, flush=True)
                 if duel_pick == 'B' and best[2] == 'current':

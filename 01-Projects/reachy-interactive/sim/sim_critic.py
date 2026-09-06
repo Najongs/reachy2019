@@ -218,7 +218,17 @@ DUEL_PROMPT = """로봇 팔 동작 비교 심판이다. 이미지 위쪽 절반�
 JSON 한 줄로만: {{"winner": "A"|"B", "why": "한 문장"}}"""
 
 
-def duel(client, frames_a, frames_b, instruction):
+def save_strip(frames, path):
+    """필름 스트립을 파일로 (개선 과정을 눈으로 확인하는 용도)."""
+    from PIL import Image
+    st = strip_image(frames)
+    if st is None:
+        return False
+    Image.fromarray(st).save(path, quality=80)
+    return True
+
+
+def duel(client, frames_a, frames_b, instruction, save_path=None):
     """같은 태스크를 수행한 두 동작의 쌍대 비교. {'winner','why'} 또는 None.
 
     절대 점수는 호출마다 흔들려도 '어느 쪽이 낫나' 는 안정적이다. 결정론
@@ -242,6 +252,11 @@ def duel(client, frames_a, frames_b, instruction):
         strips.append(np.asarray(im))
     gap = np.full((12, strips[0].shape[1], 3), 255, dtype=strips[0].dtype)
     combo = np.concatenate([strips[0], gap, strips[1]], axis=0)
+    if save_path:
+        try:
+            Image.fromarray(combo).save(save_path, quality=80)
+        except Exception:
+            pass
     out = _parse_json(client.ask_vision(
         DUEL_PROMPT.format(instruction=instruction), image=_encode(combo, 1152)))
     if out and out.get('winner') in ('A', 'B'):
