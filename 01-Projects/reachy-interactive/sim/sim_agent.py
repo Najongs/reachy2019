@@ -367,7 +367,8 @@ def _trace_entry(world, watch=None, target=None, carried=False, ret=False):
 def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
            stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
            table_min=None, target_name=None, ignore_objs=(), target_stop=None,
-           on_step=None, step_cap=None, carried=False, ret=False):
+           on_step=None, step_cap=None, carried=False, ret=False,
+           stall_slack=3.0):
     """화면 오차로 손을 target 까지. sim_servo 와 같은 방식, World 위에서."""
     import numpy as np
 
@@ -428,7 +429,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         if len(dist_hist) >= 10 and dist_hist[-10] - d_now < 1.0:
             # 이미 코앞이면 '튕기며' 재진입하지 않는다 - 그냥 멈춘다
             # (가드가 마지막 mm 를 막는 상황: 물러나도 소용없다).
-            if recovered or d_now <= done_cm + 3.0:
+            if recovered or d_now <= done_cm + stall_slack:
                 if frames is not None:
                     frames.append(_snap(world, '%s 정체' % note))
                 return False
@@ -765,10 +766,29 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
     # 주의: 키 큰 물체(병)는 이 팔 기하에서 전완이 기대는 경우가 있다
     # (-1.9cm, 깊이와 무관 실측) - 판정이 충돌로 벌점하고, 회피 자세는
     # 경유 학습의 몫이다. 파지 깊이를 얕추면 작은 물체를 놓친다.
-    _servo(world, (cup[0], cup[1], cup[2] + half + 0.030), 1.2, steps=30,
-           obj_stop=1.0, ignore_objs=(bind,), target_stop=-0.5,
-           step_cap=2.5, frames=frames, note='descend', trace=trace,
-           target_name=bind, seed=2)
+    def _descend(pt):
+        _servo(world, (pt[0], pt[1], pt[2] + half + 0.030), 1.2, steps=30,
+               obj_stop=1.0, ignore_objs=(bind,), target_stop=-0.5,
+               step_cap=2.5, stall_slack=0.6, frames=frames, note='descend',
+               trace=trace, target_name=bind, seed=2)
+
+    def _aligned(pt):
+        h = world.hand()
+        return (math.hypot(h[0] - pt[0], h[1] - pt[1]) <= 0.012
+                and pt[2] + half - 0.005 <= h[2] <= pt[2] + half + 0.045)
+
+    _descend(cup)
+    if not _aligned(cup):
+        # 위치가 안 잡혔으면 닫지 않는다 (사용자: 다 도달해서 위치를
+        # 잡고 닫아라). 한 번 재조준·재하강하고, 그래도 아니면 실패 -
+        # 엉뚱한 데서 닫는 것보다 정직한 실패가 낫다.
+        if obj is None:
+            cup = _reaim(world, cup, frames=frames, note='재조준')
+        _descend(cup)
+    if not _aligned(cup):
+        if frames is not None:
+            frames.append(_snap(world, '정렬 실패 - 닫지 않음'))
+        return bind, half, False, world.object_pos(bind)
 
     orig = world.object_pos(bind)          # 원위치 (되돌려 놓기용)
     g = GRIP_OPEN
