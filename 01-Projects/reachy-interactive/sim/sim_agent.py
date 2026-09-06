@@ -209,7 +209,22 @@ BEHAVIOR = {
     'damping': 4.0,         # 최소제곱 감쇠 (크면 신중)
     'table_min': 0.5,       # 테이블 표면 여유 하한 cm (크면 높이 돈다)
     'lift_steps': 6,        # 들어올리기 각 단계 보간 수 (많으면 부드러움)
+    # 경로 '모양' - 비평가가 짚은 우회(효율 0.33)의 원인이 여기다. 벌림이
+    # 크면 안전하지만 멀리 돌고, 작으면 곧지만 테이블에 가까워진다. 어느
+    # 쪽이 나은지는 손이 아니라 루프가 정한다(투과는 문지기가 걸러 준다).
+    'ready_pitch': -8.0,    # 준비 자세 어깨 상하
+    'ready_roll': -66.0,    # 준비 자세 벌림 (덜 벌리면 우회가 준다)
+    'ready_yaw': 32.0,      # 준비 자세 상완 비틀기
+    'ready_elbow': -124.0,  # 준비 자세 팔꿈치
 }
+
+
+def ready_pose():
+    """BEHAVIOR 에서 준비 자세를 만든다 - 경로 모양도 학습 대상이므로."""
+    return {'right_arm.shoulder_pitch': BEHAVIOR['ready_pitch'],
+            'right_arm.shoulder_roll': BEHAVIOR['ready_roll'],
+            'right_arm.arm_yaw': BEHAVIOR['ready_yaw'],
+            'right_arm.elbow_pitch': BEHAVIOR['ready_elbow']}
 _BEHAVIOR_FILE = os.path.join(HERE, '..', 'config', 'behavior_params.json')
 
 
@@ -242,22 +257,23 @@ def _lift_ready(world, frames=None, trace=None, steps=None):
     사람이 하듯 팔을 옆으로 벌려 테이블 옆면 밖에서 굽힌 뒤 위에서 돌려
     넣으면 경로 최소 여유 9.5cm, 투과 0 이다.
     """
+    ready = ready_pose()
     stages = [
-        {'right_arm.shoulder_roll': READY['right_arm.shoulder_roll']},
-        {'right_arm.elbow_pitch': READY['right_arm.elbow_pitch'],
-         'right_arm.shoulder_pitch': READY['right_arm.shoulder_pitch']},
-        {'right_arm.arm_yaw': READY['right_arm.arm_yaw']},
+        {'right_arm.shoulder_roll': ready['right_arm.shoulder_roll']},
+        {'right_arm.elbow_pitch': ready['right_arm.elbow_pitch'],
+         'right_arm.shoulder_pitch': ready['right_arm.shoulder_pitch']},
+        {'right_arm.arm_yaw': ready['right_arm.arm_yaw']},
     ]
     if steps is None:
         steps = int(BEHAVIOR['lift_steps'])
-    cur = {j: world.pose.get(j, 0.0) for j in READY}
+    cur = {j: world.pose.get(j, 0.0) for j in ready}
     for stage in stages:
         tgt = dict(cur)
         tgt.update(stage)
         for k in range(1, steps + 1):
             u = k / float(steps)
             wgt = u * u * (3 - 2 * u)           # smoothstep
-            pose = {j: cur[j] + (tgt[j] - cur[j]) * wgt for j in READY}
+            pose = {j: cur[j] + (tgt[j] - cur[j]) * wgt for j in ready}
             if not sv.in_bounds({**world.pose, **pose}):
                 continue
             world.set_arm(pose)

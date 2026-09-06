@@ -36,15 +36,33 @@ import sim_tasks as T                              # noqa: E402
 
 # 파라미터 허용 범위 - 이 밖은 물리적으로 무의미하거나 위험.
 BOUNDS = {'step_deg': (1.5, 8.0), 'gain': (0.3, 1.4), 'damping': (1.0, 10.0),
-          'table_min': (0.2, 3.0), 'lift_steps': (3, 14)}
+          'table_min': (0.2, 3.0), 'lift_steps': (3, 14),
+          # 경로 모양 - 우회를 줄일 수 있는 손잡이. 투과는 문지기가 거른다.
+          'ready_pitch': (-40.0, 15.0), 'ready_roll': (-110.0, -25.0),
+          'ready_yaw': (0.0, 60.0), 'ready_elbow': (-125.0, -60.0)}
+INT_PARAMS = ('lift_steps',)
 
 
 def _clamp(params):
     out = {}
     for k, (lo, hi) in BOUNDS.items():
         v = max(lo, min(hi, params.get(k, A.BEHAVIOR[k])))
-        out[k] = int(round(v)) if k == 'lift_steps' else round(float(v), 2)
+        out[k] = int(round(v)) if k in INT_PARAMS else round(float(v), 2)
     return out
+
+
+def _jitter(current, rng, scale=1.0):
+    """현재 주변의 무작위 후보. 각도형 파라미터는 덧셈, 배율형은 곱셈."""
+    j = dict(current)
+    for k in BOUNDS:
+        if rng.random() < 0.5:
+            continue
+        if k.startswith('ready_'):
+            span = (BOUNDS[k][1] - BOUNDS[k][0]) * 0.12 * scale
+            j[k] = current[k] + rng.uniform(-span, span)
+        else:
+            j[k] = current[k] * rng.uniform(1 - 0.25 * scale, 1 + 0.3 * scale)
+    return j
 
 
 def episode(task, keep_frames=False):
@@ -79,89 +97,160 @@ def evaluate(params, tasks):
     return oks, sum(scores) / max(len(scores), 1)
 
 
-def propose(current, advice, rng, n_random=3):
-    """후보들: 현재 / 조언 반영 / 무작위 흔들기."""
+def propose(current, advice, rng, n_random=3, scale=1.0):
+    """후보들: 현재 / 조언 반영 / 무작위 흔들기(scale 로 폭 조절)."""
     cands = [('current', dict(current))]
     if advice:
         adv = dict(current)
         for k, direction in advice.items():
             if k not in BOUNDS:
                 continue
-            factor = 1.25 if direction == 'up' else 0.8
-            adv[k] = current[k] * factor
+            if k.startswith('ready_'):
+                span = (BOUNDS[k][1] - BOUNDS[k][0]) * 0.15
+                adv[k] = current[k] + (span if direction == 'up' else -span)
+            else:
+                adv[k] = current[k] * (1.25 if direction == 'up' else 0.8)
         cands.append(('advice', adv))
     for i in range(n_random):
-        j = dict(current)
-        for k in BOUNDS:
-            if rng.random() < 0.5:
-                j[k] = current[k] * rng.uniform(0.75, 1.3)
-        cands.append(('jitter%d' % i, j))
+        cands.append(('jitter%d' % i, _jitter(current, rng, scale)))
     return [(name, _clamp(c)) for name, c in cands]
 
 
-def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080'):
+REFRESH_EVERY = 6       # 이 횟수마다 태스크 묶음을 새로 뽑는다 (과적합 방지)
+VALIDATE_EVERY = 60     # end-to-end 검증 주기
+CRITIQUE_EVERY = 3      # opus 비평 주기 (10시간 기준 시간당 ~20콜 수준)
+
+
+def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
+        hours=None):
+    """개선 루프. hours 를 주면 그 시간 동안 계속 돈다 (iters 무시)."""
     rng = random.Random(seed)
-    print('개선 루프: 반복 %d회, 태스크 %d개 고정(비교 가능하게)' % (iters, n_tasks))
-    tasks = T.generate_feasible(n_tasks, seed=seed, kinds=('reach',))
-    for t in tasks:
-        print('  -', t['instruction'][:40])
+    deadline = time.time() + hours * 3600 if hours else None
+    label = '%.1f시간' % hours if hours else '%d회' % iters
+    print('개선 루프: %s, 태스크 %d개 (%d회마다 교체)'
+          % (label, n_tasks, REFRESH_EVERY), flush=True)
 
     client = None
     if token:
         from llm_client import BrokerClient
         client = BrokerClient(url, token=token, session='sim-critic')
 
+    def new_tasks(k):
+        ts = T.generate_feasible(n_tasks, seed=seed * 977 + k, kinds=('reach',))
+        return ts
+
+    tasks = new_tasks(0)
     history = []
     current = _clamp(dict(A.BEHAVIOR))
     base_ok, base_q = evaluate(current, tasks)
-    print('\n반복 0 (기준): 성공 %d/%d, 품질 %.0f  %s'
-          % (base_ok, len(tasks), base_q, current))
-    history.append({'iter': 0, 'ok': base_ok, 'quality': round(base_q, 1),
-                    'params': dict(current)})
-
-    for it in range(1, iters + 1):
-        # 1) 대표 에피소드의 프레임으로 opus 비평 (반복당 1회)
-        advice, naturalness = None, None
-        if client is not None:
-            A.BEHAVIOR.update(current)
-            ok, q, frames = episode(tasks[0], keep_frames=True)
-            crit = C.critique(client, C.pick_frames(frames, 3),
-                              tasks[0]['instruction'], q)
-            if crit:
-                naturalness = crit.get('naturalness')
-                advice = crit.get('advice') or None
-                print('반복 %d 비평: 자연스러움 %s/10  지적 %s  조언 %s'
-                      % (it, naturalness,
-                         (crit.get('issues') or ['-'])[0][:44], advice))
-
-        # 2) 후보 생성 -> 같은 태스크로 평가
-        best = (base_ok, base_q, 'current', dict(current))
-        for name, cand in propose(current, advice, rng):
-            ok, qual = evaluate(cand, tasks)
-            gate = ok >= base_ok            # 객관 성공은 후퇴 금지 (문지기)
-            mark = '통과' if gate else '탈락(성공 후퇴)'
-            print('   %-8s 성공 %d/%d 품질 %.0f  %s'
-                  % (name, ok, len(tasks), qual, mark))
-            if gate and (qual > best[1] or (qual == best[1] and ok > best[0])):
-                best = (ok, qual, name, cand)
-
-        base_ok, base_q = best[0], best[1]
-        current = best[3]
-        A.BEHAVIOR.update(current)
-        A.save_behavior(current)
-        history.append({'iter': it, 'ok': base_ok, 'quality': round(base_q, 1),
-                        'naturalness': naturalness, 'picked': best[2],
-                        'params': dict(current)})
-        print('반복 %d 채택: %s -> 성공 %d/%d 품질 %.0f\n'
-              % (it, best[2], base_ok, len(tasks), base_q))
-
+    best_ever = {'quality': base_q, 'ok': base_ok, 'params': dict(current)}
+    stagnant = 0
     out = os.path.join(HERE, '..', 'sim_data',
                        'improve-%s.json' % time.strftime('%Y%m%d-%H%M%S'))
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out, 'w', encoding='utf-8') as fh:
-        json.dump({'tasks': [t['id'] for t in tasks], 'history': history},
-                  fh, ensure_ascii=False, indent=1)
-    print('품질 추이: %s' % ' -> '.join('%.0f' % h['quality'] for h in history))
+
+    def checkpoint():
+        with open(out, 'w', encoding='utf-8') as fh:
+            json.dump({'history': history, 'best_ever': best_ever},
+                      fh, ensure_ascii=False, indent=1)
+
+    print('반복 0 (기준): 성공 %d/%d, 품질 %.0f  %s'
+          % (base_ok, len(tasks), base_q, current), flush=True)
+    history.append({'iter': 0, 'ok': base_ok, 'quality': round(base_q, 1),
+                    'params': dict(current), 'ts': time.strftime('%H:%M')})
+
+    it = 0
+    while True:
+        it += 1
+        if deadline is not None:
+            if time.time() >= deadline:
+                break
+        elif it > iters:
+            break
+
+        try:
+            # 태스크 교체: 같은 4개에 과적합되지 않게. 교체하면 기준 재측정.
+            if it % REFRESH_EVERY == 0:
+                tasks = new_tasks(it)
+                base_ok, base_q = evaluate(current, tasks)
+                print('[%s] 반복 %d: 태스크 교체 -> 기준 성공 %d/%d 품질 %.0f'
+                      % (time.strftime('%H:%M'), it, base_ok, len(tasks),
+                         base_q), flush=True)
+
+            # opus 비평 (주기적으로; 실패해도 루프는 계속)
+            advice, naturalness = None, None
+            if client is not None and it % CRITIQUE_EVERY == 1:
+                try:
+                    A.BEHAVIOR.update(current)
+                    ok, q, frames = episode(tasks[0], keep_frames=True)
+                    crit = C.critique(client, C.pick_frames(frames, 3),
+                                      tasks[0]['instruction'], q)
+                    if crit:
+                        naturalness = crit.get('naturalness')
+                        advice = crit.get('advice') or None
+                except Exception as e:
+                    print('  비평 실패(계속 진행): %s' % e, flush=True)
+
+            # 정체하면 탐색 폭을 넓힌다 (담금질). 개선되면 되돌린다.
+            scale = min(3.0, 1.0 + stagnant * 0.35)
+            n_random = 3 + min(3, stagnant // 2)
+
+            best = (base_ok, base_q, 'current', dict(current))
+            for name, cand in propose(current, advice, rng, n_random, scale):
+                ok, qual = evaluate(cand, tasks)
+                if ok >= base_ok and (qual > best[1]
+                                      or (qual == best[1] and ok > best[0])):
+                    best = (ok, qual, name, cand)
+
+            improved = best[1] > base_q + 0.01
+            stagnant = 0 if improved else stagnant + 1
+            base_ok, base_q = best[0], best[1]
+            current = best[3]
+            A.BEHAVIOR.update(current)
+            A.save_behavior(current)
+            if base_q > best_ever['quality'] and base_ok >= len(tasks):
+                best_ever = {'quality': base_q, 'ok': base_ok,
+                             'params': dict(current), 'iter': it}
+
+            history.append({'iter': it, 'ok': base_ok,
+                            'quality': round(base_q, 1),
+                            'naturalness': naturalness, 'picked': best[2],
+                            'stagnant': stagnant,
+                            'params': dict(current),
+                            'ts': time.strftime('%H:%M')})
+            nat = ' 자연 %s/10' % naturalness if naturalness else ''
+            print('[%s] 반복 %d: %s 채택, 성공 %d/%d 품질 %.0f%s%s'
+                  % (time.strftime('%H:%M'), it, best[2], base_ok, len(tasks),
+                     base_q, nat,
+                     ' (정체 %d)' % stagnant if stagnant else ''), flush=True)
+            checkpoint()
+
+            # 주기적 end-to-end 검증: opus 접지 포함 실전 배치가 여전히 되나.
+            if client is not None and it % VALIDATE_EVERY == 0:
+                try:
+                    import sim_pipeline as PL
+                    rid, summ, flags = PL.run_batch(
+                        4, ('look', 'reach'), 'broker', url, token,
+                        seed=it, tag='improve-check%d' % it)
+                    print('[%s] end-to-end 검증: %d/%d, 감사 %s'
+                          % (time.strftime('%H:%M'), summ['success'],
+                             summ['n'], '깨끗' if not flags else flags[0][:40]),
+                          flush=True)
+                except Exception as e:
+                    print('  검증 실패(계속 진행): %s' % e, flush=True)
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            # 장기 실행: 어떤 예외도 루프를 죽이지 않는다. 기록하고 계속.
+            print('[%s] 반복 %d 예외(계속): %s: %s'
+                  % (time.strftime('%H:%M'), it, type(e).__name__, e),
+                  flush=True)
+            time.sleep(5)
+
+    checkpoint()
+    qs = [h['quality'] for h in history]
+    print('품질 추이: %.0f -> %.0f (최고 %.0f, 반복 %d회)'
+          % (qs[0], qs[-1], best_ever['quality'], len(history) - 1))
     print('기록: %s  |  채택 파라미터: config/behavior_params.json' % out)
     return history
 
@@ -171,12 +260,14 @@ def main():
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--iters', type=int, default=3)
+    ap.add_argument('--hours', type=float, help='시간 예산 (주면 iters 무시)')
     ap.add_argument('--tasks', type=int, default=4)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--token')
     ap.add_argument('--url', default='http://127.0.0.1:8080')
     args = ap.parse_args()
-    run(args.iters, args.tasks, args.seed, args.token, args.url)
+    run(args.iters, args.tasks, args.seed, args.token, args.url,
+        hours=args.hours)
 
 
 if __name__ == '__main__':
