@@ -323,11 +323,11 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
                 # 밖(부모 스코프)에 거울상 충돌 상자로.
                 ct0, ca0 = GROUP[side]
                 out.append('%s<geom name="right_arm_jaw_fixed" type="box" '
-                           'material="%s" contype="%d" conaffinity="%d" '
-                           'size="0.010 0.008 0.045" '
+                           'material="grip" contype="%d" conaffinity="%d" '
+                           'size="0.010 0.006 0.042" '
                            'pos="%.4f %.4f %.4f"/>'
-                           % (pad, 'hidden' if mesh else 'grip', ct0, ca0,
-                              trans[0], trans[1] + 0.020, trans[2] - 0.001))
+                           % (pad, ct0, ca0,
+                              trans[0], trans[1] + 0.023, trans[2] - 0.001))
             out.append('%s<body name="%s" pos="%.4f %.4f %.4f">'
                        % (pad, _body_name(jname), trans[0], trans[1], trans[2]))
             depth += 1
@@ -382,10 +382,14 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
                        'material="%s" contype="%d" conaffinity="%d" '
                        'size="0.012"/>' % (pad, 'hidden' if mesh else mat,
                                            ct, ca))
+            # 충돌 상자는 보이는 조 메시의 잡는 면과 일치해야 한다 -
+            # 어긋나면 '안 닿았는데 집히는' 그림이 된다 (사용자 발견:
+            # 옛 상자는 안쪽으로 0.8cm 튀어나와 있었다). 항상 보이게 해
+            # 닿는 곳과 보이는 곳을 같게 유지한다.
             out.append('%s<geom name="right_arm_jaw_moving" type="box" '
-                       'material="%s" contype="%d" conaffinity="%d" '
-                       'size="0.010 0.008 0.045" pos="0 -0.030 -0.001"/>'
-                       % (pad, 'hidden' if mesh else 'grip', ct, ca))
+                       'material="grip" contype="%d" conaffinity="%d" '
+                       'size="0.010 0.006 0.042" pos="0 -0.020 -0.001"/>'
+                       % (pad, ct, ca))
         else:
             out.append('%s<geom name="%s_tip" type="sphere" material="%s" '
                        'contype="%d" conaffinity="%d" size="%.4f"/>'

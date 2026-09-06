@@ -574,12 +574,20 @@ def _retreat(world, frames=None, trace=None, target_name=None):
             if not sv.in_bounds({**world.pose, **pose}):
                 continue
             world.set_arm(pose)
-            world.nudge_gaze((0.5, 0.0, 0.0), BEHAVIOR['gaze_step_deg'])
+            # 복귀 중에도 팔을 본다 - 사람도 팔을 거둘 때 눈이 따라온다.
+            # 정면 복귀는 팔이 다 돌아온 다음이다.
+            world.nudge_gaze(world.hand(), BEHAVIOR['gaze_step_deg'])
             if trace is not None:
                 trace.append(_trace_entry(world, None, target_name, ret=True))
             if frames is not None:
                 frames.append(_snap(world, 'return'))
         cur = tgt
+    # 팔이 휴식에 닿았다 - 이제 시선을 정면(초기자세)으로 활강.
+    world.glide_gaze(0.0, 0.0, x=0.5,
+                     max_step_deg=BEHAVIOR['gaze_step_deg'],
+                     on_step=(lambda i, n: frames.append(
+                         _snap(world, '정면 복귀')))
+                     if frames is not None else None)
     return True
 
 
