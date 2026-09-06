@@ -40,7 +40,7 @@ dist/
 01-Projects/reachy-interactive/music/*.mp3
 
 # 시뮬 학습이 돌 때마다 새로 쓰는 것들
-**/sim_results.json
+**/sim_results*.json
 **/sim_commands.json
 **/sim_lessons.json
 **/sim_gallery/
