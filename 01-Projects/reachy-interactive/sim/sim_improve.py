@@ -100,6 +100,7 @@ def episode(task, keep_frames=False, natural_min=55):
             q.get('score', 0) if uses_arm else 100, natural_min)
         q['stage'], q['why'] = stage, why
         q['final_cm'] = round(final_cm, 1)
+        q['reached'] = reached
         return stage, q, frames
     finally:
         world.close()
@@ -114,7 +115,13 @@ def evaluate(params, tasks, natural_min=55):
         stage, q, _ = episode(t, natural_min=natural_min)
         counts[stage] += 1
         scores.append(q.get('score', 0))
-        dists.append(q.get('final_cm', 99.0))
+        # 거리는 '부족분' 만 센다. 도달했으면 0 - 도달한 것끼리 0.1cm 를
+        # 다투게 두면 거리가 품질(자연스러움)을 영원히 눌러, 비평이
+        # 짚어준 과신전·우회가 순위에 반영될 기회를 잃는다 (실제로 그랬다).
+        if q.get('reached'):
+            dists.append(0.0)
+        else:
+            dists.append(max(0.0, q.get('final_cm', 99.0) - 14.0))
     counts['quality'] = sum(scores) / max(len(scores), 1)
     counts['miss_cm'] = sum(dists) / max(len(dists), 1)
     return counts
@@ -231,11 +238,10 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     def rank(counts):
         """충돌 적게 > 성공 많이 > 목표에 가깝게 > 품질 높게.
 
-        '가깝게' 가 품질보다 앞이라는 게 요점이다. 전원이 성공 0 으로
-        동률일 때 품질만 남으면, 품질 지표(짧은 경로·저저크·큰 여유)는
-        소심하게 안 가는 동작에 만점을 준다 - 실제로 1099회 동안
-        "우아하게 실패하는 법" 을 학습했다. 거리가 앞에 있으면 실패
-        중에도 목표 쪽으로 가는 압력이 살아 있다.
+        거리는 **부족분**(도달 못한 만큼)이다. 도달하면 0 이라 전원
+        성공이면 거리 동률 -> 품질이 결정한다. 실패 중에는 '더 가까이'
+        압력이 살아 있다. 날거리로 두면 성공끼리 0.1cm 를 다투느라
+        품질(비평이 짚는 과신전·우회)이 영원히 발언권을 잃는다.
         """
         return (-counts['collision'], counts['success'],
                 -round(counts.get('miss_cm', 99.0), 1), counts['quality'])

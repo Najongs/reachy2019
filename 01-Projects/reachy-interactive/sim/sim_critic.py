@@ -66,7 +66,14 @@ def quality(trace):
     views = [t['view'] for t in trace if 'view' in t]
     view_ratio = (sum(views) / len(views)) if views else None
 
+    # 과신전: 어깨에서 손까지 최대 신장. 팔 전장 ~60cm 에서 50cm 넘게
+    # 뻗으며 올라오면 사람 눈에 '너무 뻗는' 동작이다 - 비평가가 지표로
+    # 보고 via 자세 조언에 쓴다 (배점은 효율이 이미 우회를 벌점한다).
+    shoulder = (0.0, -0.19, 0.0)
+    stretch = max(dist(h, shoulder) for h in hands) * 100
+
     metrics = {
+        'stretch_max_cm': round(stretch, 1),
         'efficiency': round(efficiency, 3),
         'jerk_deg': round(jerk, 2),
         'min_margin_cm': round(margin, 1),
