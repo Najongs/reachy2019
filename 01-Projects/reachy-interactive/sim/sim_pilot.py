@@ -183,29 +183,15 @@ def run_episode(world, task, client, frames=None, trace=None, noise_px=2.0,
             if xy > 0.014:
                 st['last'] = 'close 거부: 정렬 미달 (수평 %.1fcm > 1.4)' % (xy * 100)
                 continue
-            gd = A.GRIP_OPEN
-            for _ in range(24):
-                cgap = world.clearance_of(bind)
-                if cgap <= 0.15 or gd >= A.GRIP_SHUT:
-                    break
-                gd = min(A.GRIP_SHUT, gd + (3.0 if cgap < 1.0 else 6.0))
-                world.set_arm({'right_arm.hand.gripper': gd})
-                snap('조임')
-            while world.clearance_of(bind) < -0.15 and gd > A.GRIP_OPEN:
-                gd -= 2.0
-                world.set_arm({'right_arm.hand.gripper': gd})
-            ok = gd < A.GRIP_SHUT and world.clearance_of(bind) <= 0.4
-            if trace is not None:
-                trace.append(A._trace_entry(world, None, bind))
+            ok, why = A._close_on(world, bind, half, frames=frames,
+                                  trace=trace)
             if ok:
                 st.update(bind=bind, half=half, holding=True,
                           orig=world.object_pos(bind))
                 st['last'] = 'close 성공 (잡음)'
                 st['phase'] = '잡음'
             else:
-                st['last'] = 'close 실패: 맞물림 안 됨 (여유 %.1fcm)' \
-                    % world.clearance_of(bind)
-            snap('잡기 %s' % ('성공' if ok else '실패'))
+                st['last'] = 'close 실패: %s' % why
         elif c == 'lift' and st['holding']:
             follow = A._hold_offset(world, st['bind'])
             h = world.hand()

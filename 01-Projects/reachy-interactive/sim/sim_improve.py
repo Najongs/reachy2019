@@ -80,6 +80,7 @@ def episode(task, keep_frames=False, natural_min=55):
     world = T.build_world(task)
     frames = [] if keep_frames else None
     trace = []
+    A.INCIDENTS.clear()
     try:
         planner = A.OraclePlanner()
         view = planner.perceive(world, task)
@@ -102,6 +103,7 @@ def episode(task, keep_frames=False, natural_min=55):
         q['stage'], q['why'] = stage, why
         q['final_cm'] = round(final_cm, 1)
         q['reached'] = reached
+        q['incidents'] = list(A.INCIDENTS)
         return stage, q, frames
     finally:
         world.close()
@@ -116,6 +118,7 @@ def evaluate(params, tasks, natural_min=55):
         stage, q, _ = episode(t, natural_min=natural_min)
         counts[stage] += 1
         scores.append(q.get('score', 0))
+        counts.setdefault('incidents', set()).update(q.get('incidents') or [])
         # 거리는 '부족분' 만 센다. 도달했으면 0 - 도달한 것끼리 0.1cm 를
         # 다투게 두면 거리가 품질(자연스러움)을 영원히 눌러, 비평이
         # 짚어준 과신전·우회가 순위에 반영될 기회를 잃는다 (실제로 그랬다).
@@ -422,6 +425,14 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             # 시험지 채점: 훈련셋은 선택용, 기록·래칫·최고 갱신은 전부
             # 고정 시험지로 - 추이가 태스크 교체에 흔들리지 않는다.
             report = evaluate(current, exam, natural_min)
+            # 관찰자: 절차가 남긴 사건을 지적 원장으로 자동 승격한다 -
+            # 사람이 영상을 봐야만 잡히던 결함(허공 조임 등)의 기계화.
+            for inc in sorted(report.get('incidents') or []):
+                note = '[관찰] ' + inc
+                if not any(f['note'] == note for f in feedback):
+                    feedback.append({'note': note, 'done': False, 'iter': it})
+                    save_feedback(feedback)
+                    print('[관찰자] 사건 등록: %s' % inc, flush=True)
             if (report['collision'] == 0 and report['success'] >= len(exam)
                     and report['quality'] > best_ever['quality']):
                 best_ever = {'quality': report['quality'],
