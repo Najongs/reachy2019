@@ -34,7 +34,11 @@ def quality(trace):
     if len(trace) < 3:
         return {'score': 0, 'note': '궤적이 너무 짧음'}
 
-    hands = [t['hand'] for t in trace if 'hand' in t]
+    # 복귀(ret) 구간은 품질 계산에서 뺀다 - 임무 후 팔을 거두는 길이를
+    # 효율/스텝으로 벌점하면 복귀 자체를 못 하게 된다. 충돌·여유 검사는
+    # 전체 구간(복귀 포함)으로 한다.
+    core = [t for t in trace if not t.get('ret')]
+    hands = [t['hand'] for t in core if 'hand' in t]
     if len(hands) < 3:
         return {'score': 0, 'note': '손 궤적 없음'}
 
@@ -46,7 +50,7 @@ def quality(trace):
     efficiency = straight / path if path > 1e-6 else 0.0
 
     # 저크: 관절 속도(스텝 간 변화)의 변화량 평균. 작을수록 부드럽다.
-    joints = [t['joints'] for t in trace if 'joints' in t]
+    joints = [t['joints'] for t in core if 'joints' in t]
     jerk = 0.0
     if len(joints) >= 3:
         keys = joints[0].keys()
@@ -63,7 +67,7 @@ def quality(trace):
 
     # 시야 유지: 목표가 눈 화면에 있던 스텝 비율. 실물은 눈 뷰만 보고
     # 동작하므로 목표를 잃는 목 움직임은 그 자체로 나쁜 동작이다.
-    views = [t['view'] for t in trace if 'view' in t]
+    views = [t['view'] for t in core if 'view' in t]
     view_ratio = (sum(views) / len(views)) if views else None
 
     # 과신전: 어깨에서 손까지 최대 신장. 팔 전장 ~60cm 에서 50cm 넘게
@@ -78,7 +82,7 @@ def quality(trace):
         'jerk_deg': round(jerk, 2),
         'min_margin_cm': round(margin, 1),
         'avg_margin_cm': round(avg_margin, 1),
-        'steps': len(trace),
+        'steps': len(core),
         'path_cm': round(path * 100, 1),
         'view_ratio': round(view_ratio, 2) if view_ratio is not None else None,
     }
@@ -88,12 +92,12 @@ def quality(trace):
     score += 35 * min(1.0, efficiency / 0.7)          # 0.7 이면 만점 (우회 포함)
     score += 25 * max(0.0, 1.0 - jerk / 6.0)          # 저크 6도/스텝이면 0점
     score += 20 * max(0.0, min(1.0, (margin - (-0.5)) / 4.0))   # 여유 3.5cm+ 만점
-    score += 5 * max(0.0, 1.0 - max(0, len(trace) - 20) / 40.0)
+    score += 5 * max(0.0, 1.0 - max(0, len(core) - 20) / 40.0)
     score += 10 * (view_ratio if view_ratio is not None else 1.0)
 
     # 접촉 부드러움: 대상에 가장 가까웠던 순간의 손 속도. 접촉(집기)은
     # 허용이지만 '쿵' 은 안 된다 - 사람도 잡기 직전에 손을 늦춘다.
-    tgts = [t.get('tgt') for t in trace]
+    tgts = [t.get('tgt') for t in core]
     touch_speed = None
     if any(v is not None for v in tgts):
         i = min((v, k) for k, v in enumerate(tgts) if v is not None)[1]

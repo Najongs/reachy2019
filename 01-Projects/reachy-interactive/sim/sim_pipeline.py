@@ -69,8 +69,9 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
         # 아니다 - 접지는 여전히 박스 번호로만 한다.
         plan.setdefault('target', task['target'])
         trace = []
-        A.execute(world, plan, frames=frames, trace=trace)
-        verdict = _verdict(world, task, trace)
+        done = bool(A.execute(world, plan, frames=frames, trace=trace,
+                              check=lambda: T.success_fn(task)(world)))
+        verdict = _verdict(world, task, trace, reached=done)
 
         # 역할 5: 실패면 지적을 만들어 1회 재시도. 지적은 결정론(검증 결과)에서.
         if retry and not verdict['success'] and plan.get('mode') != 'noop':
@@ -79,8 +80,9 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
                 planner.lessons.append(finding)
             view2 = planner.perceive(world, task)
             plan2 = planner.plan(world, task, view2)
-            A.execute(world, plan2, frames=frames, trace=trace)
-            v2 = _verdict(world, task, trace)
+            done2 = bool(A.execute(world, plan2, frames=frames, trace=trace,
+                                   check=lambda: T.success_fn(task)(world)))
+            v2 = _verdict(world, task, trace, reached=done2)
             if v2['success']:
                 verdict = v2
                 rec['plan']['retry'] = plan2.get('mode')
@@ -124,14 +126,15 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
 NATURAL_MIN = 55        # 자연스러움 문턱 (sim_improve 의 래칫과 같은 시작값)
 
 
-def _verdict(world, task, trace=None):
+def _verdict(world, task, trace=None, reached=None):
     """3단계 판정: 1 충돌 없이 -> 2 자연스럽게 -> 3 성공.
 
     순서가 정의다. 경로 어디서든 충돌이면 그걸로 끝이고, 도달했어도 품질이
     문턱 미달이면 '부자연' 이지 성공이 아니다. look 처럼 팔을 안 쓰는
     태스크는 품질 문턱을 건너뛴다(움직임이 없으니 잴 것도 없다).
     """
-    reached = bool(T.success_fn(task)(world))
+    if reached is None:
+        reached = bool(T.success_fn(task)(world))
     obj_gap, obj_pair = world.clearance(ignore=('table', task['target']))
     tgt_gap = world.clearance_of(task['target'])
     path_tab = min((t['table'] for t in (trace or [])), default=99)

@@ -333,7 +333,7 @@ def _lift_ready(world, frames=None, trace=None, steps=None, watch=None,
     return True
 
 
-def _trace_entry(world, watch=None, target=None, carried=False):
+def _trace_entry(world, watch=None, target=None, carried=False, ret=False):
     # 대상 물체는 따로 잰다: 집기·접근은 대상에 '닿는' 게 목표라, 대상
     # 접촉을 충돌로 세면 다가가는 것 자체가 벌점이 된다 (사용자 지적).
     # 테이블·다른 물체만 회피 대상이고, 대상은 관통(-1cm 초과)만 금지.
@@ -347,6 +347,8 @@ def _trace_entry(world, watch=None, target=None, carried=False):
         # carried(운반 중)면 재지 않는다: 잡힌 물체는 손에 붙어 있어
         # 팔-대상 겹침이 파지 그 자체다. 잡기 깊이는 하강 구간이 남긴다.
         e['tgt'] = world.clearance_of(target)
+    if ret:
+        e['ret'] = 1        # 복귀 구간: 품질(효율 등)에선 빼고 충돌 검사엔 넣는다
     if watch is not None:
         # 실물은 눈 뷰만 보고 동작한다 - 목표를 시야에서 잃으면 서보가
         # 눈이 먼다. 목표가 화면 안에 있었는지를 궤적에 남겨 품질로 잰다.
@@ -515,7 +517,35 @@ def _snap(world, note=''):
     return frame
 
 
-def execute(world, plan, frames=None, trace=None):
+def _retreat(world, frames=None, trace=None, target_name=None):
+    """임무 후 복귀: 경유 통로를 역순으로 되짚어 휴식 자세로.
+
+    닿는 순간 영상이 뚝 끝나는 게 어색하다는 지적(사용자)에서 나왔다.
+    실물도 동작이 끝나면 팔을 거둬들인다. 갈 때 검증된 통로(경유 자세)를
+    거꾸로 지나므로 안전하고, 복귀 중 충돌도 trace 로 계속 검사된다.
+    """
+    vias = via_poses()
+    rest = {j: 0.0 for j in vias[0]}
+    steps = max(4, int(BEHAVIOR['lift_steps']) // 2)
+    cur = {j: world.pose.get(j, 0.0) for j in vias[0]}
+    for tgt in list(reversed(vias)) + [rest]:
+        for k in range(1, steps + 1):
+            u = k / float(steps)
+            wgt = u * u * (3 - 2 * u)
+            pose = {j: cur[j] + (tgt[j] - cur[j]) * wgt for j in cur}
+            if not sv.in_bounds({**world.pose, **pose}):
+                continue
+            world.set_arm(pose)
+            world.nudge_gaze((0.5, 0.0, 0.0), BEHAVIOR['gaze_step_deg'])
+            if trace is not None:
+                trace.append(_trace_entry(world, None, target_name, ret=True))
+            if frames is not None:
+                frames.append(_snap(world, 'return'))
+        cur = tgt
+    return True
+
+
+def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
     """계획을 월드에서 실행한다. (성공했다고 주장하지 않음 - 검증은 따로)"""
     mode = plan.get('mode')
     if mode == 'gaze':
@@ -549,18 +579,30 @@ def execute(world, plan, frames=None, trace=None):
             _servo(world, pre, 5.0, obj_stop=1.5, steps=25,
                    frames=frames, note='pre-%s' % appr, trace=trace,
                    target_name=tname)
-        return _servo(world, pt, plan['done_cm'], obj_stop=1.0,
-                      frames=frames, note='reach', trace=trace,
-                      target_name=tname)
+        ok = _servo(world, pt, plan['done_cm'], obj_stop=1.0,
+                    frames=frames, note='reach', trace=trace,
+                    target_name=tname)
+        # 성공 판정은 복귀 전에 잰다 - 복귀하면 손이 멀어진다.
+        if check is not None:
+            ok = bool(check())
+        if retreat:
+            _retreat(world, frames=frames, trace=trace, target_name=tname)
+        return ok
     if mode == 'pick':
         watch = (world.object_pos(plan['object']) if plan.get('object')
                  else plan.get('point'))
         _lift_ready(world, frames=frames, trace=trace, watch=watch,
                     target_name=plan.get('target'))
-        return _pick(world, obj=plan.get('object'), tray=plan.get('tray'),
-                     point=plan.get('point'),
-                     tray_point=plan.get('tray_point'),
-                     frames=frames, trace=trace)
+        ok = _pick(world, obj=plan.get('object'), tray=plan.get('tray'),
+                   point=plan.get('point'),
+                   tray_point=plan.get('tray_point'),
+                   frames=frames, trace=trace)
+        if check is not None:
+            ok = bool(check())
+        if retreat:
+            _retreat(world, frames=frames, trace=trace,
+                     target_name=plan.get('target'))
+        return ok
     return False
 
 

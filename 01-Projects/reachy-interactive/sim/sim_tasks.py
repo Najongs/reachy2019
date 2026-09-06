@@ -224,7 +224,8 @@ def feasible(task, quick_steps=25):
         if not view.get('seen'):
             return False
         plan = planner.plan(w, task, view)
-        A.execute(w, plan)
+        # 실현가능성 검사는 복귀 생략 (수백 번 돌므로 빠르게)
+        ok = A.execute(w, plan, retreat=False)
         ok = success_fn(task)(w)
         return bool(ok and _clean(w, task['target']))
     except Exception:

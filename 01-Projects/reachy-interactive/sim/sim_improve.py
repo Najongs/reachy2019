@@ -84,8 +84,9 @@ def episode(task, keep_frames=False, natural_min=55):
         planner = A.OraclePlanner()
         view = planner.perceive(world, task)
         plan = planner.plan(world, task, view)
-        A.execute(world, plan, frames=frames, trace=trace)
-        reached = bool(T.success_fn(task)(world))
+        reached = bool(A.execute(
+            world, plan, frames=frames, trace=trace,
+            check=lambda: T.success_fn(task)(world)))
         final_cm = me._dist(world.hand(),
                             world.object_pos(task['target'])) * 100
         path_tab = min((t['table'] for t in trace), default=99)
