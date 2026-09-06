@@ -534,7 +534,7 @@ def _pick(world, obj, tray, frames=None):
         _servo(world, (tp[0], tp[1] - 0.02, tp[2] + 0.12), 3.5,
                frames=frames, note='carry', seed=3)
         h = world.hand()
-        world.move_object(obj, (tp[0], tp[1], world.TABLE_TOP + 0.05))
+        world.move_object(obj, (tp[0], tp[1], world.table_top + 0.05))
         if frames is not None:
             frames.append(_snap(world, 'placed'))
     return grabbed

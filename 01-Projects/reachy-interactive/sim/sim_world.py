@@ -30,10 +30,15 @@ import motion_exec as me                          # noqa: E402
 import sim_mujoco as sm                           # noqa: E402
 import sim_servo as sv                            # noqa: E402
 
-TABLE_TOP = -0.27
-TABLE = {'name': 'table', 'type': 'box', 'pos': (0.37, 0.0, -0.285),
-         'size': (0.19, 0.35, 0.015), 'rgba': (0.55, 0.42, 0.28, 1),
-         'collide': True, 'movable': False}
+TABLE_TOP = -0.27       # 기본 높이. 태스크가 높이를 정해 올 수 있다.
+
+
+def _table(table_top=TABLE_TOP):
+    """높이 table_top 의 테이블. 낮을수록 팔이 넘을 턱이 낮아진다."""
+    return {'name': 'table', 'type': 'box',
+            'pos': (0.37, 0.0, table_top - 0.015),
+            'size': (0.19, 0.35, 0.015), 'rgba': (0.55, 0.42, 0.28, 1),
+            'collide': True, 'movable': False}
 
 # 물체 원형. size 는 MuJoCo 규약(원기둥=[반지름,반높이], 상자=[반폭...], 구=[반지름]).
 OBJECT_LIBRARY = {
@@ -46,7 +51,7 @@ OBJECT_LIBRARY = {
 }
 
 
-def make_object(name, kind, xy, z=None):
+def make_object(name, kind, xy, z=None, table_top=TABLE_TOP):
     """이름 kind 의 물체를 (x, y) 에 놓는다. z 는 테이블 위에 얹히도록 자동."""
     tpl = OBJECT_LIBRARY[kind]
     if z is None:
@@ -59,7 +64,7 @@ def make_object(name, kind, xy, z=None):
             half = tpl['size'][0]
         else:
             half = tpl['size'][2]
-        z = TABLE_TOP + half
+        z = table_top + half
     return {'name': name, 'kind': kind, 'type': tpl['type'],
             'pos': (xy[0], xy[1], z), 'size': tpl['size'], 'rgba': tpl['rgba'],
             'collide': True, 'movable': tpl.get('movable', True)}
@@ -68,11 +73,12 @@ def make_object(name, kind, xy, z=None):
 class World(object):
     """물체 목록 하나로 정의되는 장면."""
 
-    def __init__(self, objects, width=640, height=480):
+    def __init__(self, objects, width=640, height=480, table_top=TABLE_TOP):
         import mujoco
 
         self.mujoco = mujoco
-        self.objects = [TABLE] + list(objects)
+        self.table_top = table_top
+        self.objects = [_table(table_top)] + list(objects)
         self.model = mujoco.MjModel.from_xml_string(
             sm.build_mjcf(keepout=False, objects=self.objects))
         self.data = mujoco.MjData(self.model)

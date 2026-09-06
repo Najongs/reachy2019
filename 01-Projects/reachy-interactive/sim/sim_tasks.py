@@ -44,7 +44,7 @@ def _rng(seed):
     return random.Random(seed)
 
 
-def _place_objects(rng, kinds, min_gap=0.09):
+def _place_objects(rng, kinds, min_gap=0.09, table_top=None):
     """물체들을 겹치지 않게 작업 영역에 흩는다."""
     placed = []
     for i, kind in enumerate(kinds):
@@ -56,7 +56,8 @@ def _place_objects(rng, kinds, min_gap=0.09):
                 break
         else:
             placed.append((kind, xy))
-    return [world.make_object('%s%d' % (k, n), k, xy)
+    tt = world.TABLE_TOP if table_top is None else table_top
+    return [world.make_object('%s%d' % (k, n), k, xy, table_top=tt)
             for n, (k, xy) in enumerate(placed)]
 
 
@@ -108,7 +109,7 @@ def _succ_pick(name, tray):
         op = w.object_pos(name)
         tp = w.object_pos(tray)
         return (abs(op[0] - tp[0]) < 0.08 and abs(op[1] - tp[1]) < 0.07
-                and op[2] > world.TABLE_TOP + 0.02)
+                and op[2] > w.table_top + 0.02)
     return f
 
 
@@ -132,9 +133,13 @@ def generate(n=8, seed=0):
         # 장면에 물체 1~3개. 하나가 대상.
         n_obj = rng.randint(1, 3)
         chosen = [rng.choice(kinds_pool) for _ in range(n_obj)]
-        scene = _place_objects(rng, chosen)
+        # 테이블 높이도 환경 변수다 - 낮을수록 넘을 턱이 낮다. 실물 책상도
+        # 늘 같은 높이가 아니니, 다양한 높이에서 도는 행동을 학습한다.
+        tt = round(rng.uniform(-0.36, -0.27), 3)
+        scene = _place_objects(rng, chosen, table_top=tt)
         if kind == 'pick':
-            scene.append(world.make_object('tray0', 'tray', TRAY_XY))
+            scene.append(world.make_object('tray0', 'tray', TRAY_XY,
+                                           table_top=tt))
         target = scene[0]['name']
         tko = KO.get(scene[0]['kind'], '물건')
         instr = {
@@ -145,6 +150,7 @@ def generate(n=8, seed=0):
         }[kind]
         tasks.append({
             'id': 'task%02d_%s' % (i, kind),
+            'table_top': tt,
             'kind': kind,
             'instruction': instr,
             'target': target,
@@ -207,10 +213,12 @@ def generate_feasible(n, seed=0, kinds=('look', 'reach'), max_tries=6):
 
 
 def build_world(task, **kw):
-    """태스크의 scene 을 실제 World 로."""
-    objs = [world.make_object(o['name'], o['kind'], tuple(o['xy']))
+    """태스크의 scene 을 실제 World 로 (테이블 높이 포함)."""
+    tt = task.get('table_top', world.TABLE_TOP)
+    objs = [world.make_object(o['name'], o['kind'], tuple(o['xy']),
+                              table_top=tt)
             for o in task['scene']]
-    return world.World(objs, **kw)
+    return world.World(objs, table_top=tt, **kw)
 
 
 def success_fn(task):
