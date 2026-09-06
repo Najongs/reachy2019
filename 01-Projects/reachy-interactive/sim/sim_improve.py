@@ -149,6 +149,24 @@ def hold_duel(client, task, params_a, params_b, natural_min, save_to=None):
     return (r or {}).get('winner'), detail
 
 
+def load_feedback():
+    """지적 원장. 운영자가 주듯 자연어 지적이 쌓이고, 비평가가 매번
+    반영하며, 해결되면 오케스트라가 종결한다. 재시작해도 남는다."""
+    try:
+        with open(FEEDBACK_FILE, encoding='utf-8') as fh:
+            return json.load(fh)
+    except Exception:
+        # 시드: 운영자(사용자)가 이미 준 지적들
+        return [{'note': '팔을 필요 이상 뻗거나 치켜들지 말 것 - 테이블만 피하면 된다', 'done': False},
+                {'note': '대상 접촉은 허용되지만 접촉 순간은 부드럽게(저속으로) 닿을 것', 'done': False},
+                {'note': '파지 지점과 접근 방향(위/옆, 손 회전)을 의도적으로 고를 것', 'done': False}]
+
+
+def save_feedback(fb):
+    with open(FEEDBACK_FILE, 'w', encoding='utf-8') as fh:
+        json.dump(fb, fh, ensure_ascii=False, indent=1)
+
+
 def cem_sample(center, sigma, rng, n, scale=1.0):
     """CEM: 분포 N(center, sigma*scale) 에서 후보 n 개.
 
@@ -186,6 +204,8 @@ REFRESH_EVERY = 6       # 이 횟수마다 태스크 묶음을 새로 뽑는다 
 VALIDATE_EVERY = 60     # end-to-end 검증 주기
 CRITIQUE_EVERY = 3      # opus 비평 주기 (10시간 기준 시간당 ~20콜 수준)
 DUEL_MARGIN = 4.0       # 이 품질 차 이내면 '박빙' - opus 쌍대 결투로 심판
+ORCHESTRA_EVERY = 30    # 오케스트라 주기 - 환경 실험 제안 + 지적 관리
+FEEDBACK_FILE = os.path.join(HERE, '..', 'config', 'sim_feedback.json')
 
 
 def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
@@ -211,7 +231,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         for tryn in range(6):
             ts = T.generate_feasible(
                 n_tasks, seed=seed * 977 + k + tryn * 131071,
-                kinds=('reach',))
+                kinds=('reach',), env=env)
             if len(ts) >= n_tasks:
                 return ts
         if fallback:
@@ -220,6 +240,10 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         if not ts:
             raise RuntimeError('실현 가능한 태스크를 만들 수 없음')
         return ts
+
+    env = dict(T.ENV_DEFAULT)      # 오케스트라가 experiment 로 바꾼다
+    feedback = load_feedback()
+    last_frames = None             # 오케스트라에게 보여줄 최근 스트립
 
     # 시험지(고정)와 훈련셋(회전)을 가른다. 태스크 교체 충격으로 점수가
     # 널뛰고 성공 0 붕괴의 방아쇠가 됐던 것 - 시험지는 절대 안 바뀌므로
@@ -302,8 +326,12 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                     A.BEHAVIOR.update(current)
                     ok, q, frames = episode(tasks[0], keep_frames=True)
                     # 전 과정을 필름 스트립 한 장으로 - 중간 프레임까지 다 본다.
+                    open_notes = [f['note'] for f in feedback
+                                  if not f.get('done')]
                     crit = C.critique(client, frames,
-                                      tasks[0]['instruction'], q)
+                                      tasks[0]['instruction'], q,
+                                      feedback=open_notes)
+                    last_frames = frames
                     if crit:
                         naturalness = crit.get('naturalness')
                         rubric = crit.get('rubric')
@@ -467,6 +495,51 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                      fmt(base), fmt(report), nat,
                      ' (정체 %d)' % stagnant if stagnant else ''), flush=True)
             checkpoint()
+
+            # 오케스트라: 운영자처럼 환경 실험을 제안하고 지적을 관리한다.
+            if client is not None and (
+                    it % ORCHESTRA_EVERY == 0
+                    or (deadline is None and it == iters)):
+                try:
+                    recent = history[-10:]
+                    state = json.dumps({
+                        '시험_최근': [{'성공': h2['exam']['success'],
+                                       '품질': h2.get('exam_quality')}
+                                      for h2 in recent if 'exam' in h2],
+                        '문턱': natural_min,
+                        '환경': {k: list(v) if isinstance(v, tuple) else v
+                                 for k, v in env.items()},
+                        '지적(번호: 내용)': {
+                            i: f['note'] for i, f in enumerate(feedback)
+                            if not f.get('done')},
+                    }, ensure_ascii=False)
+                    orch = C.orchestrate(client, last_frames, state)
+                    if orch:
+                        if orch.get('experiment'):
+                            env = T.clamp_env(orch['experiment'])
+                            tasks = new_tasks(it * 7 + 1, fallback=tasks)
+                            base = evaluate(current, tasks, natural_min)
+                            print('[오케스트라] 환경 실험: %s (%s)'
+                                  % (env, orch.get('why', '')), flush=True)
+                        for note in (orch.get('feedback_add') or [])[:3]:
+                            if isinstance(note, str) and note.strip():
+                                feedback.append({'note': note.strip(),
+                                                 'done': False, 'iter': it})
+                                print('[오케스트라] 지적 추가: %s' % note,
+                                      flush=True)
+                        for idx in (orch.get('feedback_done') or []):
+                            if isinstance(idx, int) and 0 <= idx < len(feedback):
+                                feedback[idx]['done'] = True
+                                print('[오케스트라] 지적 종결: %s'
+                                      % feedback[idx]['note'], flush=True)
+                        save_feedback(feedback)
+                        history[-1]['orchestra'] = {
+                            'experiment': orch.get('experiment'),
+                            'added': orch.get('feedback_add'),
+                            'done': orch.get('feedback_done'),
+                            'why': orch.get('why')}
+                except Exception as e:
+                    print('  오케스트라 실패(계속 진행): %s' % e, flush=True)
 
             # 주기적 end-to-end 검증: opus 접지 포함 실전 배치가 여전히 되나.
             if client is not None and it % VALIDATE_EVERY == 0:

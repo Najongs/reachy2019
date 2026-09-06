@@ -57,6 +57,7 @@ class OraclePlanner(object):
             return {'mode': 'gaze', 'point': obj, 'target': task['target']}
         if task['kind'] in ('point', 'reach'):
             return {'mode': 'reach', 'point': obj, 'target': task['target'],
+                    'approach': 'top',
                     'done_cm': 8.0 if task['kind'] == 'reach' else 12.0}
         if task['kind'] == 'pick':
             return {'mode': 'pick', 'object': task['target'],
@@ -134,6 +135,9 @@ class BrokerPlanner(object):
         if action not in ('look', 'point', 'reach', 'pick'):
             action = task['kind']
         act_mismatch = (action != task['kind']) or None
+        approach = choice.get('approach')
+        if approach not in ('top', 'side'):
+            approach = 'top'
 
         box = choice.get('box')
         if box is not None and 0 <= int(box) < len(dets):
@@ -143,6 +147,7 @@ class BrokerPlanner(object):
             done = 12.0 if action == 'point' else 8.0
             return {'mode': mode, 'point': point, 'done_cm': done,
                     'action': action, 'action_mismatch': act_mismatch,
+                    'approach': approach,
                     'raw': raw, 'grounded_det': det}
         if choice.get('memory') and mem is not None:
             item = mem.find(choice['memory'])
@@ -502,11 +507,25 @@ def execute(world, plan, frames=None, trace=None):
             frames.append(_snap(world, 'gaze'))
         return True
     if mode == 'reach':
-        # 실물 순서: 팔을 먼저 테이블 위로 들어 올리고, 위에서 접근한다.
+        # 실물 순서: 팔을 먼저 테이블 위로 들어 올리고, 접근 축을 정해
+        # 예비점을 거쳐 진입한다. 파지는 '어디로 어떻게 들어가느냐' 가
+        # 반이다 - 위 접근은 예비점이 대상 위, 옆 접근은 로봇 쪽 옆.
         tname = plan.get('target')
-        _lift_ready(world, frames=frames, trace=trace, watch=plan['point'],
+        pt = plan['point']
+        _lift_ready(world, frames=frames, trace=trace, watch=pt,
                     target_name=tname)
-        return _servo(world, plan['point'], plan['done_cm'], obj_stop=1.0,
+        appr = plan.get('approach')
+        if appr in ('top', 'side'):
+            if appr == 'top':
+                pre = (pt[0], pt[1], pt[2] + 0.07)
+            else:
+                n = math.hypot(pt[0], pt[1]) or 1.0
+                pre = (pt[0] * (1 - 0.07 / n), pt[1] * (1 - 0.07 / n),
+                       pt[2] + 0.02)
+            _servo(world, pre, 5.0, obj_stop=1.5, steps=25,
+                   frames=frames, note='pre-%s' % appr, trace=trace,
+                   target_name=tname)
+        return _servo(world, pt, plan['done_cm'], obj_stop=1.0,
                       frames=frames, note='reach', trace=trace,
                       target_name=tname)
     if mode == 'pick':

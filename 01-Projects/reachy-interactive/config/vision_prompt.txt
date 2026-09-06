@@ -10,8 +10,13 @@
 - "reach" : 손을 가까이 가져가 봐 / 손 대 봐 - 손끝을 물체 근처로
 - "pick"  : 집어 / 옮겨 줘 - 잡아서 옮기기
 
+팔을 쓰는 행동(point/reach/pick)이면 접근 방향(approach)도 골라라:
+- "top"  : 위에서 내려가 닿기 - 원기둥(컵/캔)·공처럼 위가 열린 물체의 기본
+- "side" : 옆(로봇 쪽)에서 다가가기 - 낮거나 넓은 물체, 위가 막힌 경우
+
 답변 규칙:
-- 반드시 JSON 한 줄로만 답한다: {"action": "행동", "box": 번호, "reason": "짧은 근거"}
+- 반드시 JSON 한 줄로만 답한다: {"action": "행동", "approach": "top"|"side", "box": 번호, "reason": "짧은 근거"}
+- look 이면 approach 는 생략해도 된다.
 - 대상이 화면에 없고 기억에만 있으면: {"action": "행동", "box": null, "memory": "종류이름", "reason": "..."}
   (memory 는 기억 항목의 종류: cup / block / ball / can / tray)
 - 대상을 화면에서도 기억에서도 못 찾으면: {"box": null, "memory": null, "reason": "..."}

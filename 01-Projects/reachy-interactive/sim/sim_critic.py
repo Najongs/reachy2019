@@ -88,8 +88,23 @@ def quality(trace):
     score += 35 * min(1.0, efficiency / 0.7)          # 0.7 이면 만점 (우회 포함)
     score += 25 * max(0.0, 1.0 - jerk / 6.0)          # 저크 6도/스텝이면 0점
     score += 20 * max(0.0, min(1.0, (margin - (-0.5)) / 4.0))   # 여유 3.5cm+ 만점
-    score += 10 * max(0.0, 1.0 - max(0, len(trace) - 20) / 40.0)
+    score += 5 * max(0.0, 1.0 - max(0, len(trace) - 20) / 40.0)
     score += 10 * (view_ratio if view_ratio is not None else 1.0)
+
+    # 접촉 부드러움: 대상에 가장 가까웠던 순간의 손 속도. 접촉(집기)은
+    # 허용이지만 '쿵' 은 안 된다 - 사람도 잡기 직전에 손을 늦춘다.
+    tgts = [t.get('tgt') for t in trace]
+    touch_speed = None
+    if any(v is not None for v in tgts):
+        i = min((v, k) for k, v in enumerate(tgts) if v is not None)[1]
+        if 0 < i < len(hands):
+            touch_speed = dist(hands[i], hands[i - 1]) * 100
+    metrics['touch_speed_cm'] = (round(touch_speed, 1)
+                                 if touch_speed is not None else None)
+    if touch_speed is None:
+        score += 5
+    else:
+        score += 5 * max(0.0, 1.0 - max(0.0, touch_speed - 1.5) / 3.0)
     metrics['score'] = int(round(score))
     return metrics
 
@@ -221,10 +236,11 @@ advice 에 쓸 수 있는 파라미터와 뜻:
 문제가 없으면 issues 를 빈 배열로, advice 를 빈 객체로. JSON 밖 텍스트 금지."""
 
 
-def critique(client, frames, instruction, metrics):
+def critique(client, frames, instruction, metrics, feedback=None):
     """opus 전과정 비평. {'naturalness','rubric','worst_frame','issues','advice'}.
 
     frames: 에피소드의 프레임 목록 전체. 내부에서 필름 스트립을 만든다.
+    feedback: 운영자/오케스트라의 미결 지적 - 비평이 이걸 우선 반영한다.
     """
     if client is None or not frames:
         return None
@@ -234,7 +250,41 @@ def critique(client, frames, instruction, metrics):
     prompt = CRITIQUE_PROMPT.format(
         instruction=instruction,
         metrics=json.dumps(metrics, ensure_ascii=False))
+    if feedback:
+        prompt += ('\n\n운영자 지적(미결 - 조언에 우선 반영하라):\n- '
+                   + '\n- '.join(feedback[-5:]))
     out = _parse_json(client.ask_vision(prompt, image=_encode(strip)))
+    return out
+
+
+ORCHESTRA_PROMPT = """로봇 학습 파이프라인의 오케스트라(총감독)다. 필름 스트립(최근 동작)과 아래 현황을 보고, 운영자가 하듯 판단하라.
+
+현황:
+{state}
+
+네가 할 수 있는 일:
+1. experiment - 환경을 바꿔 새로운 상황을 시험한다. 조절 가능:
+   table [낮은높이, 높은높이] (m, -0.40~-0.24), objects [최소, 최대] (1~4), min_gap 물체간격 (0.05~0.14)
+   성적이 좋으면 어렵게(낮고 다양한 테이블, 물체 많게, 간격 좁게), 나쁘면 쉽게.
+2. feedback_add - 동작에서 불필요하거나 빠진 것을 운영자처럼 지적한다 (비평가가 매번 반영한다). 이미 있는 지적과 중복 금지.
+3. feedback_done - 해결된 지적의 번호를 종결한다 (스트립에서 더는 안 보이면).
+
+JSON 한 줄로만:
+{{"experiment": {{"table": [lo,hi], "objects": [lo,hi], "min_gap": g}} 또는 null, "feedback_add": ["지적", ...], "feedback_done": [번호, ...], "why": "한 문장"}}
+바꿀 게 없으면 experiment 는 null, 배열들은 빈 배열. JSON 밖 텍스트 금지."""
+
+
+def orchestrate(client, frames, state_text):
+    """오케스트라 한 번: 실험 제안/지적 관리. dict 또는 None."""
+    if client is None:
+        return None
+    img = None
+    if frames:
+        st = strip_image(frames)
+        if st is not None:
+            img = _encode(st)
+    out = _parse_json(client.ask_vision(
+        ORCHESTRA_PROMPT.format(state=state_text), image=img))
     return out
 
 

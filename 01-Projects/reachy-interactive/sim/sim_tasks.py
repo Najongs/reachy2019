@@ -122,21 +122,52 @@ SUCCESS = {'look': _succ_look, 'point': _succ_point,
 KO = {'cup': '컵', 'block': '블록', 'ball': '공', 'can': '캔'}
 
 
-def generate(n=8, seed=0):
-    """다양한 태스크 n 개. 각 태스크는 직렬화 가능한 dict."""
+# 환경 손잡이 기본값과 하드 한계. 오케스트라가 experiment 로 조절하되
+# 한계 밖은 코드가 자른다 - 모델 제안이 물리적으로 말이 안 되는 환경을
+# 만들 수 없게 (지표 감사 원칙의 환경판).
+ENV_DEFAULT = {'table': (-0.36, -0.27), 'objects': (1, 3), 'min_gap': 0.09}
+ENV_HARD = {'table': (-0.40, -0.24), 'objects': (1, 4),
+            'min_gap': (0.05, 0.14)}
+
+
+def clamp_env(env):
+    """오케스트라 제안 환경을 하드 한계 안으로."""
+    out = dict(ENV_DEFAULT)
+    if not isinstance(env, dict):
+        return out
+    try:
+        if 'table' in env:
+            lo, hi = sorted(float(v) for v in env['table'][:2])
+            out['table'] = (max(ENV_HARD['table'][0], lo),
+                            min(ENV_HARD['table'][1], hi))
+        if 'objects' in env:
+            lo, hi = sorted(int(v) for v in env['objects'][:2])
+            out['objects'] = (max(ENV_HARD['objects'][0], lo),
+                              min(ENV_HARD['objects'][1], hi))
+        if 'min_gap' in env:
+            g = float(env['min_gap'])
+            out['min_gap'] = min(ENV_HARD['min_gap'][1],
+                                 max(ENV_HARD['min_gap'][0], g))
+    except (TypeError, ValueError, IndexError):
+        pass
+    return out
+
+
+def generate(n=8, seed=0, env=None):
+    """다양한 태스크 n 개. env 로 환경(높이/물체수/간격)을 조절한다."""
     rng = _rng(seed)
+    e = clamp_env(env) if env else dict(ENV_DEFAULT)
     kinds_pool = ['cup', 'block', 'ball', 'can']
     tasks = []
     templates = ['look', 'point', 'reach', 'pick']
     for i in range(n):
         kind = templates[i % len(templates)]
-        # 장면에 물체 1~3개. 하나가 대상.
-        n_obj = rng.randint(1, 3)
+        n_obj = rng.randint(*e['objects'])
         chosen = [rng.choice(kinds_pool) for _ in range(n_obj)]
-        # 테이블 높이도 환경 변수다 - 낮을수록 넘을 턱이 낮다. 실물 책상도
-        # 늘 같은 높이가 아니니, 다양한 높이에서 도는 행동을 학습한다.
-        tt = round(rng.uniform(-0.36, -0.27), 3)
-        scene = _place_objects(rng, chosen, table_top=tt)
+        # 테이블 높이도 환경 변수다 - 낮을수록 넘을 턱이 낮다.
+        tt = round(rng.uniform(*e['table']), 3)
+        scene = _place_objects(rng, chosen, min_gap=e['min_gap'],
+                               table_top=tt)
         if kind == 'pick':
             scene.append(world.make_object('tray0', 'tray', TRAY_XY,
                                            table_top=tt))
@@ -190,7 +221,8 @@ def feasible(task, quick_steps=25):
         w.close()
 
 
-def generate_feasible(n, seed=0, kinds=('look', 'reach'), max_tries=6):
+def generate_feasible(n, seed=0, kinds=('look', 'reach'), max_tries=6,
+                      env=None):
     """실현 가능한 태스크만 n 개. 유형은 kinds 를 순환."""
     out = []
     attempt = 0
@@ -198,7 +230,7 @@ def generate_feasible(n, seed=0, kinds=('look', 'reach'), max_tries=6):
     # 나오게 한 번에 4개(한 순환)씩 만들어 거른다. 유형 균형은 라운드로빈.
     want_idx = 0
     while len(out) < n and attempt < n * max_tries:
-        batch = generate(4, seed=seed * 1000 + attempt)
+        batch = generate(4, seed=seed * 1000 + attempt, env=env)
         wanted = kinds[want_idx % len(kinds)]
         for t in batch:
             if t['kind'] != wanted:
