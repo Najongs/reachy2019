@@ -30,7 +30,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
 
-import sim_agent as A                              # noqa: E402
+import sim_agent as A
+import motion_exec as me                              # noqa: E402
 import sim_critic as C                             # noqa: E402
 import sim_tasks as T                              # noqa: E402
 
@@ -81,6 +82,8 @@ def episode(task, keep_frames=False, natural_min=55):
         plan = planner.plan(world, task, view)
         A.execute(world, plan, frames=frames, trace=trace)
         reached = bool(T.success_fn(task)(world))
+        final_cm = me._dist(world.hand(),
+                            world.object_pos(task['target'])) * 100
         path_min = min(min((t['table'] for t in trace), default=99),
                        min((t['obj'] for t in trace), default=99))
         q = C.quality(trace) if trace else {'score': 0}
@@ -91,6 +94,7 @@ def episode(task, keep_frames=False, natural_min=55):
             path_min, reached,
             q.get('score', 0) if uses_arm else 100, natural_min)
         q['stage'], q['why'] = stage, why
+        q['final_cm'] = round(final_cm, 1)
         return stage, q, frames
     finally:
         world.close()
@@ -100,12 +104,14 @@ def evaluate(params, tasks, natural_min=55):
     """태스크 묶음 -> {'collision','unnatural','missed','success', 'quality'}."""
     A.BEHAVIOR.update(_clamp(params))
     counts = {k: 0 for k in C.STAGES}
-    scores = []
+    scores, dists = [], []
     for t in tasks:
         stage, q, _ = episode(t, natural_min=natural_min)
         counts[stage] += 1
         scores.append(q.get('score', 0))
+        dists.append(q.get('final_cm', 99.0))
     counts['quality'] = sum(scores) / max(len(scores), 1)
+    counts['miss_cm'] = sum(dists) / max(len(dists), 1)
     return counts
 
 
@@ -192,12 +198,16 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     natural_min = 55
 
     def rank(counts):
-        """단계 우선순위 그대로: 충돌 적게 > 성공 많이 > 품질 높게.
+        """충돌 적게 > 성공 많이 > 목표에 가깝게 > 품질 높게.
 
-        '성공' 은 이미 (충돌 없음 AND 자연스러움 문턱 이상 AND 도달) 이므로
-        자연스러움은 성공 안에 들어 있다 - 거칠게 닿은 동작은 성공이 아니다.
+        '가깝게' 가 품질보다 앞이라는 게 요점이다. 전원이 성공 0 으로
+        동률일 때 품질만 남으면, 품질 지표(짧은 경로·저저크·큰 여유)는
+        소심하게 안 가는 동작에 만점을 준다 - 실제로 1099회 동안
+        "우아하게 실패하는 법" 을 학습했다. 거리가 앞에 있으면 실패
+        중에도 목표 쪽으로 가는 압력이 살아 있다.
         """
-        return (-counts['collision'], counts['success'], counts['quality'])
+        return (-counts['collision'], counts['success'],
+                -round(counts.get('miss_cm', 99.0), 1), counts['quality'])
 
     base = evaluate(current, tasks, natural_min)
     best_ever = {'quality': base['quality'], 'success': base['success'],
@@ -205,6 +215,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     stagnant = 0
     perfect_streak = 0
     duel_flips = 0      # opus 가 계측 선택을 뒤집은 횟수 (보정 감사 신호)
+    zero_streak = 0     # 성공 0 연속 - 지속되면 best_ever 로 복귀
     stamp = time.strftime('%Y%m%d-%H%M%S')
     out = os.path.join(HERE, '..', 'sim_data', 'improve-%s.json' % stamp)
     # 개선 과정을 눈으로 볼 수 있게 - 비평 에피소드 영상/스트립, 결투 비교.
@@ -320,6 +331,21 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                              'success': base['success'],
                              'params': dict(current), 'iter': it,
                              'natural_min': natural_min}
+
+            # 탈출구: 성공 0 이 오래가면 파라미터가 못 도달하는 구석에
+            # 갇힌 것이다. 전원 성공이었던 best_ever 로 되돌려 다시 시작.
+            zero_streak = zero_streak + 1 if base['success'] == 0 else 0
+            if zero_streak >= 10 and best_ever.get('params'):
+                current = _clamp(dict(best_ever['params']))
+                A.BEHAVIOR.update(current)
+                A.save_behavior(current)
+                base = evaluate(current, tasks, natural_min)
+                zero_streak = 0
+                stagnant = 0
+                print('[%s] 성공 0 지속 - best_ever(반복 %s) 파라미터로 복귀'
+                      ' -> %s' % (time.strftime('%H:%M'),
+                                  best_ever.get('iter', '?'), fmt(base)),
+                      flush=True)
 
             # 평가 래칫: 전원 성공이 2회 이어지면 자연스러움 문턱을 올린다.
             # 행동이 좋아질수록 평가도 엄해진다 - '점점 평가 개선'.
