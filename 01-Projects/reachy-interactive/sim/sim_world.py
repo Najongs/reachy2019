@@ -48,7 +48,26 @@ OBJECT_LIBRARY = {
     'can':   {'type': 'cylinder', 'size': (0.033, 0.06), 'rgba': (0.60, 0.60, 0.65, 1)},
     'tray':  {'type': 'box',      'size': (0.07, 0.05, 0.005), 'rgba': (0.25, 0.55, 0.35, 1),
               'movable': False},
+    # 바구니: 바닥 + 벽 4면. 테두리(rim) 위에서 넣어야 한다 - 옆에서
+    # 밀어 넣으면 벽에 걸린다. size 는 (외반폭x, 외반폭y, 벽높이반).
+    'basket': {'type': 'box', 'size': (0.06, 0.06, 0.03),
+               'rgba': (0.65, 0.45, 0.25, 1), 'movable': False,
+               'parts': True},
 }
+
+BASKET_WALL = 0.008
+
+
+def _basket_parts(size):
+    hx, hy, hz = size
+    w = BASKET_WALL
+    return [
+        {'type': 'box', 'size': (hx, hy, w), 'off': (0, 0, w)},            # 바닥
+        {'type': 'box', 'size': (w, hy, hz), 'off': (-(hx - w), 0, hz)},   # 벽들
+        {'type': 'box', 'size': (w, hy, hz), 'off': (hx - w, 0, hz)},
+        {'type': 'box', 'size': (hx, w, hz), 'off': (0, -(hy - w), hz)},
+        {'type': 'box', 'size': (hx, w, hz), 'off': (0, hy - w, hz)},
+    ]
 
 
 def make_object(name, kind, xy, z=None, table_top=TABLE_TOP):
@@ -58,16 +77,21 @@ def make_object(name, kind, xy, z=None, table_top=TABLE_TOP):
         # 테이블 면 위에 밑바닥이 닿게. 반높이만큼 올린다.
         half = tpl['size'][-1] if tpl['type'] == 'box' else tpl['size'][-1] \
             if tpl['type'] == 'cylinder' else tpl['size'][0]
-        if tpl['type'] == 'cylinder':
+        if tpl.get('parts'):
+            half = 0.0                       # 복합 물체는 pos 가 바닥면 기준
+        elif tpl['type'] == 'cylinder':
             half = tpl['size'][1]
         elif tpl['type'] == 'sphere':
             half = tpl['size'][0]
         else:
             half = tpl['size'][2]
         z = table_top + half
-    return {'name': name, 'kind': kind, 'type': tpl['type'],
-            'pos': (xy[0], xy[1], z), 'size': tpl['size'], 'rgba': tpl['rgba'],
-            'collide': True, 'movable': tpl.get('movable', True)}
+    out = {'name': name, 'kind': kind, 'type': tpl['type'],
+           'pos': (xy[0], xy[1], z), 'size': tpl['size'], 'rgba': tpl['rgba'],
+           'collide': True, 'movable': tpl.get('movable', True)}
+    if tpl.get('parts'):
+        out['parts'] = _basket_parts(tpl['size'])
+    return out
 
 
 class World(object):
@@ -92,6 +116,15 @@ class World(object):
                 self._gid[n] = i
         self._arm_gids = [(i, n) for n, i in self._gid.items()
                           if n.startswith('right_arm')]
+        # 복합 물체: name -> 부품 지오메트리 id 목록, 논리 중심은 따로 든다.
+        self._parts = {}
+        self._centers = {}
+        for o in self.objects:
+            if o.get('parts'):
+                self._parts[o['name']] = [
+                    self._gid['%s_p%d' % (o['name'], k)]
+                    for k in range(len(o['parts']))]
+                self._centers[o['name']] = tuple(o['pos'])
 
         # 시작 자세 = 실물 휴식(모든 관절 0, 팔을 늘어뜨림). 예전 '대기'
         # 자세는 손을 테이블 밑(z-0.44, x0.36)에 넣고 있어서, 서보가 상판을
@@ -206,13 +239,23 @@ class World(object):
         return me.forward_kinematics(me.CHAINS['right_arm'], self.pose)
 
     def object_pos(self, name):
+        if name in self._centers:
+            return self._centers[name]
         return tuple(float(v) for v in self.model.geom_pos[self._gid[name]])
 
     def movable_objects(self):
         return [o['name'] for o in self.objects if o.get('movable')]
 
     def move_object(self, name, pos):
-        self.model.geom_pos[self._gid[name]] = pos
+        if name in self._parts:
+            old = self._centers[name]
+            d = tuple(pos[i] - old[i] for i in range(3))
+            for gid in self._parts[name]:
+                self.model.geom_pos[gid] = [
+                    self.model.geom_pos[gid][i] + d[i] for i in range(3)]
+            self._centers[name] = tuple(pos)
+        else:
+            self.model.geom_pos[self._gid[name]] = pos
         self._forward()
 
     # -- 카메라 ------------------------------------------------------------
@@ -251,9 +294,10 @@ class World(object):
     def clearance_of(self, name):
         """팔 전체와 이 물체 하나 사이 최소 표면거리(cm)."""
         mj = self.mujoco
-        oid = self._gid[name]
-        return min(mj.mj_geomDistance(self.model, self.data, gid, oid, 1.0, None)
-                   for gid, _ in self._arm_gids) * 100
+        oids = self._parts.get(name) or [self._gid[name]]
+        return min(mj.mj_geomDistance(self.model, self.data, gid, oid, 1.0,
+                                      None)
+                   for gid, _ in self._arm_gids for oid in oids) * 100
 
     def clearance(self, ignore=()):
         """팔 전체와 (충돌하는) 물체들 사이 최소 표면거리(cm), 부위쌍.
@@ -262,8 +306,12 @@ class World(object):
         MuJoCo 의 정확한 지오메트리간 거리를 쓴다.
         """
         mj = self.mujoco
-        targets = [(self._gid[o['name']], o['name']) for o in self.objects
-                   if o.get('collide') and o['name'] not in ignore]
+        targets = []
+        for o in self.objects:
+            if not o.get('collide') or o['name'] in ignore:
+                continue
+            for oid in (self._parts.get(o['name']) or [self._gid[o['name']]]):
+                targets.append((oid, o['name']))
         worst = (99.0, None)
         for gid, gname in self._arm_gids:
             for oid, oname in targets:

@@ -564,7 +564,8 @@ def execute(world, plan, frames=None, trace=None):
     return False
 
 
-def _reaim(world, guess, kind=None, frames=None, note='re-aim'):
+def _reaim(world, guess, kind=None, frames=None, note='re-aim',
+           want_kind=False):
     """추정점 근처를 다시 보고 검출로 정제한다 (카메라만 - 참값 없음).
 
     가까울수록 물체가 화면에 크게 잡혀 크기 단서(깊이)가 좋아진다.
@@ -572,17 +573,19 @@ def _reaim(world, guess, kind=None, frames=None, note='re-aim'):
     """
     import random as _random
     import sim_perceive as P
+    kinds = (kind,) if isinstance(kind, str) else kind
     world.center_on(guess)
     dets = P.detect(world, 1.5, 0.0, _random.Random(5))
     px = world.pixel_of(guess)
     if not dets or px is None:
-        return guess
-    pool = [d for d in dets if kind is None or d['kind'] == kind] or dets
+        return (guess, None) if want_kind else guess
+    pool = [d for d in dets if kinds is None or d['kind'] in kinds] or dets
     det = min(pool, key=lambda d: (d['u'] - px[0]) ** 2
               + (d['v'] - px[1]) ** 2)
     if frames is not None:
         frames.append(_snap(world, note))
-    return _det_to_3d(world, det)
+    pt = _det_to_3d(world, det)
+    return (pt, det['kind']) if want_kind else pt
 
 
 def _pick(world, obj=None, tray=None, point=None, tray_point=None,
@@ -642,11 +645,16 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
         h = world.hand()
         world.move_object(bind, tuple(h[i] + off[i] for i in range(3)))
 
-    # 3) 들어서 나른다: 위로 뽑고 -> 쟁반 위 -> 내려놓기.
+    # 3) 들어서 나른다: 위로 뽑고 -> 목적지 위 -> 내려놓기.
     dest = world.object_pos(tray) if tray else (tuple(tray_point)
                                                 if tray_point else None)
     if dest is None:
         return False
+    # 목적지 종류: 바구니는 벽이 있어 테두리 위에서 넣어야 한다.
+    dkind = None
+    if tray:
+        dkind = next((o['kind'] for o in world.objects
+                      if o['name'] == tray), None)
     # 나를 때는 높이 든다 - 다른 물체 위를 지나가는 게 안전하다. 스텝도
     # 상한을 둬 obj_stop 을 한 걸음에 뚫고 지나가지 않게 한다.
     up = (hand0[0], hand0[1], hand0[2] + 0.14)
@@ -658,17 +666,30 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
            step_cap=4.0, frames=frames, note='carry', trace=trace,
            target_name=bind, seed=4)
     if tray is None:
-        # 쟁반 접지도 오차가 크다(납작해서 크기 단서가 나쁨) - 위에서
-        # 다시 보고 정제한 곳에 놓는다.
-        dest = _reaim(world, dest, kind='tray', frames=frames,
-                      note='re-aim tray')
+        # 목적지 접지도 오차가 크다(납작해서 크기 단서가 나쁨) - 위에서
+        # 다시 보고 정제한 곳에 놓는다. 종류는 재검출이 알려준다.
+        dest, dkind = _reaim(world, dest, kind=('tray', 'basket'),
+                             frames=frames, note='re-aim dest',
+                             want_kind=True)
         _servo(world, (dest[0], dest[1], dest[2] + 0.10), 3.0, steps=15,
                ignore_objs=(bind,), on_step=follow, carried=True,
                frames=frames, note='place', trace=trace, target_name=bind,
                seed=5)
 
-    # 4) 놓기: 쟁반 면 위에.
-    world.move_object(bind, (dest[0], dest[1], dest[2] + 0.045))
+    # 4) 놓기. 바구니는 테두리(벽 높이) 위에서 안으로 떨어뜨린다 -
+    # 옆에서 밀면 벽에 걸린다. 쟁반은 면 위에.
+    if dkind == 'basket':
+        hz = W.OBJECT_LIBRARY['basket']['size'][2]
+        rim = dest[2] + hz * 2
+        _servo(world, (dest[0], dest[1], rim + 0.10), 3.0, steps=15,
+               ignore_objs=(bind,), on_step=follow, carried=True,
+               frames=frames, note='over-rim', trace=trace,
+               target_name=bind, seed=6)
+        if frames is not None:
+            frames.append(_snap(world, 'drop'))
+        world.move_object(bind, (dest[0], dest[1], dest[2] + 0.05))
+    else:
+        world.move_object(bind, (dest[0], dest[1], dest[2] + 0.045))
     if frames is not None:
         frames.append(_snap(world, 'placed'))
     return True

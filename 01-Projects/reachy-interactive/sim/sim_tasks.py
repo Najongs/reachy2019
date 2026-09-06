@@ -108,6 +108,13 @@ def _succ_pick(name, tray):
     def f(w):
         op = w.object_pos(name)
         tp = w.object_pos(tray)
+        if tray.startswith('basket'):
+            # 바구니: 안쪽에 들어가야 성공 - 내벽 안 + 바닥 위 + 테두리 근처까지.
+            hx, hy, hz = world.OBJECT_LIBRARY['basket']['size']
+            wall = world.BASKET_WALL
+            return (abs(op[0] - tp[0]) < hx - wall * 2
+                    and abs(op[1] - tp[1]) < hy - wall * 2
+                    and tp[2] < op[2] < tp[2] + hz * 2 + 0.06)
         return (abs(op[0] - tp[0]) < 0.08 and abs(op[1] - tp[1]) < 0.07
                 and op[2] > w.table_top + 0.02)
     return f
@@ -168,8 +175,12 @@ def generate(n=8, seed=0, env=None):
         tt = round(rng.uniform(*e['table']), 3)
         scene = _place_objects(rng, chosen, min_gap=e['min_gap'],
                                table_top=tt)
+        dest = None
         if kind == 'pick':
-            scene.append(world.make_object('tray0', 'tray', TRAY_XY,
+            # 목적지는 쟁반(위에 올리기) 또는 바구니(테두리 넘겨 넣기).
+            dkind = rng.choice(['tray', 'basket'])
+            dest = dkind + '0'
+            scene.append(world.make_object(dest, dkind, TRAY_XY,
                                            table_top=tt))
         target = scene[0]['name']
         tko = KO.get(scene[0]['kind'], '물건')
@@ -177,7 +188,9 @@ def generate(n=8, seed=0, env=None):
             'look': '책상 위 %s 을(를) 똑바로 바라봐.' % tko,
             'point': '%s 이(가) 있는 쪽을 손으로 가리켜 봐.' % tko,
             'reach': '%s 에 손을 가까이 가져가 봐.' % tko,
-            'pick': '%s 을(를) 집어서 왼쪽 쟁반에 놓아 줘.' % tko,
+            'pick': ('%s 을(를) 집어서 왼쪽 바구니에 넣어 줘.' % tko
+                     if dest == 'basket0' else
+                     '%s 을(를) 집어서 왼쪽 쟁반에 놓아 줘.' % tko),
         }[kind]
         tasks.append({
             'id': 'task%02d_%s' % (i, kind),
@@ -185,7 +198,7 @@ def generate(n=8, seed=0, env=None):
             'kind': kind,
             'instruction': instr,
             'target': target,
-            'tray': 'tray0' if kind == 'pick' else None,
+            'tray': dest,
             'scene': [{'name': o['name'], 'kind': o['kind'],
                        'xy': [round(o['pos'][0], 3), round(o['pos'][1], 3)]}
                       for o in scene],

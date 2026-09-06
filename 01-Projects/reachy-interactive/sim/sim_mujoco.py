@@ -154,9 +154,22 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None):
             mat = 'obj_%s' % o['name']
             obj_mats.append('    <material name="%s" rgba="%s" specular=".3"/>'
                             % (mat, ' '.join('%.3f' % c for c in o['rgba'])))
+            ct = 8 if o.get('collide', True) else 0
+            if o.get('parts'):
+                # 복합 물체(바구니 등): 부품 지오메트리 여러 개, 이름은
+                # name_p0.. 로 - World 가 접두사로 묶어 다룬다.
+                for k, part in enumerate(o['parts']):
+                    ppos = tuple(o['pos'][i] + part['off'][i]
+                                 for i in range(3))
+                    scene_xml.append(
+                        '    <geom name="%s_p%d" type="%s" material="%s" '
+                        'contype="%d" conaffinity="0" pos="%s" size="%s"/>'
+                        % (o['name'], k, part['type'], mat, ct,
+                           ' '.join('%.4f' % v for v in ppos),
+                           ' '.join('%.4f' % v for v in part['size'])))
+                continue
             size = ' '.join('%.4f' % s for s in o['size'])
             pos = ' '.join('%.4f' % p for p in o['pos'])
-            ct = 8 if o.get('collide', True) else 0
             scene_xml.append(
                 '    <geom name="%s" type="%s" material="%s" contype="%d" '
                 'conaffinity="0" pos="%s" size="%s"/>'
