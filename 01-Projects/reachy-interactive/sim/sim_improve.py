@@ -325,12 +325,16 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             if client is not None and it % CRITIQUE_EVERY == 1:
                 try:
                     A.BEHAVIOR.update(current)
-                    ok, q, frames = episode(tasks[0], keep_frames=True)
+                    # 찍는 태스크를 회전시킨다 - tasks[0] 고정이면 라운드
+                    # 로빈 생성 탓에 늘 reach 만 찍혀 pick/lift(바구니
+                    # 포함)가 영상·비평에 영영 안 나온다 (사용자 발견).
+                    crit_task = tasks[(it // CRITIQUE_EVERY) % len(tasks)]
+                    ok, q, frames = episode(crit_task, keep_frames=True)
                     # 전 과정을 필름 스트립 한 장으로 - 중간 프레임까지 다 본다.
                     open_notes = [f['note'] for f in feedback
                                   if not f.get('done')]
                     crit = C.critique(client, frames,
-                                      tasks[0]['instruction'], q,
+                                      crit_task['instruction'], q,
                                       feedback=open_notes)
                     last_frames = frames
                     if crit:
@@ -390,7 +394,8 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                     <= DUEL_MARGIN):
                 try:
                     duel_pick, duel_detail = hold_duel(
-                        client, tasks[0], current, challenger[3], natural_min,
+                        client, tasks[it % len(tasks)], current,
+                        challenger[3], natural_min,
                         save_to=os.path.join(media, 'iter%04d_duel.jpg' % it))
                     if duel_pick:
                         duel_detail['winner'] = duel_pick
