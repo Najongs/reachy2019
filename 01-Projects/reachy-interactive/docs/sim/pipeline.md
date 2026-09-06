@@ -1,0 +1,50 @@
+# 7-역할 파이프라인
+
+시뮬 축의 목표: **예시로 나온 태스크들을 문제없이, 자연스럽게 수행**하는
+행동을 스스로 만든다. 역할 일곱을 파일에 대응시키면:
+
+| # | 역할 | 파일 | 비고 |
+|---|---|---|---|
+| 1 | 사용자 명령 | `sim_tasks.generate` | look/point/reach/pick, 한국어 지시문 |
+| 2 | 환경 생성 | `sim_world` + `sim_tasks.feasible` | 템플릿 배치 + **실현가능성 필터** |
+| 3 | 답변 (ollama) | 브로커 `/reply` | "네, 컵으로 손을 가져갈게요" |
+| 4 | 동작 생성 (opus) | `sim_agent.BrokerPlanner` + `/vision` | 시각 접지 + 서보 |
+| 5 | 피드백·개선 | `sim_critic` + `sim_improve` | 품질·비평·결투·파라미터 채택 |
+| 6 | 오케스트라 | `sim_orchestra` | **지표 감사**, 커리큘럼, 총평 |
+| 7 | 기록·문서 | `sim_record` | `sim_data/<run>/` + `docs/eval/<run>.md` |
+
+최상위 러너는 `sim_pipeline.run_batch`: 1→2→3→4→(5 재시도)→7 을 태스크마다
+돌리고 배치 끝에 6 을 한 번 부른다.
+
+```bash
+python3 sim/sim_pipeline.py -n 6 --planner oracle          # harness 검증
+python3 sim/sim_pipeline.py -n 6 --planner broker --token reachy2019   # 실전
+```
+
+## 인지 방화벽
+
+모델(4번)이 보는 것은 **눈 카메라 이미지 + 잡음 낀 검출 + SceneMemory
+요약**뿐이다. 3D 참값은 판정(성공/충돌)에만 쓴다.
+
+- `sim_perceive.detect`: 참값을 픽셀로 투영 + 가우시안 잡음(2px) +
+  5% 미검출. 실물 SSD 거동의 대체물.
+- `sim_perceive.SceneMemory`: 시선 방향 기반 결정론 기억 (LLM 아님).
+  "화면 밖이지만 아까 저기 있었다" 를 제공. 20초 감쇠.
+- **접지 분업**: opus 는 번호 박스 오버레이에서 "몇 번 박스인가"만 답한다
+  (`{"box": n}`). 픽셀→3D 기하는 결정론(`_det_to_3d`).
+
+## 실행 순서 (reach 기준)
+
+1. 시선 훑기(sweep) → SceneMemory 채움 → 대상 쪽 응시
+2. 검출 → 오버레이 → `/vision` 접지 → 3D 목표점
+3. **들어올리기**: 벌리고→굽히고→돌려넣기 3단계 (테이블 옆면 밖에서 -
+   유일하게 투과 0 인 순서). 머리는 손-목표 중간을 본다
+4. **서보**: 화면 오차(u,v)+크기 단서로 감쇠 최소제곱. 테이블 여유
+   선견(lookahead) 가드. 머리는 손→목표로 수렴
+5. 판정(3단계, [evaluation.md](evaluation.md)) → 기록
+
+## 알려진 한계
+
+- **pick 은 보류**: 손 캡슐 반지름 4.4cm > 컵 - 3만 자세 탐색에서 관통
+  없는 파지 자세가 0개. 그리퍼 폭 제어와 함께 재검토.
+- 작업 영역은 오른손 기준 책상 오른쪽 (`sim_tasks.X_RANGE/Y_RANGE`).
