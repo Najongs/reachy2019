@@ -45,7 +45,7 @@ BOUNDS = {'step_deg': (1.5, 8.0), 'gain': (0.3, 1.4), 'damping': (1.0, 10.0),
           'via2_yaw': (0.0, 60.0), 'via2_elbow': (-125.0, 5.0),
           'via3_pitch': (-40.0, 15.0), 'via3_roll': (-110.0, -25.0),
           'via3_yaw': (0.0, 60.0), 'via3_elbow': (-125.0, -60.0),
-          'gaze_step_deg': (2.0, 12.0)}
+          'gaze_step_deg': (2.0, 8.0)}   # 8 초과는 목이 툭툭거린다 (사용자)
 INT_PARAMS = ('lift_steps',)
 
 

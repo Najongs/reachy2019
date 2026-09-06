@@ -193,10 +193,9 @@ def run_episode(world, task, client, frames=None, trace=None, noise_px=2.0,
             else:
                 st['last'] = 'close 실패: %s' % why
         elif c == 'lift' and st['holding']:
-            follow = A._hold_offset(world, st['bind'])
             h = world.hand()
             A._servo(world, (h[0], h[1], h[2] + 0.15), 3.0, steps=20,
-                     ignore_objs=(st['bind'],), on_step=follow, carried=True,
+                     ignore_objs=(st['bind'],), carried=True,
                      step_cap=4.0, frames=frames, note='lift', trace=trace,
                      target_name=st['bind'])
             st['last'] = 'lift 완료'
@@ -209,24 +208,16 @@ def run_episode(world, task, client, frames=None, trace=None, noise_px=2.0,
             if dest is None:
                 st['last'] = 'carry 실패: 목적지 박스 없음'
                 continue
-            follow = A._hold_offset(world, st['bind'])
             A._servo(world, (dest[0], dest[1], dest[2] + 0.16), 4.0, steps=35,
-                     ignore_objs=(st['bind'],), on_step=follow, obj_stop=1.0,
+                     ignore_objs=(st['bind'],), obj_stop=1.0,
                      carried=True, step_cap=4.0, frames=frames, note='carry',
                      trace=trace, target_name=st['bind'])
             st['dest'] = dest
             st['last'] = 'carry 완료'
             st['phase'] = '목적지 위'
         elif c == 'release' and st['holding']:
-            d = st['dest']
             A._set_gripper(world, A.GRIP_OPEN, frames=frames, note='벌림')
-            if d is not None:
-                A._drop_anim(world, st['bind'],
-                             (d[0], d[1], d[2] + 0.05 + st['half']),
-                             frames=frames)
-            else:
-                A._drop_anim(world, st['bind'], st['orig'], frames=frames,
-                             steps=2)
+            world.step_physics(100)          # 중력이 떨어뜨린다
             st['holding'] = False
             st['last'] = 'release 완료'
             st['phase'] = '놓음'

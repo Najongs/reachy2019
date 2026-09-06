@@ -144,6 +144,7 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
                 '실전배치': batch_line,
                 '미결지적': {i: f['note'] for i, f in enumerate(fb)
                              if not f.get('done')},
+                '운영자 답신': st.get('operator_note'),
             }, ensure_ascii=False)
             strip = _latest(os.path.join(HERE, '..', 'sim_data',
                                          'improve-*-media', '*_strip.jpg'))

@@ -331,7 +331,7 @@ def _lift_ready(world, frames=None, trace=None, steps=None, watch=None,
             h = world.hand()
             aim = h if watch is None else tuple(
                 (h[i] + watch[i]) / 2.0 for i in range(3))
-            world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
+            world.nudge_gaze(aim, min(BEHAVIOR['gaze_step_deg'], 6.0))
             if trace is not None:
                 trace.append(_trace_entry(world, watch, target_name))
             if frames is not None:
@@ -411,7 +411,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         # 실물 visual servoing 도 손과 목표가 같이 보여야 오차를 잰다.
         h = world.hand()
         aim = tuple((h[i] + target[i]) / 2.0 for i in range(3))
-        world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
+        world.nudge_gaze(aim, min(BEHAVIOR['gaze_step_deg'], 6.0))
         if trace is not None:
             trace.append(_trace_entry(world, target, target_name,
                                       carried=carried, ret=ret))
@@ -449,7 +449,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
                         and world.clearance_of(target_name) <= -0.4):
                     world.set_arm(saved_bk)
                     return me._dist(world.hand(), target) * 100 <= done_cm
-                world.nudge_gaze(target, BEHAVIOR['gaze_step_deg'])
+                world.nudge_gaze(target, min(BEHAVIOR['gaze_step_deg'], 6.0))
                 if trace is not None:
                     trace.append(_trace_entry(world, target, target_name))
                 if frames is not None:
@@ -573,10 +573,20 @@ def _retreat(world, frames=None, trace=None, target_name=None):
             pose = {j: cur[j] + (tgt[j] - cur[j]) * wgt for j in cur}
             if not sv.in_bounds({**world.pose, **pose}):
                 continue
+            saved_ret = dict(world.pose)
             world.set_arm(pose)
+            # 복귀 충돌 감시(사용자): 돌아가는 길에 물체를 치면 그 스텝을
+            # 물리고 위로 접어 피한 뒤 계속 간다.
+            if world.clearance(ignore=('table',))[0] < 0.0:
+                world.set_arm(saved_ret)
+                INCIDENTS.append('복귀 경로가 물체를 스침 - 회피 접기')
+                fold_up = dict(world.pose)
+                fold_up['right_arm.elbow_pitch'] = vias[-1][
+                    'right_arm.elbow_pitch']
+                world.set_arm(fold_up)
             # 복귀 중에도 팔을 본다 - 사람도 팔을 거둘 때 눈이 따라온다.
-            # 정면 복귀는 팔이 다 돌아온 다음이다.
-            world.nudge_gaze(world.hand(), BEHAVIOR['gaze_step_deg'])
+            world.nudge_gaze(world.hand(), min(
+                BEHAVIOR['gaze_step_deg'], 6.0))
             if trace is not None:
                 trace.append(_trace_entry(world, None, target_name, ret=True))
             if frames is not None:
@@ -732,11 +742,16 @@ def _close_on(world, bind, half, frames=None, trace=None):
     """
     g = GRIP_OPEN
     for _ in range(24):
-        # 집힘 = '움직이는 조' 가 눌러야 한다. 하강 중 고정 조가 한쪽만
-        # 스친 것은 접촉이지 파지가 아니다 (벌린 채 잡힘 오인 방지).
+        # 실물 force gripper 처럼: '양쪽이 닿을 때까지' 조인다. 움직 조가
+        # 물체를 밀어 고정 조에 붙이는 과정이 파지다 - 한쪽 접촉에서
+        # 멈추면 물체가 슬롯 안에서 헛돈다 (실측: 고정 쪽 1.1cm 빈 채
+        # 맞물림 실패). 물리 정착 스텝이 미끄러짐을 처리한다.
         c = world.jaw_clearance(bind, jaw='moving')
-        if c <= -0.05:
+        c_f = world.jaw_clearance(bind, jaw='fixed')
+        if c <= -0.05 and c_f <= 0.2:
             break
+        if c <= -0.35:
+            break                            # 한쪽만 깊이 파고듦 - 중단
         if g >= 0.0 and c > 0.6:
             INCIDENTS.append('허공 조임: 중립(0도)까지 접촉 없음 - 중단')
             if frames is not None:
@@ -746,6 +761,7 @@ def _close_on(world, bind, half, frames=None, trace=None):
             break
         g = min(GRIP_SHUT, g + (3.0 if c < 1.0 else 6.0))
         world.set_arm({'right_arm.hand.gripper': g})
+        world.step_physics(10)               # 물체가 밀려 자리잡을 시간
         if frames is not None:
             frames.append(_snap(world, '그리퍼 조임'))
     for _ in range(8):
@@ -761,7 +777,7 @@ def _close_on(world, bind, half, frames=None, trace=None):
                 and -0.015 <= slot[2] - (op[2] + half) <= 0.055)
     pinched = (g < GRIP_SHUT
                and world.jaw_clearance(bind, jaw='moving') <= 0.05
-               and world.jaw_clearance(bind, jaw='fixed') <= 0.25)
+               and world.jaw_clearance(bind, jaw='fixed') <= 0.30)
     if pinched and not enclosed:
         INCIDENTS.append('모서리 접촉을 잡힘으로 오인할 뻔 - 감쌈 검사가 거부')
     grabbed = enclosed and pinched
@@ -785,6 +801,46 @@ def _set_gripper(world, deg, frames=None, note=None, steps=3):
 
 ORIENT_JOINTS = ('right_arm.hand.forearm_yaw',
                  'right_arm.hand.wrist_pitch', 'right_arm.arm_yaw')
+
+
+def _nudge_hand(world, dxyz, target_name=None, substeps=5, frames=None,
+                trace=None, note='미세이동'):
+    """고유수용감각 기반 미세 이동: 손을 정확히 dxyz(m) 만큼 옮긴다.
+
+    화면-오차 서보는 가드·정체감시에 걸려 cm 급 잔차가 남는다. 자기 손
+    위치는 FK 로 정확하니, 위치 자코비안(근위 4관절 수치미분) 최소제곱
+    으로 관절 변화를 풀어 잘게 나눠 적용한다. 테이블 가드는 유지.
+    """
+    import numpy as np
+    for k in range(substeps):
+        cur = me.forward_kinematics(me.CHAINS['right_arm'], world.pose)
+        J = []
+        for j in sv.SERVO_JOINTS:
+            trial = dict(world.pose); trial[j] = world.pose.get(j, 0.0) + 1.0
+            p2 = me.forward_kinematics(me.CHAINS['right_arm'], trial)
+            J.append([p2[i] - cur[i] for i in range(3)])
+        J = np.array(J).T                       # 3 x 4 (m per deg)
+        want = np.array(dxyz) / substeps
+        # 최소노름 해 - 감쇠 0.02는 J^2(~1e-5, m/도)보다 커서 해를 0으로
+        # 누른다 (실측: 요청 9cm 이동 0cm). 클램프가 안전을 맡는다.
+        dq, *_ = np.linalg.lstsq(J, want, rcond=None)
+        dq = np.clip(dq, -3.0, 3.0)
+        pose = dict(world.pose)
+        for j, dv in zip(sv.SERVO_JOINTS, dq):
+            lo, hi = me.ALL_LIMITS[j]
+            pose[j] = min(hi, max(lo, pose.get(j, 0.0) + float(dv)))
+        if not sv.in_bounds(pose):
+            return False
+        saved = dict(world.pose)
+        world.set_arm(pose)
+        if world.clearance_of('table') < 0.2:
+            world.set_arm(saved)
+            return False
+        if trace is not None:
+            trace.append(_trace_entry(world, None, target_name))
+        if frames is not None:
+            frames.append(_snap(world, note))
+    return True
 
 
 def _level_pinch(world, target, frames=None, max_iter=12):
@@ -888,17 +944,28 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
                 and pt[2] + half - 0.01 <= slot[2] <= pt[2] + half + 0.05)
 
     _descend(cup)
-    # 슬롯 오프셋은 팔이 움직이면 회전해 낡는다 - 잔여 오차를 반복 교정.
-    for _k in range(4):
-        slot = world.grip_slot()
-        ex, ey = cup[0] - slot[0], cup[1] - slot[1]
-        if math.hypot(ex, ey) <= 0.010:
+    # 슬롯 잔차를 IK 미세이동으로 소거 + 고전 파지 트릭: 목표를 고정 조
+    # 쪽으로 0.8cm 치우친다 - 움직 조가 눌렀을 때 물체가 고정 조에
+    # 갇히게 (정중앙이면 기울어진 집게에서 미끄러져 도망간다, 실측 2cm).
+    def _slot_goal():
+        mjm = world._gid['right_arm_jaw_moving']
+        mjf = world._gid['right_arm_jaw_fixed']
+        d = world.data.geom_xpos[mjf] - world.data.geom_xpos[mjm]
+        n = math.hypot(float(d[0]), float(d[1])) or 1.0
+        return (cup[0] + 0.008 * float(d[0]) / n,
+                cup[1] + 0.008 * float(d[1]) / n)
+    for _round in range(2):
+        for _k in range(3):
+            gx, gy = _slot_goal()
+            slot = world.grip_slot()
+            ex, ey = gx - slot[0], gy - slot[1]
+            if math.hypot(ex, ey) <= 0.006:
+                break
+            _nudge_hand(world, (ex, ey, 0.0), target_name=bind,
+                        frames=frames, trace=trace, note='슬롯 교정')
+        if world.pinch_tilt() <= 12.0:
             break
-        h = world.hand()
-        _servo(world, (h[0] + ex, h[1] + ey, h[2]), 0.8, steps=10,
-               step_cap=2.0, ignore_objs=(bind,), target_stop=-0.5,
-               frames=frames, note='슬롯 교정', trace=trace,
-               target_name=bind, seed=9 + _k)
+        _level_pinch(world, cup, frames=frames)   # 기울면 다시 수평화
     # 집게면 기울기: 조 분리 방향이 수평에서 벗어난 각도. 이 팔은
     # wrist_roll 이 없어 자세에 따라 집게가 대각으로 기운다 - 기울면
     # 세워진 물체를 물리적으로 못 문다 (실측 ~60도에서 전패). 학습이

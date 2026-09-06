@@ -1,8 +1,8 @@
 {
  "env": {
   "table": [
-   -0.28,
-   -0.24
+   -0.32,
+   -0.26
   ],
   "objects": [
    1,
@@ -11,7 +11,8 @@
   "min_gap": 0.14
  },
  "kinds": [
-  "lift"
+  "pick"
  ],
- "natural_min": 45
+ "natural_min": 45,
+ "reset_params": "defaults"
 }
