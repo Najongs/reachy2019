@@ -194,7 +194,7 @@ advice 에 쓸 수 있는 파라미터와 뜻:
 - damping: 감쇠 (up=떨림 억제)
 - table_min: 테이블 여유 (up=더 높이 돌아 안전하게)
 - lift_steps: 들어올리기 보간 수 (up=더 부드러운 들어올림)
-- ready_pitch/ready_roll/ready_yaw/ready_elbow: 들어올리기 경유 자세 각도 - 경로 모양 자체가 어색하면 이걸 지목하라
+- via1_/via2_/via3_ 접두사 + pitch/roll/yaw/elbow: 들어올리기 경유 자세 3개 (예: via2_elbow) - 경로 모양 자체가 어색하면 이걸 지목하라
 
 문제가 없으면 issues 를 빈 배열로, advice 를 빈 객체로. JSON 밖 텍스트 금지."""
 

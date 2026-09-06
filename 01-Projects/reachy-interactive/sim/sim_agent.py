@@ -209,23 +209,28 @@ BEHAVIOR = {
     'damping': 4.0,         # 최소제곱 감쇠 (크면 신중)
     'table_min': 0.5,       # 테이블 표면 여유 하한 cm (크면 높이 돈다)
     'lift_steps': 6,        # 들어올리기 각 단계 보간 수 (많으면 부드러움)
-    # 경로 '모양' - 비평가가 짚은 우회(효율 0.33)의 원인이 여기다. 벌림이
-    # 크면 안전하지만 멀리 돌고, 작으면 곧지만 테이블에 가까워진다. 어느
-    # 쪽이 나은지는 손이 아니라 루프가 정한다(투과는 문지기가 걸러 준다).
-    'ready_pitch': -8.0,    # 준비 자세 어깨 상하
-    'ready_roll': -66.0,    # 준비 자세 벌림 (덜 벌리면 우회가 준다)
-    'ready_yaw': 32.0,      # 준비 자세 상완 비틀기
-    'ready_elbow': -124.0,  # 준비 자세 팔꿈치
+    # 들어올리기 경유 자세 3개 - 경로의 '구조' 자체가 학습 대상이다.
+    # 예전에는 벌리고-굽히고-돌려넣기 순서가 코드에 고정이었고 루프는
+    # 도착 각도만 조율했다 (우회로 효율 0.4 상한). 이제 경유 자세들을
+    # 통째로 탐색한다. 초기값 = 검증된 옛 3단계의 각 단계 끝 자세라
+    # 출발점은 무투과 경로 그대로다. 투과는 문지기가 걸러 준다.
+    'via1_pitch': 0.0,   'via1_roll': -66.0, 'via1_yaw': 0.0,  'via1_elbow': 0.0,
+    'via2_pitch': -8.0,  'via2_roll': -66.0, 'via2_yaw': 0.0,  'via2_elbow': -124.0,
+    'via3_pitch': -8.0,  'via3_roll': -66.0, 'via3_yaw': 32.0, 'via3_elbow': -124.0,
     'gaze_step_deg': 6.0,   # 시선 활강 한 스텝 각도 (작으면 목이 차분)
 }
 
 
-def ready_pose():
-    """BEHAVIOR 에서 준비 자세를 만든다 - 경로 모양도 학습 대상이므로."""
-    return {'right_arm.shoulder_pitch': BEHAVIOR['ready_pitch'],
-            'right_arm.shoulder_roll': BEHAVIOR['ready_roll'],
-            'right_arm.arm_yaw': BEHAVIOR['ready_yaw'],
-            'right_arm.elbow_pitch': BEHAVIOR['ready_elbow']}
+_VIA_JOINT = {'pitch': 'right_arm.shoulder_pitch',
+              'roll': 'right_arm.shoulder_roll',
+              'yaw': 'right_arm.arm_yaw',
+              'elbow': 'right_arm.elbow_pitch'}
+
+
+def via_poses():
+    """BEHAVIOR 에서 들어올리기 경유 자세 3개를 만든다."""
+    return [{j: BEHAVIOR['via%d_%s' % (n, k)] for k, j in _VIA_JOINT.items()}
+            for n in (1, 2, 3)]
 _BEHAVIOR_FILE = os.path.join(HERE, '..', 'config', 'behavior_params.json')
 
 
@@ -241,6 +246,17 @@ def load_behavior():
         with open(_BEHAVIOR_FILE, encoding='utf-8') as fh:
             saved = json.load(fh)
         BEHAVIOR.update({k: v for k, v in saved.items() if k in BEHAVIOR})
+        # 이관: 옛 판(ready_*)의 학습 결과를 경유 자세로 옮긴다.
+        if 'ready_roll' in saved and 'via3_roll' not in saved:
+            r = {k: saved.get('ready_' + k, BEHAVIOR['via3_' + k])
+                 for k in ('pitch', 'roll', 'yaw', 'elbow')}
+            BEHAVIOR.update({
+                'via1_pitch': 0.0, 'via1_roll': r['roll'],
+                'via1_yaw': 0.0, 'via1_elbow': 0.0,
+                'via2_pitch': r['pitch'], 'via2_roll': r['roll'],
+                'via2_yaw': 0.0, 'via2_elbow': r['elbow'],
+                'via3_pitch': r['pitch'], 'via3_roll': r['roll'],
+                'via3_yaw': r['yaw'], 'via3_elbow': r['elbow']})
     except Exception:
         pass
     return dict(BEHAVIOR)
@@ -265,23 +281,15 @@ def _lift_ready(world, frames=None, trace=None, steps=None, watch=None):
     사람이 하듯 팔을 옆으로 벌려 테이블 옆면 밖에서 굽힌 뒤 위에서 돌려
     넣으면 경로 최소 여유 9.5cm, 투과 0 이다.
     """
-    ready = ready_pose()
-    stages = [
-        {'right_arm.shoulder_roll': ready['right_arm.shoulder_roll']},
-        {'right_arm.elbow_pitch': ready['right_arm.elbow_pitch'],
-         'right_arm.shoulder_pitch': ready['right_arm.shoulder_pitch']},
-        {'right_arm.arm_yaw': ready['right_arm.arm_yaw']},
-    ]
+    vias = via_poses()
     if steps is None:
         steps = int(BEHAVIOR['lift_steps'])
-    cur = {j: world.pose.get(j, 0.0) for j in ready}
-    for stage in stages:
-        tgt = dict(cur)
-        tgt.update(stage)
+    cur = {j: world.pose.get(j, 0.0) for j in vias[0]}
+    for tgt in vias:
         for k in range(1, steps + 1):
             u = k / float(steps)
             wgt = u * u * (3 - 2 * u)           # smoothstep
-            pose = {j: cur[j] + (tgt[j] - cur[j]) * wgt for j in ready}
+            pose = {j: cur[j] + (tgt[j] - cur[j]) * wgt for j in cur}
             if not sv.in_bounds({**world.pose, **pose}):
                 continue
             world.set_arm(pose)
@@ -378,7 +386,10 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         J = np.array(J).T
         dq, *_ = np.linalg.lstsq(J.T @ J + damping * np.eye(len(sv.SERVO_JOINTS)),
                                  J.T @ (-np.array(e)), rcond=None)
-        dq = np.clip(dq * gain, -step_deg, step_deg)
+        # 사람 팔처럼 목표 근처에서 감속한다 - 오버슛이 줄고 눈에도
+        # 자연스럽다 (종 모양 속도 프로파일의 싼 근사).
+        slow = max(0.35, min(1.0, me._dist(world.hand(), target) / 0.15))
+        dq = np.clip(dq * gain * slow, -step_deg, step_deg)
         trial = dict(world.pose)
         for j, dv in zip(sv.SERVO_JOINTS, dq):
             lo, hi = me.ALL_LIMITS[j]

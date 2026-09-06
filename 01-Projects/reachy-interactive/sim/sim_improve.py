@@ -38,9 +38,13 @@ import sim_tasks as T                              # noqa: E402
 # 파라미터 허용 범위 - 이 밖은 물리적으로 무의미하거나 위험.
 BOUNDS = {'step_deg': (1.5, 8.0), 'gain': (0.3, 1.4), 'damping': (1.0, 10.0),
           'table_min': (0.2, 3.0), 'lift_steps': (3, 14),
-          # 경로 모양 - 우회를 줄일 수 있는 손잡이. 투과는 문지기가 거른다.
-          'ready_pitch': (-40.0, 15.0), 'ready_roll': (-110.0, -25.0),
-          'ready_yaw': (0.0, 60.0), 'ready_elbow': (-125.0, -60.0),
+          # 경로 구조 - 경유 자세 3개를 통째로 탐색. 투과는 문지기가 거른다.
+          'via1_pitch': (-40.0, 15.0), 'via1_roll': (-110.0, -25.0),
+          'via1_yaw': (0.0, 60.0), 'via1_elbow': (-125.0, 5.0),
+          'via2_pitch': (-40.0, 15.0), 'via2_roll': (-110.0, -25.0),
+          'via2_yaw': (0.0, 60.0), 'via2_elbow': (-125.0, 5.0),
+          'via3_pitch': (-40.0, 15.0), 'via3_roll': (-110.0, -25.0),
+          'via3_yaw': (0.0, 60.0), 'via3_elbow': (-125.0, -60.0),
           'gaze_step_deg': (2.0, 12.0)}
 INT_PARAMS = ('lift_steps',)
 
@@ -59,7 +63,7 @@ def _jitter(current, rng, scale=1.0):
     for k in BOUNDS:
         if rng.random() < 0.5:
             continue
-        if k.startswith('ready_'):
+        if k.startswith('via'):
             span = (BOUNDS[k][1] - BOUNDS[k][0]) * 0.12 * scale
             j[k] = current[k] + rng.uniform(-span, span)
         else:
@@ -124,13 +128,31 @@ def hold_duel(client, task, params_a, params_b, natural_min, save_to=None):
     saved = dict(A.BEHAVIOR)
     try:
         A.BEHAVIOR.update(_clamp(dict(params_a)))
-        _, _, fa = episode(task, keep_frames=True, natural_min=natural_min)
+        _, qa, fa = episode(task, keep_frames=True, natural_min=natural_min)
         A.BEHAVIOR.update(_clamp(dict(params_b)))
-        _, _, fb = episode(task, keep_frames=True, natural_min=natural_min)
+        _, qb, fb = episode(task, keep_frames=True, natural_min=natural_min)
     finally:
         A.BEHAVIOR.update(saved)
     r = C.duel(client, fa, fb, task['instruction'], save_path=save_to)
-    return (r or {}).get('winner')
+    keep = ('efficiency', 'jerk_deg', 'min_margin_cm', 'view_ratio',
+            'steps', 'score')
+    detail = {'a': {k: qa.get(k) for k in keep},
+              'b': {k: qb.get(k) for k in keep}}
+    return (r or {}).get('winner'), detail
+
+
+def cem_sample(center, sigma, rng, n, scale=1.0):
+    """CEM: 분포 N(center, sigma*scale) 에서 후보 n 개.
+
+    한 점 주변 무작위 흔들기(_jitter)는 구석에 갇히면 못 나온다 - 1099회
+    정체의 한 원인. CEM 은 상위 후보들의 분포로 다음 세대를 만들어
+    탐색 방향 자체가 학습된다. sim_opt 의 키프레임 CEM 과 같은 원리.
+    """
+    out = []
+    for i in range(n):
+        c = {k: rng.gauss(center[k], sigma[k] * scale) for k in BOUNDS}
+        out.append(('cem%d' % i, _clamp(c)))
+    return out
 
 
 def propose(current, advice, rng, n_random=3, scale=1.0):
@@ -141,7 +163,7 @@ def propose(current, advice, rng, n_random=3, scale=1.0):
         for k, direction in advice.items():
             if k not in BOUNDS:
                 continue
-            if k.startswith('ready_'):
+            if k.startswith('via'):
                 span = (BOUNDS[k][1] - BOUNDS[k][0]) * 0.15
                 adv[k] = current[k] + (span if direction == 'up' else -span)
             else:
@@ -191,9 +213,17 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             raise RuntimeError('실현 가능한 태스크를 만들 수 없음')
         return ts
 
-    tasks = new_tasks(0)
+    # 시험지(고정)와 훈련셋(회전)을 가른다. 태스크 교체 충격으로 점수가
+    # 널뛰고 성공 0 붕괴의 방아쇠가 됐던 것 - 시험지는 절대 안 바뀌므로
+    # 추이가 연속이고, 훈련셋 회전은 과적합만 막는다.
+    exam = new_tasks(-7)                    # 고정 시험지
+    tasks = new_tasks(0)                    # 회전 훈련셋
     history = []
     current = _clamp(dict(A.BEHAVIOR))
+    # CEM 분포: 중심=엘리트 평균, 폭=엘리트 분산 (하한/상한 있음)
+    span = {k: BOUNDS[k][1] - BOUNDS[k][0] for k in BOUNDS}
+    center = dict(current)
+    sigma = {k: 0.10 * span[k] for k in BOUNDS}
     # 자연스러움 문턱 - 전원 성공이 이어지면 올라간다(평가도 함께 개선).
     natural_min = 55
 
@@ -210,7 +240,8 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                 -round(counts.get('miss_cm', 99.0), 1), counts['quality'])
 
     base = evaluate(current, tasks, natural_min)
-    best_ever = {'quality': base['quality'], 'success': base['success'],
+    report = evaluate(current, exam, natural_min)
+    best_ever = {'quality': report['quality'], 'success': report['success'],
                  'params': dict(current), 'natural_min': natural_min}
     stagnant = 0
     perfect_streak = 0
@@ -233,7 +264,8 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             c['collision'], c['unnatural'], c['missed'], c['success'],
             c['quality'])
 
-    print('반복 0 (기준, 문턱 %d): %s' % (natural_min, fmt(base)), flush=True)
+    print('반복 0 (기준, 문턱 %d): 훈련 %s | 시험 %s'
+          % (natural_min, fmt(base), fmt(report)), flush=True)
     history.append({'iter': 0, 'counts': {k: base[k] for k in C.STAGES},
                     'quality': round(base['quality'], 1),
                     'natural_min': natural_min,
@@ -279,26 +311,41 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
 
             # 정체하면 탐색 폭을 넓힌다 (담금질). 개선되면 되돌린다.
             scale = min(3.0, 1.0 + stagnant * 0.35)
-            n_random = 3 + min(3, stagnant // 2)
 
             base_rank = rank(base)
             best = (base_rank, base, 'current', dict(current))
             runner = None       # 결투 자격 도전자: 충돌·성공 계수가 같은 최고
-            for name, cand in propose(current, advice, rng, n_random, scale):
+            pool = cem_sample(center, sigma, rng, 5, scale)
+            if advice:
+                pool += [pc for pc in propose(current, advice, rng, 0, scale)
+                         if pc[0] == 'advice']
+            scored = [(base_rank, base, 'current', dict(current))]
+            for name, cand in pool:
                 c = evaluate(cand, tasks, natural_min)
                 # 문지기: 충돌은 기준보다 늘 수 없다 (안전 후퇴 금지).
                 if c['collision'] > base['collision']:
                     continue
+                scored.append((rank(c), c, name, cand))
                 if rank(c) > best[0]:
                     best = (rank(c), c, name, cand)
                 if (rank(c)[:2] == base_rank[:2]
                         and (runner is None or rank(c) > runner[0])):
                     runner = (rank(c), c, name, cand)
+            # CEM 분포 갱신: 상위 3(엘리트)의 평균/표준편차로.
+            elites = [sc[3] for sc in sorted(scored, reverse=True,
+                                             key=lambda x: x[0])[:3]]
+            for k in BOUNDS:
+                vals = [e[k] for e in elites]
+                mu = sum(vals) / len(vals)
+                var = sum((v - mu) ** 2 for v in vals) / len(vals)
+                center[k] = mu
+                sigma[k] = min(0.25 * span[k],
+                               max(0.02 * span[k], var ** 0.5 * 1.15))
 
             # 쌍대 결투: 결정론 품질이 박빙일 때 opus 가 A/B 로 가른다.
             # 계측이 근소하게 고른 승자를 사람 눈이 거부하면 채택을 물리고
             # (거부권), 근소하게 진 도전자를 사람 눈이 고르면 승격시킨다.
-            duel_pick = None
+            duel_pick, duel_detail = None, None
             challenger = best if best[2] != 'current' else runner
             if (client is not None and challenger is not None
                     and challenger[2] != 'current'
@@ -306,9 +353,11 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                     and abs(challenger[1]['quality'] - base['quality'])
                     <= DUEL_MARGIN):
                 try:
-                    duel_pick = hold_duel(
+                    duel_pick, duel_detail = hold_duel(
                         client, tasks[0], current, challenger[3], natural_min,
                         save_to=os.path.join(media, 'iter%04d_duel.jpg' % it))
+                    if duel_pick:
+                        duel_detail['winner'] = duel_pick
                 except Exception as e:
                     print('  결투 실패(계속 진행): %s' % e, flush=True)
                 if duel_pick == 'B' and best[2] == 'current':
@@ -325,52 +374,78 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             current = best[3]
             A.BEHAVIOR.update(current)
             A.save_behavior(current)
-            if (base['collision'] == 0 and base['success'] >= len(tasks)
-                    and base['quality'] > best_ever['quality']):
-                best_ever = {'quality': base['quality'],
-                             'success': base['success'],
+
+            # 시험지 채점: 훈련셋은 선택용, 기록·래칫·최고 갱신은 전부
+            # 고정 시험지로 - 추이가 태스크 교체에 흔들리지 않는다.
+            report = evaluate(current, exam, natural_min)
+            if (report['collision'] == 0 and report['success'] >= len(exam)
+                    and report['quality'] > best_ever['quality']):
+                best_ever = {'quality': report['quality'],
+                             'success': report['success'],
                              'params': dict(current), 'iter': it,
                              'natural_min': natural_min}
 
-            # 탈출구: 성공 0 이 오래가면 파라미터가 못 도달하는 구석에
-            # 갇힌 것이다. 전원 성공이었던 best_ever 로 되돌려 다시 시작.
-            zero_streak = zero_streak + 1 if base['success'] == 0 else 0
+            # 탈출구: 시험지 성공 0 이 오래가면 못 도달하는 구석에 갇힌
+            # 것이다. 전원 성공이었던 best_ever 로 되돌려 다시 시작.
+            zero_streak = zero_streak + 1 if report['success'] == 0 else 0
             if zero_streak >= 10 and best_ever.get('params'):
                 current = _clamp(dict(best_ever['params']))
                 A.BEHAVIOR.update(current)
                 A.save_behavior(current)
+                center = dict(current)
+                sigma = {k: 0.10 * span[k] for k in BOUNDS}
                 base = evaluate(current, tasks, natural_min)
+                report = evaluate(current, exam, natural_min)
                 zero_streak = 0
                 stagnant = 0
-                print('[%s] 성공 0 지속 - best_ever(반복 %s) 파라미터로 복귀'
-                      ' -> %s' % (time.strftime('%H:%M'),
-                                  best_ever.get('iter', '?'), fmt(base)),
-                      flush=True)
+                print('[%s] 시험 성공 0 지속 - best_ever(반복 %s) 로 복귀'
+                      ' -> 시험 %s' % (time.strftime('%H:%M'),
+                                       best_ever.get('iter', '?'),
+                                       fmt(report)), flush=True)
 
-            # 평가 래칫: 전원 성공이 2회 이어지면 자연스러움 문턱을 올린다.
-            # 행동이 좋아질수록 평가도 엄해진다 - '점점 평가 개선'.
-            if (tasks and base['collision'] == 0
-                    and base['success'] >= len(tasks)):
+            # 평가 래칫: 시험지 전원 성공이 2회 이어지면 문턱을 올린다.
+            if (exam and report['collision'] == 0
+                    and report['success'] >= len(exam)):
                 perfect_streak += 1
                 if perfect_streak >= 2 and natural_min < 85:
                     natural_min += 5
                     perfect_streak = 0
                     base = evaluate(current, tasks, natural_min)
-                    print('[%s] 평가 강화: 자연스러움 문턱 -> %d (재측정 %s)'
-                          % (time.strftime('%H:%M'), natural_min, fmt(base)),
-                          flush=True)
+                    report = evaluate(current, exam, natural_min)
+                    print('[%s] 평가 강화: 문턱 -> %d (시험 재측정 %s)'
+                          % (time.strftime('%H:%M'), natural_min,
+                             fmt(report)), flush=True)
             else:
                 perfect_streak = 0
 
             history.append({'iter': it,
                             'counts': {k: base[k] for k in C.STAGES},
                             'quality': round(base['quality'], 1),
+                            'exam': {k: report[k] for k in C.STAGES},
+                            'exam_quality': round(report['quality'], 1),
+                            'exam_miss_cm': round(report['miss_cm'], 1),
                             'natural_min': natural_min,
                             'naturalness': naturalness, 'rubric': rubric,
-                            'duel': duel_pick, 'picked': best[2],
+                            'duel': duel_pick, 'duel_detail': duel_detail,
+                            'picked': best[2],
                             'stagnant': stagnant,
                             'params': dict(current),
                             'ts': time.strftime('%H:%M')})
+            # 발산 감사: 품질은 오르는데 시험 성공이 내리면 목적함수 오용
+            # 신호다 - 1099회 사고의 패턴을 이제 기계가 감시한다.
+            if it % 15 == 0 and len(history) >= 31:
+                older = history[-31:-16]
+                newer = history[-15:]
+                s_old = sum(h2['exam']['success'] for h2 in older
+                            if 'exam' in h2) / max(len(older), 1)
+                s_new = sum(h2['exam']['success'] for h2 in newer
+                            if 'exam' in h2) / max(len(newer), 1)
+                q_old = sum(h2.get('exam_quality', 0) for h2 in older) / max(len(older), 1)
+                q_new = sum(h2.get('exam_quality', 0) for h2 in newer) / max(len(newer), 1)
+                if s_new < s_old - 0.5 and q_new > q_old + 2:
+                    print('[감사] 발산 의심: 시험 성공 %.1f->%.1f 인데 품질'
+                          ' %.0f->%.0f - 목적함수/지표 오용 점검 필요'
+                          % (s_old, s_new, q_old, q_new), flush=True)
             # 결투가 계측 선택을 자꾸 뒤집으면 품질 가중치가 사람 눈과
             # 어긋난 것이다 - 지표 감사 원칙대로 신호를 남긴다.
             if duel_flips == 3:
@@ -380,9 +455,9 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             nat = ' 자연 %s/10' % naturalness if naturalness else ''
             if duel_pick:
                 nat += ' 결투:%s' % duel_pick
-            print('[%s] 반복 %d(문턱 %d): %s 채택, %s%s%s'
+            print('[%s] 반복 %d(문턱 %d): %s 채택, 훈련 %s | 시험 %s%s%s'
                   % (time.strftime('%H:%M'), it, natural_min, best[2],
-                     fmt(base), nat,
+                     fmt(base), fmt(report), nat,
                      ' (정체 %d)' % stagnant if stagnant else ''), flush=True)
             checkpoint()
 
@@ -409,7 +484,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             time.sleep(5)
 
     checkpoint()
-    qs = [h['quality'] for h in history]
+    qs = [h.get('exam_quality', h['quality']) for h in history]
     print('품질 추이: %.0f -> %.0f (최고 %.0f, 최종 문턱 %d, 반복 %d회)'
           % (qs[0], qs[-1], best_ever['quality'], natural_min,
              len(history) - 1))
