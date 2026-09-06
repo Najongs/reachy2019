@@ -1184,7 +1184,7 @@ def precache_common_lines(speech, notes=None):
 STREAM_FIRST_WAIT = 25.0
 STREAM_NEXT_WAIT = 20.0
 
-# 살아 있다는 줄을 이만큼마다 남긴다. 감시 쪽(ops/pi_watchdog.sh)은 이보다
+# 살아 있다는 줄을 이만큼마다 남긴다. 감시 쪽(ops/pi/pi_watchdog.sh)은 이보다
 # 넉넉히 기다렸다가 판단한다.
 HEARTBEAT_EVERY = 300.0
 
@@ -1295,7 +1295,7 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
     was_asleep = False   # 잠드는 '순간'을 알아야 팔을 한 번만 내린다
     # 살아 있다는 표시를 이따금 남긴다. 프로세스가 떠 있는 것과 대화 루프가
     # 실제로 돌고 있는 것은 다른 얘기다 - 마이크나 카메라에서 멎으면 systemd
-    # 는 아무것도 알아채지 못한다. ops/pi_watchdog.sh 가 이 줄이 끊기면
+    # 는 아무것도 알아채지 못한다. ops/pi/pi_watchdog.sh 가 이 줄이 끊기면
     # 서비스를 다시 올린다.
     heartbeat_at = 0.0
     turns = 0
@@ -2068,7 +2068,7 @@ def main():
                         logger.info('사람 검출(SSD)을 감시에 연결했습니다')
                 else:
                     logger.info('Object vision model not found - skipping '
-                                '(install with ops/install_object_vision.sh)')
+                                '(install with ops/pi/install_object_vision.sh)')
             except Exception:
                 logger.exception('Object vision failed to init')
 

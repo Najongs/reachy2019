@@ -33,7 +33,7 @@ done
 mkdir -p "$PI_LOGS"
 
 echo "── [0/4] 수집이 살아 있나"
-python3 ops/collect_health.py || true      # 문제가 있어도 나머지는 계속 돈다
+python3 ops/dgx/collect_health.py || true      # 문제가 있어도 나머지는 계속 돈다
 
 echo
 echo "── [1/4] Pi 로그 당겨오기 (역터널 2222)"
@@ -65,14 +65,14 @@ echo "   현재 총 턴 수: $turns"
 echo
 echo "── [2/4] 사람 사진 → 04-Archives/person-dataset/persons"
 if [ "$PERSONS" = 1 ]; then
-  python3 ops/sync_persons.py $PURGE || echo "   ! 사진 동기화 실패 (계속 진행)"
+  python3 ops/data/sync_persons.py $PURGE || echo "   ! 사진 동기화 실패 (계속 진행)"
 else
   echo "   건너뜀 (--no-persons)"
 fi
 
 echo
 echo "── [3/4] 활동 다이제스트"
-python3 ops/log_digest.py "$PI_LOGS" $SINCE
+python3 ops/dgx/log_digest.py "$PI_LOGS" $SINCE
 
 echo
 echo "── [4/4] 노트 제안 (실제 로그 답변 재사용, 실행약속/동작류 제외)"
@@ -85,7 +85,7 @@ echo "── 사람 인식 DB 생성 (여기서 제대로 된 모델로)"
 # 쓰고 있어 끼어들면 그쪽이 느려진다.
 VENV_PY=/home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3
 if [ "$PERSONS" = 1 ] && [ -x "$VENV_PY" ]; then
-  "$VENV_PY" ops/backfill_person_boxes.py --write 2>&1 | tail -3 \
+  "$VENV_PY" ops/data/backfill_person_boxes.py --write 2>&1 | tail -3 \
     || echo "   ! 사람 인식 실패 (계속 진행)"
 elif [ "$PERSONS" = 1 ]; then
   echo "   건너뜀 (torch 가 있는 venv 를 찾지 못함: $VENV_PY)"
@@ -96,7 +96,7 @@ fi
 echo
 echo "── 사람 이미지 폴더 갱신 (04-Archives/person-dataset/dataset)"
 if [ "$PERSONS" = 1 ]; then
-  python3 ops/persons_export.py --out --crop-persons 2>&1 \
+  python3 ops/data/persons_export.py --out --crop-persons 2>&1 \
     | tail -4 || echo "   ! 추출 실패 (계속 진행)"
 else
   echo "   건너뜀 (--no-persons)"

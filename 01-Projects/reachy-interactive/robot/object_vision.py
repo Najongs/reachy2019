@@ -7,7 +7,7 @@ the most relevant object, and this servos the neck to center it, iterating a
 couple of times so it actually converges. Fully offline.
 
 Model files (not in git, ~23MB): mnssd.caffemodel + mnssd.prototxt next to this
-script. Install via ops/install_object_vision.sh.
+script. Install via ops/pi/install_object_vision.sh.
 """
 
 import logging

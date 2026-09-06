@@ -5,7 +5,7 @@
 # voice_chat.service) recognize speech with zero internet - essential where the
 # hallway wifi is unreliable.
 #
-#   ssh -p 2222 pi@localhost 'bash -s' < ops/install_vosk.sh   # from the DGX
+#   ssh -p 2222 pi@localhost 'bash -s' < ops/pi/install_vosk.sh   # from the DGX
 #   # or copy over and run:  bash install_vosk.sh
 set -e
 MODEL_DIR="$HOME/vosk-ko-model"

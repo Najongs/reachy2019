@@ -204,7 +204,7 @@ def main():
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--demo', action='store_true')
-    ap.add_argument('--out', default='sim_gallery/perceive_demo.png')
+    ap.add_argument('--out', default='sim_data/gallery/perceive_demo.png')
     args = ap.parse_args()
 
     if not args.demo:

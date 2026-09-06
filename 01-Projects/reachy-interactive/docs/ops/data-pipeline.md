@@ -66,8 +66,8 @@ DB 도 사진 한 행에 상자 하나가 아니라, `person_boxes` 표에 사�
 
 ```bash
 /home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3 \
-    ops/backfill_person_boxes.py --write
-python3 ops/persons_export.py --out --crop-persons
+    ops/data/backfill_person_boxes.py --write
+python3 ops/data/persons_export.py --out --crop-persons
 ```
 
 torch 는 학습용 venv 에 있어 그 파이썬을 쓴다. GPU 는 기본으로 쓰지 않는다 -
@@ -260,7 +260,7 @@ presence 스레드가 첫 프레임에서 멎고, 얼굴 검출·복도 인사·
 
 - 로봇 쪽: 감시가 한 바퀴 돌 때마다 시각을 남기고, 45초 넘게 멎으면
   `ERROR 사람 감시가 N초째 멈춰 있습니다` 를 로그에 찍는다. 돌아오면 회복도 알린다.
-- 여기 쪽: `ops/collect_health.py` 가 서비스·수집 설정·마지막 촬영 시각·SD 여유를
+- 여기 쪽: `ops/dgx/collect_health.py` 가 서비스·수집 설정·마지막 촬영 시각·SD 여유를
   한 번에 확인하고, 문제가 있으면 무엇을 보라고 알려 준다.
   `daily_update.sh` 가 맨 처음에 돌린다.
 
@@ -293,7 +293,7 @@ presence 스레드가 첫 프레임에서 멎고, 얼굴 검출·복도 인사·
 ```bash
 bash ops/daily_update.sh     # ① 로그 pull → ② 다이제스트 → ③ 노트 제안 → ④ Pi 원시로그 정리
 ```
-- **다이제스트**(`ops/log_digest.py`): 종류별 건수, 복도 통계(등장/인사/체류), 자주 나온 발화, 동작 실패 사유, STT 엔진 분포·LLM 지연, **마이크 RMS 분포**(→ `--fixed-energy` 제안값)
+- **다이제스트**(`ops/dgx/log_digest.py`): 종류별 건수, 복도 통계(등장/인사/체류), 자주 나온 발화, 동작 실패 사유, STT 엔진 분포·LLM 지연, **마이크 RMS 분포**(→ `--fixed-energy` 제안값)
 - **노트 제안**(`broker/build_notes.py`): 반복 발화를 *로그에 실제로 나온 답변*으로 제안 → `quick_notes.proposed.json` (할루시네이션 방지)
 - **반영**: 제안 검토 → `quick_notes.json` / `stt_corrections.json` 편집 → `bash ops/deploy.sh`
 - **이미지 축적**: 방문자가 나타나면 자동으로 한 장 촬영해 `frames/` 에 쌓는다(90초 간격·세션당 200장 상한,

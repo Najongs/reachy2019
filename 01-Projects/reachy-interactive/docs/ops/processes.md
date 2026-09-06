@@ -19,7 +19,7 @@ Pi 는 armv7l / Raspbian Buster - 파이썬·패키지 오래됨을 전제.
 |---|---|---|
 | reachy-broker | systemd --user | 브로커 :8080 (/reply /motion /vision) |
 | ollama | 시스템 | EXAONE 3.5 (GPU0) |
-| broker_watchdog | cron (~/reachy-ops/ 심 → ops/broker_watchdog.sh) | /health 감시 |
+| broker_watchdog | cron (~/reachy-ops/ 심 → ops/dgx/broker_watchdog.sh) | /health 감시 |
 | sim_improve.py | 수동 (nohup setsid) | 장기 개선 루프 (GPU0 EGL) |
 | daily_update.sh | cron | 로그 수집·리포트 |
 
@@ -45,7 +45,7 @@ bash ops/status.sh -v     # 최근 로그·워치독 기록까지
 |---|---|---|
 | 서비스 | `ollama.service`, `reachy-broker.service` (`--user` + linger) | `voice_chat`, `pi_tunnel`, `pi_viewer`, `respeaker_gain` |
 | 죽으면 | systemd `Restart=always` | systemd `Restart=always` |
-| 멎으면 | `ops/broker_watchdog.sh` (cron 2분) | `ops/pi_watchdog.sh` (cron 5분) |
+| 멎으면 | `ops/dgx/broker_watchdog.sh` (cron 2분) | `ops/pi_watchdog.sh` (cron 5분) |
 | 로그 회전 | 워치독이 스스로 자름 | `ops/logrotate-reachy` → `/etc/logrotate.d/reachy` |
 
 **'죽는 것'과 '멎는 것'은 다르다.** systemd 는 프로세스가 사라져야 반응한다.
@@ -97,11 +97,11 @@ python3 broker/llm_broker.py --host 127.0.0.1 --port 8080 \
 bash ops/daily_update.sh
 
 # [DGX] 사람 데이터만 따로 (daily_update 가 이 순서를 자동으로 돈다)
-python3 ops/sync_persons.py                      # Pi -> 여기로 가져와 DB 합치기
-$VENV/bin/python3 ops/backfill_person_boxes.py --write   # 사람 인식 DB 생성
-python3 ops/persons_export.py --out --crop-persons       # 학습용으로 뽑기
-python3 ops/sync_persons.py --stats              # 현황만 보기
-python3 ops/sync_persons.py --purge-remote       # 옮긴 뒤 Pi 원본 삭제(SD 확보)
+python3 ops/data/sync_persons.py                      # Pi -> 여기로 가져와 DB 합치기
+$VENV/bin/python3 ops/data/backfill_person_boxes.py --write   # 사람 인식 DB 생성
+python3 ops/data/persons_export.py --out --crop-persons       # 학습용으로 뽑기
+python3 ops/data/sync_persons.py --stats              # 현황만 보기
+python3 ops/data/sync_persons.py --purge-remote       # 옮긴 뒤 Pi 원본 삭제(SD 확보)
 ```
 
 `$VENV` = `/home/kiro-ai/NAJY/trossen-ai-simulation/.venv` (torch 가 여기 있다)
@@ -137,7 +137,7 @@ curl -s http://127.0.0.1:8080/reply -H 'X-Auth-Token: <TOKEN>' \
 | `camera_tune.sh` / `respeaker_gain.py` | 카메라·마이크 설정 고정 | Pi |
 
 **설치 스크립트**(1회): `ops/install_ollama.sh`(DGX 로컬 LLM),
-`ops/install_vosk.sh`(오프라인 STT), `ops/install_object_vision.sh`(물체 검출 모델).
+`ops/pi/install_vosk.sh`(오프라인 STT), `ops/pi/install_object_vision.sh`(물체 검출 모델).
 대용량 모델은 git 제외.
 
 Pi 의존성: `pip3 install gTTS edge-tts SpeechRecognition vosk` + `sudo apt install mpg123 python3-pyaudio flac`

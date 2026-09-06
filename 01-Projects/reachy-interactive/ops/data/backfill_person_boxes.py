@@ -12,16 +12,16 @@
 torch 는 학습용 venv 에 들어 있으므로 그 파이썬으로 돌린다:
 
     /home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3 \\
-        ops/backfill_person_boxes.py --write
+        ops/data/backfill_person_boxes.py --write
 
 GPU 는 기본으로 쓰지 않는다. 이 DGX 는 다른 학습이 8장을 100% 로 쓰고 있어서,
 끼어들면 그쪽이 느려진다. 사진 수백 장 정도는 CPU 로 충분하다. 급하면
 --device cuda 를 준다.
 
 사용:
-    ... ops/backfill_person_boxes.py            # 무엇이 채워질지 보기
-    ... ops/backfill_person_boxes.py --write    # 실제로 DB 에 기록
-    ... ops/backfill_person_boxes.py --all      # 이미 채워진 것까지 다시
+    ... ops/data/backfill_person_boxes.py            # 무엇이 채워질지 보기
+    ... ops/data/backfill_person_boxes.py --write    # 실제로 DB 에 기록
+    ... ops/data/backfill_person_boxes.py --all      # 이미 채워진 것까지 다시
 """
 
 import argparse
@@ -203,7 +203,7 @@ def main():
     except ImportError:
         print('torch/torchvision 이 없습니다. 학습용 venv 로 돌리세요:')
         print('  %s \\' % VENV_PY)
-        print('      ops/backfill_person_boxes.py %s'
+        print('      ops/data/backfill_person_boxes.py %s'
               % ('--write' if args.write else ''))
         return 1
 

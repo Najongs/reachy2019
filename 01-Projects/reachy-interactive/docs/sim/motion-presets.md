@@ -55,10 +55,10 @@ python3 sim/sim_opt.py --preset wave --iters 12 --pop 48   # 하나만 다듬어
 ### 개선 과정을 그림으로
 
 ```bash
-python3 sim/sim_train.py --rounds 10 --token reachy2019   # sim_gallery/ 에 자동 저장
+python3 sim/sim_train.py --rounds 10 --token reachy2019   # sim_data/gallery/ 에 자동 저장
 ```
 
-`sim_gallery/00-progress.png` 는 과제별 첫 점수와 최종 점수를 잇는 곡선,
+`sim_data/gallery/00-progress.png` 는 과제별 첫 점수와 최종 점수를 잇는 곡선,
 `NN-<요청>.png` 는 그 과제의 **초안과 최종본 궤적을 위아래로 붙인 한 장**이다.
 "75점 → 100점"이라고만 하면 무엇이 달라졌는지 모른다 — 박수의 경우 위에서 본
 그림에서 초안은 양손이 ±0.35 로 벌어진 채이고 최종본은 몸 앞 y≈0 으로 모이는

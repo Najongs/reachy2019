@@ -406,7 +406,7 @@ def main():
     ap.add_argument('--video', action='store_true',
                     help='과제마다 초안/최종 비교 영상도 만든다 (MuJoCo, 편당 5~10초)')
     ap.add_argument('--gallery', metavar='DIR',
-                    default=os.path.join(CONFIG, '..', 'sim_gallery'),
+                    default=os.path.join(CONFIG, '..', 'sim_data', 'gallery'),
                     help='과제별 before/after 와 진행 그래프를 남길 폴더. '
                          "실행 시각으로 하위 폴더를 만든다 ('off' 로 끔)")
     ap.add_argument('--opt-iters', type=int, default=10,
@@ -420,9 +420,10 @@ def main():
     ap.add_argument('--no-novelty', action='store_true',
                     help='이미 있는 동작과 겹치는지 보지 않는다')
     ap.add_argument('--report', metavar='FILE', nargs='?',
-                    const=os.path.join(CONFIG, 'sim_results.json'),
+                    const=os.path.join(CONFIG, '..', 'sim_data', 'sim_results.json'),
                     help='지난 기록을 되짚어 보기만 한다 (새로 돌리지 않음)')
-    ap.add_argument('--out', default=os.path.join(CONFIG, 'sim_results.json'))
+    ap.add_argument('--out', default=os.path.join(
+        CONFIG, '..', 'sim_data', 'sim_results.json'))
     args = ap.parse_args()
 
     if args.report:

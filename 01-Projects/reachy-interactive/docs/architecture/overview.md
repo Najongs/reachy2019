@@ -45,7 +45,7 @@ robot/    Pi 에서 도는 것 (voice_chat, motion_exec, presence, sleep_mode...
 broker/   DGX 브로커 (llm_broker.py 하나가 본체)
 sim/      시뮬 축 전부 (sim_*.py) - docs/sim/pipeline.md 에 대응표
 config/   페르소나·프롬프트·행동 파라미터·즉답 노트
-ops/      서비스 유닛, 워치독, 배포, 상태 확인 스크립트
+ops/      엔트리포인트(status/deploy/daily_update) + pi/ dgx/ data/ 하위분류
 docs/     이 문서들 + eval/(자동 리포트)
-sim_data/ 시뮬 산출물 (git 제외) - 실행 기록 json, 영상, archive/
+sim_data/ 시뮬 산출물 전부 (git 제외) - 실행 기록, 영상, gallery/, archive/
 ```

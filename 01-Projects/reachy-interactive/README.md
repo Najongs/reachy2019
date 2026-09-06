@@ -101,7 +101,7 @@ bash ~/Documents/brightness_report.sh    # 시간대별 화면 밝기(수면 문
 | `broker/` | **DGX** | LLM 브로커 (/reply /motion /vision) → [docs/architecture/broker.md](docs/architecture/broker.md) |
 | `sim/` | **DGX GPU0** | MuJoCo 시뮬 축 전부 → [docs/sim/pipeline.md](docs/sim/pipeline.md) |
 | `config/` | DGX | 페르소나·프롬프트·행동 파라미터·즉답 노트 |
-| `ops/` | Pi/DGX | 서비스·워치독·배포 → [docs/ops/processes.md](docs/ops/processes.md) |
+| `ops/` | Pi/DGX | 엔트리포인트(status/deploy/daily_update) + `pi/` `dgx/` `data/` → [docs/ops/processes.md](docs/ops/processes.md) |
 | `docs/` | - | **문서 전부** → [docs/README.md](docs/README.md) |
 | `sim_data/` | - | 시뮬 산출물 (git 제외, archive/ 에 옛 런) |
 

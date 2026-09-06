@@ -16,7 +16,7 @@
 
 ## 수면 모드 (sleep_mode.py)
 
-- **조건**: 어둡고(화면 밝기 문턱, `ops/brightness_report.sh` 로 보정)
+- **조건**: 어둡고(화면 밝기 문턱, `ops/pi/brightness_report.sh` 로 보정)
   + 사람 없음(presence) → 스스로 내는 소리·동작 전부 중지.
 - **통신은 켜 둔다**: SSH 터널, 브로커 연결, 로그, 심장박동 유지.
 - **근무시간**: 08-20시 (`--quiet-hours 20-8`).
@@ -179,7 +179,7 @@ edge 를 못 찾은 것이다.
 
 밝기는 `presence.PresenceWatcher` 가 이미 만들어 둔 축소 흑백 프레임의 평균으로
 잰다 — 카메라를 따로 열지 않는다(카메라는 한 번에 하나만 열린다). 5분마다 로그에
-남으므로 `ops/brightness_report.sh` 로 시간대별 값을 보고 문턱을 맞춘다.
+남으므로 `ops/pi/brightness_report.sh` 로 시간대별 값을 보고 문턱을 맞춘다.
 **실측: 불 켜진 복도 0.577.**
 
 시간대 규칙이 따로 있는 이유는 **퇴근할 때 모터 전원을 내리면 카메라도 없어지기**
@@ -245,7 +245,7 @@ Orbita 목은 `connect()` 직후 **풀린 채로** 온다(실측: 디스크 셋 
 | 항목 | 위치 |
 |---|---|
 | 마이크 감도 | `--fixed-energy`(현재 550). 튜닝은 `--stt-test` 로 captured RMS 보며 |
-| 마이크 게인 | `ops/respeaker_gain.py --max-gain-db --desired-level` (부팅 서비스에 반영) |
+| 마이크 게인 | `ops/pi/respeaker_gain.py --max-gain-db --desired-level` (부팅 서비스에 반영) |
 | 대화 모델·길이 | 브로커 `--ollama-model`, `OllamaBackend(num_predict)`, `spoken_trim()` |
 | 성격·말투 | `config/persona.txt` (수정 후 `systemctl --user restart reachy-broker`) |
 | 인사 빈도 | `robot/hallway.py` greet_cooldown / gesture_cooldown / absence_reset |

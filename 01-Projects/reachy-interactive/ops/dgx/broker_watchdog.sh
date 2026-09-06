@@ -1,7 +1,7 @@
 #!/bin/bash
 # DGX 브로커/Ollama 감시. cron 이 2분마다 돌린다.
 #
-#   */2 * * * * /home/kiro-ai/NAJY/reachy-2019/01-Projects/reachy-interactive/ops/broker_watchdog.sh
+#   */2 * * * * /home/kiro-ai/NAJY/reachy-2019/01-Projects/reachy-interactive/ops/dgx/broker_watchdog.sh
 #
 # 예전 판은 /health 가 안 열리면 무조건 브로커만 재시작했다. 그런데 그때
 # /health 는 브로커가 떠 있다는 것만 확인했으므로, **Ollama 가 죽어도 늘 정상**

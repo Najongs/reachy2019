@@ -29,8 +29,8 @@ bash ops/status.sh                        # 전체 요약에 포함됨
 curl -s http://127.0.0.1:8080/stats | python3 -m json.tool
 ```
 
-- 워치독: cron 이 `~/reachy-ops/broker_watchdog.sh`(실행 심 - 실제 내용은
-  `ops/broker_watchdog.sh`) 를 돌려 `/health` 503 이면 Ollama/브로커를
+- 워치독: cron 이 `~/reachy-ops/dgx/broker_watchdog.sh`(실행 심 - 실제 내용은
+  `ops/dgx/broker_watchdog.sh`) 를 돌려 `/health` 503 이면 Ollama/브로커를
   살린다. crontab 은 긴 경로를 잘라먹은 적이 있어 심을 쓴다.
 - 서비스 유닛 인자에 `--vision-model opus --vision-prompt-file
   config/vision_prompt.txt` 가 있어야 /vision 이 뜬다.

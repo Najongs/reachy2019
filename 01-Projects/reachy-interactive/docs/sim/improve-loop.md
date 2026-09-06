@@ -32,7 +32,7 @@ pgrep -f "sim_improve[.]py" | while read p; do kill $p; done
 3. 선택: `(충돌 적게, 성공 많이, 품질)` 사전식. **충돌이 기준보다 늘면
    즉시 탈락** (안전 후퇴 금지)
 4. 품질 박빙이면 opus 결투가 심판 ([evaluation.md](evaluation.md))
-5. 채택 → `config/behavior_params.json` 저장 (실물이 이 파일을 읽는다)
+5. 채택 → `config/behavior_params.json` 저장 (시뮬 전용 - 실물 반영은 검토 후 수동)
 
 주기 작업: 태스크 교체 6회마다(과적합 방지), opus 비평 3회마다,
 end-to-end 브로커 검증 60회마다, 래칫은 전원 성공 2연속마다.
