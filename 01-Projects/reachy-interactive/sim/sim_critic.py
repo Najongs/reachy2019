@@ -61,6 +61,11 @@ def quality(trace):
     margin = min(min(tables), min(objs))
     avg_margin = sum(min(a, b) for a, b in zip(tables, objs)) / len(trace)
 
+    # 시야 유지: 목표가 눈 화면에 있던 스텝 비율. 실물은 눈 뷰만 보고
+    # 동작하므로 목표를 잃는 목 움직임은 그 자체로 나쁜 동작이다.
+    views = [t['view'] for t in trace if 'view' in t]
+    view_ratio = (sum(views) / len(views)) if views else None
+
     metrics = {
         'efficiency': round(efficiency, 3),
         'jerk_deg': round(jerk, 2),
@@ -68,14 +73,16 @@ def quality(trace):
         'avg_margin_cm': round(avg_margin, 1),
         'steps': len(trace),
         'path_cm': round(path * 100, 1),
+        'view_ratio': round(view_ratio, 2) if view_ratio is not None else None,
     }
 
-    # 종합: 효율 40 + 부드러움 30 + 여유 20 + 간결함 10
+    # 종합: 효율 35 + 부드러움 25 + 여유 20 + 간결함 10 + 시야 10
     score = 0.0
-    score += 40 * min(1.0, efficiency / 0.7)          # 0.7 이면 만점 (우회 포함)
-    score += 30 * max(0.0, 1.0 - jerk / 6.0)          # 저크 6도/스텝이면 0점
+    score += 35 * min(1.0, efficiency / 0.7)          # 0.7 이면 만점 (우회 포함)
+    score += 25 * max(0.0, 1.0 - jerk / 6.0)          # 저크 6도/스텝이면 0점
     score += 20 * max(0.0, min(1.0, (margin - (-0.5)) / 4.0))   # 여유 3.5cm+ 만점
     score += 10 * max(0.0, 1.0 - max(0, len(trace) - 20) / 40.0)
+    score += 10 * (view_ratio if view_ratio is not None else 1.0)
     metrics['score'] = int(round(score))
     return metrics
 

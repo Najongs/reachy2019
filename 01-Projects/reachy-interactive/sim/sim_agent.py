@@ -258,7 +258,7 @@ def save_behavior(params=None):
 load_behavior()
 
 
-def _lift_ready(world, frames=None, trace=None, steps=None):
+def _lift_ready(world, frames=None, trace=None, steps=None, watch=None):
     """휴식 -> 준비 자세, 3단계로: 벌리고 -> 굽히고 -> 돌려 넣기.
 
     관절을 한꺼번에 보간하면 전완이 테이블 앞모서리를 스친다(실측 -5cm).
@@ -285,22 +285,33 @@ def _lift_ready(world, frames=None, trace=None, steps=None):
             if not sv.in_bounds({**world.pose, **pose}):
                 continue
             world.set_arm(pose)
-            # 사람이 하듯 올라가는 손을 눈으로 따라간다 (목 속도 상한 내).
-            world.nudge_gaze(world.hand(), BEHAVIOR['gaze_step_deg'])
+            # 손만 쫓으면 목표가 시야에서 사라진다 - 서보가 눈 뷰로 일해야
+            # 하니, 목표를 알면 손-목표 중간을 보며 둘 다 화면에 담는다.
+            h = world.hand()
+            aim = h if watch is None else tuple(
+                (h[i] + watch[i]) / 2.0 for i in range(3))
+            world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
             if trace is not None:
-                trace.append(_trace_entry(world))
+                trace.append(_trace_entry(world, watch))
             if frames is not None:
                 frames.append(_snap(world, 'lift'))
         cur = tgt
     return True
 
 
-def _trace_entry(world):
-    return {'table': world.clearance_of('table'),
-            'obj': world.clearance(ignore=('table',))[0],
-            'hand': tuple(round(v, 4) for v in world.hand()),
-            'joints': {j: round(world.pose.get(j, 0.0), 2)
-                       for j in sv.SERVO_JOINTS}}
+def _trace_entry(world, watch=None):
+    e = {'table': world.clearance_of('table'),
+         'obj': world.clearance(ignore=('table',))[0],
+         'hand': tuple(round(v, 4) for v in world.hand()),
+         'joints': {j: round(world.pose.get(j, 0.0), 2)
+                    for j in sv.SERVO_JOINTS}}
+    if watch is not None:
+        # 실물은 눈 뷰만 보고 동작한다 - 목표를 시야에서 잃으면 서보가
+        # 눈이 먼다. 목표가 화면 안에 있었는지를 궤적에 남겨 품질로 잰다.
+        px = world.pixel_of(watch)
+        e['view'] = int(px is not None and 0 <= px[0] < world.width
+                        and 0 <= px[1] < world.height)
+    return e
 
 def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
            stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
@@ -345,7 +356,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         aim = tuple((h[i] + target[i]) / 2.0 for i in range(3))
         world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
         if trace is not None:
-            trace.append(_trace_entry(world))
+            trace.append(_trace_entry(world, target))
         if frames is not None:
             frames.append(_snap(world, '%s %.1fcm' % (note,
                           me._dist(world.hand(), target) * 100)))
@@ -436,11 +447,12 @@ def execute(world, plan, frames=None, trace=None):
         return True
     if mode == 'reach':
         # 실물 순서: 팔을 먼저 테이블 위로 들어 올리고, 위에서 접근한다.
-        _lift_ready(world, frames=frames, trace=trace)
+        _lift_ready(world, frames=frames, trace=trace, watch=plan['point'])
         return _servo(world, plan['point'], plan['done_cm'], obj_stop=1.0,
                       frames=frames, note='reach', trace=trace)
     if mode == 'pick':
-        _lift_ready(world, frames=frames, trace=trace)
+        _lift_ready(world, frames=frames, trace=trace,
+                    watch=world.object_pos(plan['object']))
         return _pick(world, plan['object'], plan['tray'], frames=frames)
     return False
 
