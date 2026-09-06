@@ -347,6 +347,28 @@ class World(object):
         return min(mj.mj_geomDistance(self.model, self.data, g, o, 1.0, None)
                    for g in jids for o in oids) * 100
 
+    def pinch_tilt(self):
+        """집게면 기울기(도): 조 분리 방향이 수평에서 벗어난 각."""
+        gm = self._gid.get('right_arm_jaw_moving')
+        gf = self._gid.get('right_arm_jaw_fixed')
+        if gm is None or gf is None:
+            return 0.0
+        v = self.data.geom_xpos[gm] - self.data.geom_xpos[gf]
+        n = float((v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5) or 1.0
+        return abs(math.degrees(math.asin(abs(float(v[2])) / n)))
+
+    def ghost_eval(self, pose_delta):
+        """물리 교란 없는 유령 프로브: 자세를 임시 적용해 (기울기, 슬롯)
+        을 재고 원상복구한다. 물체 qpos 는 건드리지 않는다."""
+        saved_qpos = self.data.qpos.copy()
+        merged = dict(self.pose); merged.update(pose_delta)
+        sm._set_pose(self.data, self.idx, merged)
+        self.mujoco.mj_forward(self.model, self.data)
+        out = (self.pinch_tilt(), self.grip_slot())
+        self.data.qpos[:] = saved_qpos
+        self.mujoco.mj_forward(self.model, self.data)
+        return out
+
     def grip_slot(self):
         """두 조 사이 슬롯의 세계좌표 중심 - 물체가 '여기' 에 와야 집힌다.
         손목 FK 점과 어긋나 있어(자세 따라 회전) 정렬은 이걸 기준으로."""

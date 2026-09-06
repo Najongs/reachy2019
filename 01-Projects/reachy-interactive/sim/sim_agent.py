@@ -775,6 +775,46 @@ def _set_gripper(world, deg, frames=None, note=None, steps=3):
             frames.append(_snap(world, note))
 
 
+ORIENT_JOINTS = ('right_arm.hand.forearm_yaw',
+                 'right_arm.hand.wrist_pitch', 'right_arm.arm_yaw')
+
+
+def _level_pinch(world, target, frames=None, max_iter=12):
+    """파지 자세 추정: 집게면이 수평이 되는 손목 방향을 찾는다.
+
+    물체 자세(테이블 위에 서 있음)가 요구하는 그리퍼 방향은 '수평
+    집게' 다. wrist_roll 이 없는 이 팔에서도 forearm_yaw·wrist_pitch·
+    arm_yaw(전부 실기 존재)로 손목 방향을 돌릴 수 있다 - 위치 서보는
+    근위 4관절만 쓰므로 방향(원위)과 위치(근위)가 분리 제어된다.
+    유령 프로브(물리 교란 없음) 좌표 하강.
+    """
+    def cost(delta):
+        tilt, slot = world.ghost_eval(delta)
+        drift = math.hypot(slot[0] - target[0], slot[1] - target[1])
+        return tilt + drift * 120.0, tilt
+
+    cur = {j: world.pose.get(j, 0.0) for j in ORIENT_JOINTS}
+    best_c, best_t = cost({})
+    for it in range(max_iter):
+        step = (6.0, 3.0, 1.5)[min(it // 4, 2)]
+        improved = False
+        for j in ORIENT_JOINTS:
+            lo, hi = me.ALL_LIMITS[j]
+            for d in (step, -step):
+                trial = dict(cur)
+                trial[j] = max(lo, min(hi, cur[j] + d))
+                c, t = cost(trial)
+                if c < best_c - 0.05:
+                    best_c, best_t, cur = c, t, trial
+                    improved = True
+        if not improved or best_t < 10.0:
+            break
+    world.set_arm(cur)
+    if frames is not None:
+        frames.append(_snap(world, '집게 수평화 %.0f도' % world.pinch_tilt()))
+    return world.pinch_tilt()
+
+
 def _grasp(world, obj=None, point=None, frames=None, trace=None):
     """접근 -> 재조준 -> 저속 접촉 잡기. (bind, half, 성공여부) 반환.
 
@@ -803,6 +843,7 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
     _servo(world, pre, 5.0, obj_stop=1.5, steps=25, target_stop=-0.5,
            frames=frames, note='pre-top', trace=trace, target_name=bind,
            seed=1)
+    _level_pinch(world, cup, frames=frames)   # 파지 자세: 집게면 수평화
     if bind is None:
         # 브로커 경로: 접지 추정은 몇 cm 틀릴 수 있다 - 가까이서 다시
         # 보고 정제한다 (참값이 아니라 카메라 재검출).
@@ -839,6 +880,17 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
                 and pt[2] + half - 0.01 <= slot[2] <= pt[2] + half + 0.05)
 
     _descend(cup)
+    # 슬롯 오프셋은 팔이 움직이면 회전해 낡는다 - 잔여 오차를 반복 교정.
+    for _k in range(4):
+        slot = world.grip_slot()
+        ex, ey = cup[0] - slot[0], cup[1] - slot[1]
+        if math.hypot(ex, ey) <= 0.010:
+            break
+        h = world.hand()
+        _servo(world, (h[0] + ex, h[1] + ey, h[2]), 0.8, steps=10,
+               step_cap=2.0, ignore_objs=(bind,), target_stop=-0.5,
+               frames=frames, note='슬롯 교정', trace=trace,
+               target_name=bind, seed=9 + _k)
     # 집게면 기울기: 조 분리 방향이 수평에서 벗어난 각도. 이 팔은
     # wrist_roll 이 없어 자세에 따라 집게가 대각으로 기운다 - 기울면
     # 세워진 물체를 물리적으로 못 문다 (실측 ~60도에서 전패). 학습이
