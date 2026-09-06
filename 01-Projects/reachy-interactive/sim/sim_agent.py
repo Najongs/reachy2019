@@ -198,8 +198,44 @@ READY = {'right_arm.shoulder_pitch': -8.0, 'right_arm.shoulder_roll': -66.0,
          'right_arm.arm_yaw': 32.0, 'right_arm.elbow_pitch': -124.0}
 TABLE_MIN_CM = 0.5      # 서보 중 팔<->테이블 표면이 이 밑으로 못 내려간다
 
+# ── 행동 파라미터 (개선 루프가 돌리는 손잡이) ──────────────────────────────
+#
+# 동작의 '성격' 을 정하는 숫자들. 손으로 고치는 대신 sim_improve 가 품질
+# 지표와 언어모델 비평을 보며 반복 조정한다. 객관 성공/안전은 문지기라
+# 여기서 뭘 바꿔도 투과·미도달이 생기면 그 후보는 버려진다.
+BEHAVIOR = {
+    'step_deg': 4.0,        # 서보 한 스텝 최대 관절 변화 (작으면 부드럽고 느림)
+    'gain': 0.8,            # 서보 이득 (크면 빠르고 거침)
+    'damping': 4.0,         # 최소제곱 감쇠 (크면 신중)
+    'table_min': 0.5,       # 테이블 표면 여유 하한 cm (크면 높이 돈다)
+    'lift_steps': 6,        # 들어올리기 각 단계 보간 수 (많으면 부드러움)
+}
+_BEHAVIOR_FILE = os.path.join(HERE, '..', 'config', 'behavior_params.json')
 
-def _lift_ready(world, frames=None, trace=None, steps=6):
+
+def load_behavior():
+    try:
+        with open(_BEHAVIOR_FILE, encoding='utf-8') as fh:
+            saved = json.load(fh)
+        BEHAVIOR.update({k: v for k, v in saved.items() if k in BEHAVIOR})
+    except Exception:
+        pass
+    return dict(BEHAVIOR)
+
+
+def save_behavior(params=None):
+    data = dict(BEHAVIOR)
+    if params:
+        data.update({k: v for k, v in params.items() if k in BEHAVIOR})
+        BEHAVIOR.update(data)
+    with open(_BEHAVIOR_FILE, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=1)
+
+
+load_behavior()
+
+
+def _lift_ready(world, frames=None, trace=None, steps=None):
     """휴식 -> 준비 자세, 3단계로: 벌리고 -> 굽히고 -> 돌려 넣기.
 
     관절을 한꺼번에 보간하면 전완이 테이블 앞모서리를 스친다(실측 -5cm).
@@ -212,6 +248,8 @@ def _lift_ready(world, frames=None, trace=None, steps=6):
          'right_arm.shoulder_pitch': READY['right_arm.shoulder_pitch']},
         {'right_arm.arm_yaw': READY['right_arm.arm_yaw']},
     ]
+    if steps is None:
+        steps = int(BEHAVIOR['lift_steps'])
     cur = {j: world.pose.get(j, 0.0) for j in READY}
     for stage in stages:
         tgt = dict(cur)
@@ -224,22 +262,34 @@ def _lift_ready(world, frames=None, trace=None, steps=6):
                 continue
             world.set_arm(pose)
             if trace is not None:
-                trace.append({'table': world.clearance_of('table'),
-                              'obj': world.clearance(ignore=('table',))[0]})
+                trace.append(_trace_entry(world))
             if frames is not None:
                 frames.append(_snap(world, 'lift'))
         cur = tgt
     return True
 
+
+def _trace_entry(world):
+    return {'table': world.clearance_of('table'),
+            'obj': world.clearance(ignore=('table',))[0],
+            'hand': tuple(round(v, 4) for v in world.hand()),
+            'joints': {j: round(world.pose.get(j, 0.0), 2)
+                       for j in sv.SERVO_JOINTS}}
+
 def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
            stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
-           table_min=TABLE_MIN_CM):
+           table_min=None):
     """화면 오차로 손을 target 까지. sim_servo 와 같은 방식, World 위에서."""
     import numpy as np
 
     rng = np.random.RandomState(seed)
     SIZE_GAIN = 220.0
     mj = world.mujoco
+    if table_min is None:
+        table_min = BEHAVIOR['table_min']
+    step_deg = BEHAVIOR['step_deg']
+    gain = BEHAVIOR['gain']
+    damping = BEHAVIOR['damping']
 
     def err(p, measured=True):
         saved = dict(world.pose)
@@ -265,8 +315,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
     for step in range(steps):
         world.look_at(target)
         if trace is not None:
-            trace.append({'table': world.clearance_of('table'),
-                          'obj': world.clearance(ignore=('table',))[0]})
+            trace.append(_trace_entry(world))
         if frames is not None:
             frames.append(_snap(world, '%s %.1fcm' % (note,
                           me._dist(world.hand(), target) * 100)))
@@ -286,9 +335,9 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
             J.append((0.0, 0.0, 0.0) if e2 is None else
                      tuple(e2[k] - base[k] for k in range(3)))
         J = np.array(J).T
-        dq, *_ = np.linalg.lstsq(J.T @ J + 4.0 * np.eye(len(sv.SERVO_JOINTS)),
+        dq, *_ = np.linalg.lstsq(J.T @ J + damping * np.eye(len(sv.SERVO_JOINTS)),
                                  J.T @ (-np.array(e)), rcond=None)
-        dq = np.clip(dq * 0.8, -sv.STEP_DEG, sv.STEP_DEG)
+        dq = np.clip(dq * gain, -step_deg, step_deg)
         trial = dict(world.pose)
         for j, dv in zip(sv.SERVO_JOINTS, dq):
             lo, hi = me.ALL_LIMITS[j]

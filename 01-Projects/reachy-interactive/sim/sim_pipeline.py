@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
 
 import motion_exec as me                           # noqa: E402
 import sim_agent as A                              # noqa: E402
+import sim_critic as C                             # noqa: E402
 import sim_orchestra as O                          # noqa: E402
 import sim_record as R                             # noqa: E402
 import sim_tasks as T                              # noqa: E402
@@ -88,6 +89,9 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
             # 경로 전체의 최소 여유 - 최종 상태만 보면 중간 투과를 놓친다.
             'table_min_cm': round(min((t['table'] for t in trace), default=99), 1),
             'object_min_cm': round(min((t['obj'] for t in trace), default=99), 1),
+            # 품질(효율·저크·여유) - 성공만으로는 거칠게 스친 동작과 부드럽게
+            # 돌아간 동작을 못 가른다. sim_improve 가 이 값을 보고 행동을 조인다.
+            'quality': C.quality(trace) if trace else None,
         }
         rec['findings'] = ([] if verdict['success']
                            else [verdict.get('why') or '실패'])

@@ -102,18 +102,19 @@ def report(run_id, orchestra=None):
                                       for k, v in
                                       sorted(summary['by_kind'].items())),
              '- 물체 투과: %s' % (', '.join(summary['pierced']) or '없음'), '',
-             '| 태스크 | 지시 | 계획 | 판정 | 물체여유(cm) | 산출물 |',
-             '|---|---|---|---|---|---|']
+             '| 태스크 | 지시 | 계획 | 판정 | 품질 | 물체여유(cm) | 산출물 |',
+             '|---|---|---|---|---|---|---|']
     for r in recs:
         t = r['task']
         v = r['verdict']
         art = r.get('artifacts', {})
         vid = art.get('video')
         link = '[영상](%s)' % os.path.relpath(vid, DOCS) if vid else '-'
-        lines.append('| %s | %s | %s | %s | %s | %s |' % (
+        q = ((r.get('execution') or {}).get('quality') or {}).get('score', '-')
+        lines.append('| %s | %s | %s | %s | %s | %s | %s |' % (
             t['id'], t['instruction'][:24],
             (r.get('plan') or {}).get('mode', '-'),
-            '✓' if v.get('success') else '✗',
+            '✓' if v.get('success') else '✗', q,
             v.get('object_clearance_cm', '-'), link))
 
     if summary['failures']:

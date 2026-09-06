@@ -49,3 +49,4 @@ dist/
 # 파이프라인 실행 생성물
 **/sim_data/
 **/docs/eval/
+**/behavior_params.json
