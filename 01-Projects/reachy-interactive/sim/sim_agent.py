@@ -285,6 +285,8 @@ def _lift_ready(world, frames=None, trace=None, steps=None):
             if not sv.in_bounds({**world.pose, **pose}):
                 continue
             world.set_arm(pose)
+            # 사람이 하듯 올라가는 손을 눈으로 따라간다 (목 속도 상한 내).
+            world.nudge_gaze(world.hand(), BEHAVIOR['gaze_step_deg'])
             if trace is not None:
                 trace.append(_trace_entry(world))
             if frames is not None:
@@ -337,7 +339,11 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
 
     blocked = 0
     for step in range(steps):
-        world.look_at(target)
+        # 머리는 손과 물체의 중간을 본다 - 손이 다가갈수록 물체로 수렴.
+        # 실물 visual servoing 도 손과 목표가 같이 보여야 오차를 잰다.
+        h = world.hand()
+        aim = tuple((h[i] + target[i]) / 2.0 for i in range(3))
+        world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
         if trace is not None:
             trace.append(_trace_entry(world))
         if frames is not None:

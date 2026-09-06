@@ -84,8 +84,12 @@ def episode(task, keep_frames=False, natural_min=55):
         path_min = min(min((t['table'] for t in trace), default=99),
                        min((t['obj'] for t in trace), default=99))
         q = C.quality(trace) if trace else {'score': 0}
-        stage, why = C.stage_verdict(path_min, reached, q.get('score', 0),
-                                     natural_min)
+        # look 처럼 팔을 안 쓰는 태스크는 궤적이 없다 - 품질 문턱을 건너뛴다
+        # (sim_pipeline._verdict 와 같은 규칙).
+        uses_arm = task['kind'] in ('reach', 'point', 'pick')
+        stage, why = C.stage_verdict(
+            path_min, reached,
+            q.get('score', 0) if uses_arm else 100, natural_min)
         q['stage'], q['why'] = stage, why
         return stage, q, frames
     finally:

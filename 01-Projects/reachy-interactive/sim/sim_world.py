@@ -144,6 +144,31 @@ class World(object):
                 on_step(i, n)
         return n
 
+    def nudge_gaze(self, point, max_step_deg=6.0):
+        """시선을 point 쪽으로 '한 스텝만' 돌린다. 도달하면 True.
+
+        팔이 움직이는 동안 머리가 손/물체를 부드럽게 따라가는 용도다.
+        glide_gaze 는 목표까지 다 돌지만, 이건 서보 스텝마다 한 번씩
+        불러 목 속도 상한을 지키며 추적하게 한다.
+        """
+        target = (max(point[0], 0.05), point[1], point[2])
+        cur = getattr(self, '_gaze_pt', None) or (0.5, 0.0, 0.0)
+
+        def _norm(v):
+            n = math.sqrt(sum(c * c for c in v)) or 1.0
+            return tuple(c / n for c in v)
+
+        a, b = _norm(cur), _norm(target)
+        dot = max(-1.0, min(1.0, sum(x1 * x2 for x1, x2 in zip(a, b))))
+        ang = math.degrees(math.acos(dot))
+        if ang <= max_step_deg:
+            self.set_gaze(target[1], target[2], x=target[0])
+            return True
+        t = max_step_deg / ang
+        pt = tuple(c0 + (c1 - c0) * t for c0, c1 in zip(cur, target))
+        self.set_gaze(pt[1], pt[2], x=pt[0])
+        return False
+
     def look_at(self, point):
         return self.set_gaze(point[1], point[2], x=max(point[0], 0.05))
 
