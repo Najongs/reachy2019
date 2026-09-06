@@ -87,12 +87,12 @@ class World(object):
         self._arm_gids = [(i, n) for n, i in self._gid.items()
                           if n.startswith('right_arm')]
 
-        # 시작 자세: 팔을 몸 옆으로 살짝 들어 둔다. 책상 위 물체와 겹치지
-        # 않는 '대기' 자세라야, 팔을 안 쓰는 태스크(look)에서 투과가 안 뜬다.
+        # 시작 자세 = 실물 휴식(모든 관절 0, 팔을 늘어뜨림). 예전 '대기'
+        # 자세는 손을 테이블 밑(z-0.44, x0.36)에 넣고 있어서, 서보가 상판을
+        # 뚫고 올라왔다 - 실물이면 모서리에 팔을 박는 경로다. 휴식은 테이블
+        # 여유 13.6cm 로 안전하고, 팔을 쓰는 동작은 execute 가 '들어올리기'
+        # 단계를 먼저 거친다.
         self.pose = {j: 0.0 for j in self.idx}
-        self.pose['right_arm.shoulder_pitch'] = -18
-        self.pose['right_arm.shoulder_roll'] = -22
-        self.pose['right_arm.elbow_pitch'] = -35
         self._forward()
 
     # -- 상태 --------------------------------------------------------------
@@ -183,6 +183,13 @@ class World(object):
                 and margin * self.height < px[1] < (1 - margin) * self.height)
 
     # -- 안전/투과 ---------------------------------------------------------
+
+    def clearance_of(self, name):
+        """팔 전체와 이 물체 하나 사이 최소 표면거리(cm)."""
+        mj = self.mujoco
+        oid = self._gid[name]
+        return min(mj.mj_geomDistance(self.model, self.data, gid, oid, 1.0, None)
+                   for gid, _ in self._arm_gids) * 100
 
     def clearance(self, ignore=()):
         """팔 전체와 (충돌하는) 물체들 사이 최소 표면거리(cm), 부위쌍.

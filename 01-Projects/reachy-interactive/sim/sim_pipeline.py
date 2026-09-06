@@ -62,8 +62,9 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
         rec['plan'] = {'mode': plan.get('mode'), 'raw': plan.get('raw'),
                        'why': plan.get('why')}
 
-        A.execute(world, plan, frames=frames)
-        verdict = _verdict(world, task)
+        trace = []
+        A.execute(world, plan, frames=frames, trace=trace)
+        verdict = _verdict(world, task, trace)
 
         # 역할 5: 실패면 지적을 만들어 1회 재시도. 지적은 결정론(검증 결과)에서.
         if retry and not verdict['success'] and plan.get('mode') != 'noop':
@@ -72,8 +73,8 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
                 planner.lessons.append(finding)
             view2 = planner.perceive(world, task)
             plan2 = planner.plan(world, task, view2)
-            A.execute(world, plan2, frames=frames)
-            v2 = _verdict(world, task)
+            A.execute(world, plan2, frames=frames, trace=trace)
+            v2 = _verdict(world, task, trace)
             if v2['success']:
                 verdict = v2
                 rec['plan']['retry'] = plan2.get('mode')
@@ -84,6 +85,9 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
             'final_dist_cm': round(me._dist(
                 world.hand(), world.object_pos(task['target'])) * 100, 1),
             'frames': len(frames),
+            # 경로 전체의 최소 여유 - 최종 상태만 보면 중간 투과를 놓친다.
+            'table_min_cm': round(min((t['table'] for t in trace), default=99), 1),
+            'object_min_cm': round(min((t['obj'] for t in trace), default=99), 1),
         }
         rec['findings'] = ([] if verdict['success']
                            else [verdict.get('why') or '실패'])
@@ -106,11 +110,25 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
     return rec
 
 
-def _verdict(world, task):
+def _verdict(world, task, trace=None):
+    """객관 판정. 최종 상태 + **경로 전체** 의 최소 여유를 함께 본다.
+
+    최종만 보면 팔이 테이블을 뚫고 지나갔어도 '성공' 이 된다 - 실물이면
+    상판 모서리에 박는 경로다. 실제로 13/13 프레임 투과가 성공으로 통과한
+    것을 지적받고 고쳤다.
+    """
     ok = bool(T.success_fn(task)(world))
     obj_gap, obj_pair = world.clearance(ignore=('table',))
     out = {'success': ok, 'object_clearance_cm': round(obj_gap, 1)}
-    if obj_gap < -0.5:
+    path_tab = min((t['table'] for t in (trace or [])), default=99)
+    path_obj = min((t['obj'] for t in (trace or [])), default=99)
+    if path_tab < -0.5:
+        out['success'] = False
+        out['why'] = '경로에서 테이블 투과 (최소 %.1fcm)' % path_tab
+    elif path_obj < -0.5:
+        out['success'] = False
+        out['why'] = '경로에서 물체 투과 (최소 %.1fcm)' % path_obj
+    elif obj_gap < -0.5:
         out['success'] = False
         out['why'] = '물체 투과: %s %.1fcm' % (obj_pair, obj_gap)
     elif not ok:

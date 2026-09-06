@@ -190,8 +190,50 @@ def _det_to_3d(world, det):
 
 # ============================================================ 실행 ============
 
+# 테이블 앞모서리 '위' 의 준비 자세 (탐색으로 찾음: 손끝 (0.28,-0.20,-0.13),
+# 테이블 여유 9.4cm, 금지구역 통과). 휴식(팔 늘어뜨림)에서 바로 물체로 서보하면
+# 팔이 상판을 밑에서 뚫고 올라온다 - 실물이면 모서리에 박는 경로다. 그래서
+# 실물 사람이 하듯 '먼저 들어 올리고, 위에서 접근' 한다.
+READY = {'right_arm.shoulder_pitch': -8.0, 'right_arm.shoulder_roll': -66.0,
+         'right_arm.arm_yaw': 32.0, 'right_arm.elbow_pitch': -124.0}
+TABLE_MIN_CM = 0.5      # 서보 중 팔<->테이블 표면이 이 밑으로 못 내려간다
+
+
+def _lift_ready(world, frames=None, trace=None, steps=6):
+    """휴식 -> 준비 자세, 3단계로: 벌리고 -> 굽히고 -> 돌려 넣기.
+
+    관절을 한꺼번에 보간하면 전완이 테이블 앞모서리를 스친다(실측 -5cm).
+    사람이 하듯 팔을 옆으로 벌려 테이블 옆면 밖에서 굽힌 뒤 위에서 돌려
+    넣으면 경로 최소 여유 9.5cm, 투과 0 이다.
+    """
+    stages = [
+        {'right_arm.shoulder_roll': READY['right_arm.shoulder_roll']},
+        {'right_arm.elbow_pitch': READY['right_arm.elbow_pitch'],
+         'right_arm.shoulder_pitch': READY['right_arm.shoulder_pitch']},
+        {'right_arm.arm_yaw': READY['right_arm.arm_yaw']},
+    ]
+    cur = {j: world.pose.get(j, 0.0) for j in READY}
+    for stage in stages:
+        tgt = dict(cur)
+        tgt.update(stage)
+        for k in range(1, steps + 1):
+            u = k / float(steps)
+            wgt = u * u * (3 - 2 * u)           # smoothstep
+            pose = {j: cur[j] + (tgt[j] - cur[j]) * wgt for j in READY}
+            if not sv.in_bounds({**world.pose, **pose}):
+                continue
+            world.set_arm(pose)
+            if trace is not None:
+                trace.append({'table': world.clearance_of('table'),
+                              'obj': world.clearance(ignore=('table',))[0]})
+            if frames is not None:
+                frames.append(_snap(world, 'lift'))
+        cur = tgt
+    return True
+
 def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
-           stop_gap=None, obj_stop=None, frames=None, note=''):
+           stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
+           table_min=TABLE_MIN_CM):
     """화면 오차로 손을 target 까지. sim_servo 와 같은 방식, World 위에서."""
     import numpy as np
 
@@ -219,8 +261,12 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         return (tp[0] + n[0] - hp[0] - n[2], tp[1] + n[1] - hp[1] - n[3],
                 size + n[4])
 
+    blocked = 0
     for step in range(steps):
         world.look_at(target)
+        if trace is not None:
+            trace.append({'table': world.clearance_of('table'),
+                          'obj': world.clearance(ignore=('table',))[0]})
         if frames is not None:
             frames.append(_snap(world, '%s %.1fcm' % (note,
                           me._dist(world.hand(), target) * 100)))
@@ -251,14 +297,25 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
             for j, dv in zip(sv.SERVO_JOINTS, dq):
                 lo, hi = me.ALL_LIMITS[j]
                 trial[j] = min(hi, max(lo, world.pose[j] + float(dv) * 0.4))
-        if obj_stop is not None:
-            saved = dict(world.pose)
-            world.set_arm(trial)
-            if world.clearance(ignore=('table',))[0] < obj_stop:
-                world.set_arm(saved)          # 이 스텝은 물체를 뚫는다 - 취소
-                return True
-        else:
-            world.set_arm(trial)
+        # 한 스텝 앞을 본다: 물체를 뚫으면 도착으로 치고, 테이블을 뚫으면
+        # 스텝을 줄여 보고 그래도 안 되면 버린다(실물은 상판 위로만 다닌다).
+        saved = dict(world.pose)
+        world.set_arm(trial)
+        tab = world.clearance_of('table')
+        obj = world.clearance(ignore=('table',))[0]
+        if obj_stop is not None and obj < obj_stop:
+            world.set_arm(saved)
+            return True                       # 물체에 닿기 직전 - 여기서 멈춘다
+        if tab < table_min:
+            half = {j: saved[j] + (trial[j] - saved[j]) * 0.4 for j in trial}
+            world.set_arm(half)
+            if world.clearance_of('table') < table_min:
+                world.set_arm(saved)          # 테이블을 뚫는 스텝 - 버린다
+                blocked += 1
+                if blocked >= 5:
+                    break                     # 계속 막히면 더 못 간다
+                continue
+        blocked = 0
     return me._dist(world.hand(), target) * 100 <= done_cm
 
 
@@ -283,7 +340,7 @@ def _snap(world, note=''):
     return frame
 
 
-def execute(world, plan, frames=None):
+def execute(world, plan, frames=None, trace=None):
     """계획을 월드에서 실행한다. (성공했다고 주장하지 않음 - 검증은 따로)"""
     mode = plan.get('mode')
     if mode == 'gaze':
@@ -292,9 +349,12 @@ def execute(world, plan, frames=None):
             frames.append(_snap(world, 'gaze'))
         return True
     if mode == 'reach':
+        # 실물 순서: 팔을 먼저 테이블 위로 들어 올리고, 위에서 접근한다.
+        _lift_ready(world, frames=frames, trace=trace)
         return _servo(world, plan['point'], plan['done_cm'], obj_stop=1.0,
-                      frames=frames, note='reach')
+                      frames=frames, note='reach', trace=trace)
     if mode == 'pick':
+        _lift_ready(world, frames=frames, trace=trace)
         return _pick(world, plan['object'], plan['tray'], frames=frames)
     return False
 

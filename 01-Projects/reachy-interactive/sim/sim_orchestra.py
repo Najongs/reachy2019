@@ -37,6 +37,18 @@ def audit(records):
                          '파고들었다. 성공 기준이 투과를 안 보고 있다.'
                          % (r['task']['id'], v['object_clearance_cm']))
 
+    # 1b) 거짓 성공: 성공인데 '경로' 에서 테이블/물체를 파고들었다.
+    #     최종 상태만 보고 13/13 프레임 테이블 투과를 성공으로 통과시킨
+    #     실전 사례에서 나온 규칙이다.
+    for r in records:
+        v = r['verdict']
+        ex = r.get('execution') or {}
+        for key, label in (('table_min_cm', '테이블'), ('object_min_cm', '물체')):
+            if v.get('success') and ex.get(key, 9) < -0.5:
+                flags.append('거짓 성공 의심: %s 는 성공인데 경로에서 %s 를 '
+                             '%.1fcm 파고들었다. 판정이 경로를 안 보고 있다.'
+                             % (r['task']['id'], label, ex[key]))
+
     # 2) 판정과 실행의 모순: '손을 움직이는' 유형인데 성공 판정이 손과
     #    무관하게 참이 됐다. look 은 시선 태스크라 손 거리를 안 본다 - 첫
     #    실행에서 look 에 이 규칙을 적용해 오탐 3건을 낸 교훈이다.
