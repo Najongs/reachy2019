@@ -13,6 +13,5 @@
  "kinds": [
   "pick"
  ],
- "natural_min": 45,
- "reset_params": "defaults"
+ "natural_min": 45
 }

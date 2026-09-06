@@ -536,6 +536,19 @@ def _snap(world, note=''):
     return frame
 
 
+def _confirm_result(world, point, frames=None, note='결과 확인'):
+    """임무 끝에 결과 지점을 응시해 확인한다 - 허공을 보며 끝나지 않게."""
+    if point is None:
+        return
+    world.glide_gaze(point[1], point[2], x=max(point[0], 0.05),
+                     max_step_deg=min(BEHAVIOR['gaze_step_deg'], 6.0),
+                     on_step=(lambda i, n: frames.append(
+                         _snap(world, note))) if frames is not None else None)
+    world.center_on(point)
+    if frames is not None:
+        frames.append(_snap(world, note))
+
+
 def _retreat(world, frames=None, trace=None, target_name=None):
     """임무 후 복귀: 경유 통로를 역순으로 되짚어 휴식 자세로.
 
@@ -592,11 +605,12 @@ def _retreat(world, frames=None, trace=None, target_name=None):
             if frames is not None:
                 frames.append(_snap(world, 'return'))
         cur = tgt
-    # 팔이 휴식에 닿았다 - 이제 시선을 정면(초기자세)으로 활강.
-    world.glide_gaze(0.0, 0.0, x=0.5,
-                     max_step_deg=BEHAVIOR['gaze_step_deg'],
+    # 팔이 휴식에 닿았다 - 시선은 '테이블이 보이는' 기본 응시로.
+    # 순정면(수평선)은 빈 허공만 보인다 (스트립 7~8 프레임 암전).
+    world.glide_gaze(0.0, world.table_top + 0.05, x=0.45,
+                     max_step_deg=min(BEHAVIOR['gaze_step_deg'], 6.0),
                      on_step=(lambda i, n: frames.append(
-                         _snap(world, '정면 복귀')))
+                         _snap(world, '기본 응시')))
                      if frames is not None else None)
     return True
 
@@ -641,6 +655,8 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
         # 성공 판정은 복귀 전에 잰다 - 복귀하면 손이 멀어진다.
         if check is not None:
             ok = bool(check())
+        _confirm_result(world, world.object_pos(tname) if tname else pt,
+                        frames=frames)
         if retreat:
             _retreat(world, frames=frames, trace=trace, target_name=tname)
         return ok
@@ -664,6 +680,7 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
             if frames is not None:
                 frames.append(_snap(world, '들었다'))
         ok = bool(check()) if check is not None else ok0
+        _confirm_result(world, world.object_pos(bind), frames=frames)
         if ok0:
             _servo(world, (start[0], start[1], start[2] + half + 0.03), 3.0,
                    steps=15, ignore_objs=(bind,),
@@ -688,6 +705,9 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
                    frames=frames, trace=trace)
         if check is not None:
             ok = bool(check())
+        tgt = plan.get('target') or plan.get('object')
+        _confirm_result(world, world.object_pos(tgt) if tgt else None,
+                        frames=frames)
         if retreat:
             _retreat(world, frames=frames, trace=trace,
                      target_name=plan.get('target'))
@@ -740,6 +760,7 @@ def _close_on(world, bind, half, frames=None, trace=None):
        물리(무엇이 실제로 잡히나)의 대리 판정이라 참값 사용이 정당하다.
     3. 힘-완화: 파고들었으면 접촉 수준까지 되푼다 (과조임 = 고장).
     """
+    start_op = world.object_pos(bind)      # 밀어냄 검사 기준
     g = GRIP_OPEN
     for _ in range(24):
         # 실물 force gripper 처럼: '양쪽이 닿을 때까지' 조인다. 움직 조가
@@ -781,6 +802,14 @@ def _close_on(world, bind, half, frames=None, trace=None):
     if pinched and not enclosed:
         INCIDENTS.append('모서리 접촉을 잡힘으로 오인할 뻔 - 감쌈 검사가 거부')
     grabbed = enclosed and pinched
+    # 파지 시도가 물체를 밀어냈으면 관찰자 신호 + 실패 시 손을 빼서
+    # 더 끌고 다니지 않는다 (밀림이 '잡혀 오는' 것처럼 보인다).
+    moved = me._dist(world.object_pos(bind), start_op) * 100
+    if moved > 2.0:
+        INCIDENTS.append('파지 시도가 물체를 %.0fcm 밀어냄' % moved)
+    if not grabbed:
+        _nudge_hand(world, (0.0, 0.0, 0.06), target_name=bind,
+                    frames=frames, trace=trace, note='손 빼기')
     if trace is not None:
         trace.append(_trace_entry(world, None, bind))
     if frames is not None:
