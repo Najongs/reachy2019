@@ -553,7 +553,7 @@ def _retreat(world, frames=None, trace=None, target_name=None):
     # 이탈 목표가 화면 밖이면 무동작이 된다.
     # 접기 전에 가드 있는 서보로 수직 이탈 - 방금 놓은 물체 위 안전
     # 고도까지. (접힘 보간은 개루프라 물체를 감지하지 못한다.)
-    _set_gripper(world, 0.0)               # 그리퍼는 중립으로 닫고 복귀
+    _set_gripper(world, 0.0)               # 그리퍼 중립(0도)으로 복귀
     h = world.hand()
     # 위로만 빼면 이어지는 스윙 호가 물체 위치에 따라 물체를 지난다 -
     # 몸쪽으로 당기며 올려 호 전체를 물체에서 떼어낸다.
@@ -705,15 +705,16 @@ def _reaim(world, guess, kind=None, frames=None, note='re-aim',
     return (pt, det['kind']) if want_kind else pt
 
 
-GRIP_OPEN = 0.032       # 손가락 벌림 (m) - 안쪽 간격 ~8.4cm
+GRIP_OPEN = -50.0       # 실물 규약: 음수=벌림, 양수=다묾 (range -50..10)
+GRIP_SHUT = 10.0
 
 
-def _set_gripper(world, v, frames=None, note=None, steps=3):
-    """그리퍼를 v(m) 로 - 몇 스텝에 나눠 영상에 여닫힘이 보이게."""
-    cur = world.pose.get('right_arm.gripper_l', 0.0)
+def _set_gripper(world, deg, frames=None, note=None, steps=3):
+    """그리퍼 각도(도)를 몇 스텝에 나눠 - 영상에 여닫힘이 보이게."""
+    cur = world.pose.get('right_arm.hand.gripper', 0.0)
     for k in range(1, steps + 1):
-        g = cur + (v - cur) * k / steps
-        world.set_arm({'right_arm.gripper_l': g, 'right_arm.gripper_r': g})
+        g = cur + (deg - cur) * k / steps
+        world.set_arm({'right_arm.hand.gripper': g})
         if frames is not None and note:
             frames.append(_snap(world, note))
 
@@ -771,11 +772,11 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
 
     orig = world.object_pos(bind)          # 원위치 (되돌려 놓기용)
     g = GRIP_OPEN
-    for _ in range(10):
-        if world.clearance_of(bind) <= 0.15 or g <= 0.002:
+    for _ in range(12):
+        if world.clearance_of(bind) <= 0.15 or g >= GRIP_SHUT:
             break
-        g = max(0.002, g - 0.005)
-        world.set_arm({'right_arm.gripper_l': g, 'right_arm.gripper_r': g})
+        g = min(GRIP_SHUT, g + 6.0)
+        world.set_arm({'right_arm.hand.gripper': g})
         if frames is not None:
             frames.append(_snap(world, '그리퍼 조임'))
     grabbed = world.clearance_of(bind) <= 0.5

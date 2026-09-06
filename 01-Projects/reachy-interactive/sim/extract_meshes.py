@@ -41,9 +41,10 @@ NODE_TO_BODY = {
     'right_elbow_pitch_joint': 'right_arm_elbow_pitch',
     'right_forearm_yaw_joint': 'right_arm_hand_forearm_yaw',
     'right_wrist_pitch_joint': 'right_arm_hand_wrist_pitch',
-    # 이 로봇에 없는 관절(wrist_roll)과 그리퍼는 손목에 고정된 것으로 본다.
+    # 이 로봇에 없는 관절(wrist_roll)은 손목에 고정된 것으로 본다.
     'right_wrist_roll_joint': 'right_arm_hand_wrist_pitch',
-    'right_gripper_joint': 'right_arm_hand_wrist_pitch',
+    # 그리퍼는 실물처럼 회전하는 별도 바디다 (viewer 의 right_gripper_joint).
+    'right_gripper_joint': 'right_arm_hand_gripper',
     'left_shoulder_pitch_joint': 'left_arm_shoulder_pitch',
     'left_shoulder_roll_joint': 'left_arm_shoulder_roll',
     'left_arm_yaw_joint': 'left_arm_arm_yaw',
