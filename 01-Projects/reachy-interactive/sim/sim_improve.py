@@ -65,8 +65,12 @@ def _jitter(current, rng, scale=1.0):
     return j
 
 
-def episode(task, keep_frames=False):
-    """오라클 계획으로 한 에피소드. (성공, 품질 dict, frames)."""
+def episode(task, keep_frames=False, natural_min=55):
+    """한 에피소드 -> 3단계 판정. (stage, 품질 dict, frames).
+
+    stage: collision / unnatural / missed / success (sim_critic.stage_verdict).
+    충돌이면 그걸로 끝, 자연스러움 문턱 미달이면 도달했어도 성공이 아니다.
+    """
     world = T.build_world(task)
     frames = [] if keep_frames else None
     trace = []
@@ -75,26 +79,29 @@ def episode(task, keep_frames=False):
         view = planner.perceive(world, task)
         plan = planner.plan(world, task, view)
         A.execute(world, plan, frames=frames, trace=trace)
-        ok = bool(T.success_fn(task)(world))
-        path_tab = min((t['table'] for t in trace), default=99)
-        path_obj = min((t['obj'] for t in trace), default=99)
-        if path_tab < -0.5 or path_obj < -0.5:
-            ok = False                          # 경로 투과는 무조건 실패
+        reached = bool(T.success_fn(task)(world))
+        path_min = min(min((t['table'] for t in trace), default=99),
+                       min((t['obj'] for t in trace), default=99))
         q = C.quality(trace) if trace else {'score': 0}
-        return ok, q, frames
+        stage, why = C.stage_verdict(path_min, reached, q.get('score', 0),
+                                     natural_min)
+        q['stage'], q['why'] = stage, why
+        return stage, q, frames
     finally:
         world.close()
 
 
-def evaluate(params, tasks):
-    """이 파라미터로 태스크 묶음을 돌린 (성공수, 평균품질)."""
+def evaluate(params, tasks, natural_min=55):
+    """태스크 묶음 -> {'collision','unnatural','missed','success', 'quality'}."""
     A.BEHAVIOR.update(_clamp(params))
-    oks, scores = 0, []
+    counts = {k: 0 for k in C.STAGES}
+    scores = []
     for t in tasks:
-        ok, q, _ = episode(t)
-        oks += ok
+        stage, q, _ = episode(t, natural_min=natural_min)
+        counts[stage] += 1
         scores.append(q.get('score', 0))
-    return oks, sum(scores) / max(len(scores), 1)
+    counts['quality'] = sum(scores) / max(len(scores), 1)
+    return counts
 
 
 def propose(current, advice, rng, n_random=3, scale=1.0):
@@ -142,9 +149,22 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     tasks = new_tasks(0)
     history = []
     current = _clamp(dict(A.BEHAVIOR))
-    base_ok, base_q = evaluate(current, tasks)
-    best_ever = {'quality': base_q, 'ok': base_ok, 'params': dict(current)}
+    # 자연스러움 문턱 - 전원 성공이 이어지면 올라간다(평가도 함께 개선).
+    natural_min = 55
+
+    def rank(counts):
+        """단계 우선순위 그대로: 충돌 적게 > 성공 많이 > 품질 높게.
+
+        '성공' 은 이미 (충돌 없음 AND 자연스러움 문턱 이상 AND 도달) 이므로
+        자연스러움은 성공 안에 들어 있다 - 거칠게 닿은 동작은 성공이 아니다.
+        """
+        return (-counts['collision'], counts['success'], counts['quality'])
+
+    base = evaluate(current, tasks, natural_min)
+    best_ever = {'quality': base['quality'], 'success': base['success'],
+                 'params': dict(current), 'natural_min': natural_min}
     stagnant = 0
+    perfect_streak = 0
     out = os.path.join(HERE, '..', 'sim_data',
                        'improve-%s.json' % time.strftime('%Y%m%d-%H%M%S'))
     os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -154,9 +174,15 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             json.dump({'history': history, 'best_ever': best_ever},
                       fh, ensure_ascii=False, indent=1)
 
-    print('반복 0 (기준): 성공 %d/%d, 품질 %.0f  %s'
-          % (base_ok, len(tasks), base_q, current), flush=True)
-    history.append({'iter': 0, 'ok': base_ok, 'quality': round(base_q, 1),
+    def fmt(c):
+        return '충돌%d 부자연%d 미도달%d 성공%d 품질%.0f' % (
+            c['collision'], c['unnatural'], c['missed'], c['success'],
+            c['quality'])
+
+    print('반복 0 (기준, 문턱 %d): %s' % (natural_min, fmt(base)), flush=True)
+    history.append({'iter': 0, 'counts': {k: base[k] for k in C.STAGES},
+                    'quality': round(base['quality'], 1),
+                    'natural_min': natural_min,
                     'params': dict(current), 'ts': time.strftime('%H:%M')})
 
     it = 0
@@ -172,10 +198,9 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             # 태스크 교체: 같은 4개에 과적합되지 않게. 교체하면 기준 재측정.
             if it % REFRESH_EVERY == 0:
                 tasks = new_tasks(it)
-                base_ok, base_q = evaluate(current, tasks)
-                print('[%s] 반복 %d: 태스크 교체 -> 기준 성공 %d/%d 품질 %.0f'
-                      % (time.strftime('%H:%M'), it, base_ok, len(tasks),
-                         base_q), flush=True)
+                base = evaluate(current, tasks, natural_min)
+                print('[%s] 반복 %d: 태스크 교체 -> %s'
+                      % (time.strftime('%H:%M'), it, fmt(base)), flush=True)
 
             # opus 비평 (주기적으로; 실패해도 루프는 계속)
             advice, naturalness = None, None
@@ -195,33 +220,54 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             scale = min(3.0, 1.0 + stagnant * 0.35)
             n_random = 3 + min(3, stagnant // 2)
 
-            best = (base_ok, base_q, 'current', dict(current))
+            best = (rank(base), base, 'current', dict(current))
             for name, cand in propose(current, advice, rng, n_random, scale):
-                ok, qual = evaluate(cand, tasks)
-                if ok >= base_ok and (qual > best[1]
-                                      or (qual == best[1] and ok > best[0])):
-                    best = (ok, qual, name, cand)
+                c = evaluate(cand, tasks, natural_min)
+                # 문지기: 충돌은 기준보다 늘 수 없다 (안전 후퇴 금지).
+                if c['collision'] > base['collision']:
+                    continue
+                if rank(c) > best[0]:
+                    best = (rank(c), c, name, cand)
 
-            improved = best[1] > base_q + 0.01
+            improved = best[0] > rank(base)
             stagnant = 0 if improved else stagnant + 1
-            base_ok, base_q = best[0], best[1]
+            base = best[1]
             current = best[3]
             A.BEHAVIOR.update(current)
             A.save_behavior(current)
-            if base_q > best_ever['quality'] and base_ok >= len(tasks):
-                best_ever = {'quality': base_q, 'ok': base_ok,
-                             'params': dict(current), 'iter': it}
+            if (base['collision'] == 0 and base['success'] >= len(tasks)
+                    and base['quality'] > best_ever['quality']):
+                best_ever = {'quality': base['quality'],
+                             'success': base['success'],
+                             'params': dict(current), 'iter': it,
+                             'natural_min': natural_min}
 
-            history.append({'iter': it, 'ok': base_ok,
-                            'quality': round(base_q, 1),
+            # 평가 래칫: 전원 성공이 2회 이어지면 자연스러움 문턱을 올린다.
+            # 행동이 좋아질수록 평가도 엄해진다 - '점점 평가 개선'.
+            if base['collision'] == 0 and base['success'] >= len(tasks):
+                perfect_streak += 1
+                if perfect_streak >= 2 and natural_min < 85:
+                    natural_min += 5
+                    perfect_streak = 0
+                    base = evaluate(current, tasks, natural_min)
+                    print('[%s] 평가 강화: 자연스러움 문턱 -> %d (재측정 %s)'
+                          % (time.strftime('%H:%M'), natural_min, fmt(base)),
+                          flush=True)
+            else:
+                perfect_streak = 0
+
+            history.append({'iter': it,
+                            'counts': {k: base[k] for k in C.STAGES},
+                            'quality': round(base['quality'], 1),
+                            'natural_min': natural_min,
                             'naturalness': naturalness, 'picked': best[2],
                             'stagnant': stagnant,
                             'params': dict(current),
                             'ts': time.strftime('%H:%M')})
             nat = ' 자연 %s/10' % naturalness if naturalness else ''
-            print('[%s] 반복 %d: %s 채택, 성공 %d/%d 품질 %.0f%s%s'
-                  % (time.strftime('%H:%M'), it, best[2], base_ok, len(tasks),
-                     base_q, nat,
+            print('[%s] 반복 %d(문턱 %d): %s 채택, %s%s%s'
+                  % (time.strftime('%H:%M'), it, natural_min, best[2],
+                     fmt(base), nat,
                      ' (정체 %d)' % stagnant if stagnant else ''), flush=True)
             checkpoint()
 
@@ -249,8 +295,9 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
 
     checkpoint()
     qs = [h['quality'] for h in history]
-    print('품질 추이: %.0f -> %.0f (최고 %.0f, 반복 %d회)'
-          % (qs[0], qs[-1], best_ever['quality'], len(history) - 1))
+    print('품질 추이: %.0f -> %.0f (최고 %.0f, 최종 문턱 %d, 반복 %d회)'
+          % (qs[0], qs[-1], best_ever['quality'], natural_min,
+             len(history) - 1))
     print('기록: %s  |  채택 파라미터: config/behavior_params.json' % out)
     return history
 

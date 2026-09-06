@@ -80,6 +80,35 @@ def quality(trace):
     return metrics
 
 
+# ── 3단계 판정 ───────────────────────────────────────────────────────────
+#
+# 평가는 순서가 있다 (사용자 정의):
+#   1) 충돌 없이 동작을 수행할 것      - 경로 어디서든 충돌이면 그걸로 끝
+#   2) 목표 동작을 자연스럽게 움직일 것 - 품질(효율·저크·여유)이 문턱 미달이면
+#                                        도달했어도 성공이 아니다
+#   3) 이후 성공 판단                   - 1·2 를 통과한 것만 성공을 논한다
+#
+# 성공의 정의가 조여진다: 거칠게 스치며 닿은 동작은 '부자연' 이지 성공이
+# 아니고, 우아하지만 못 닿은 동작도 '미도달' 이지 성공이 아니다. 둘 다
+# 만족해야 한다. natural_min 은 행동이 좋아질수록 올라간다(평가도 함께 개선).
+
+STAGES = ('collision', 'unnatural', 'missed', 'success')
+STAGE_KO = {'collision': '충돌', 'unnatural': '부자연',
+            'missed': '미도달', 'success': '성공'}
+
+
+def stage_verdict(path_min_cm, reached, quality_score, natural_min=55):
+    """(stage, why). 단계 순서대로 걸리는 첫 항목이 판정이다."""
+    if path_min_cm < -0.5:
+        return 'collision', '경로에서 충돌 (최소 여유 %.1fcm)' % path_min_cm
+    if quality_score < natural_min:
+        return 'unnatural', '품질 %d < 문턱 %d (거칠거나 우회)' % (
+            quality_score, natural_min)
+    if not reached:
+        return 'missed', '충돌 없고 자연스러우나 목표 미달'
+    return 'success', None
+
+
 CRITIQUE_PROMPT = """로봇 팔 동작 품질 비평가다. 아래는 한 동작의 프레임(들어올림/중간/도달 순)과 계측 지표다.
 
 지시: {instruction}

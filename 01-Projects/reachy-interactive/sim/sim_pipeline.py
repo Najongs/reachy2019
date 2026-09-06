@@ -114,28 +114,33 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
     return rec
 
 
-def _verdict(world, task, trace=None):
-    """객관 판정. 최종 상태 + **경로 전체** 의 최소 여유를 함께 본다.
+NATURAL_MIN = 55        # 자연스러움 문턱 (sim_improve 의 래칫과 같은 시작값)
 
-    최종만 보면 팔이 테이블을 뚫고 지나갔어도 '성공' 이 된다 - 실물이면
-    상판 모서리에 박는 경로다. 실제로 13/13 프레임 투과가 성공으로 통과한
-    것을 지적받고 고쳤다.
+
+def _verdict(world, task, trace=None):
+    """3단계 판정: 1 충돌 없이 -> 2 자연스럽게 -> 3 성공.
+
+    순서가 정의다. 경로 어디서든 충돌이면 그걸로 끝이고, 도달했어도 품질이
+    문턱 미달이면 '부자연' 이지 성공이 아니다. look 처럼 팔을 안 쓰는
+    태스크는 품질 문턱을 건너뛴다(움직임이 없으니 잴 것도 없다).
     """
-    ok = bool(T.success_fn(task)(world))
+    reached = bool(T.success_fn(task)(world))
     obj_gap, obj_pair = world.clearance(ignore=('table',))
-    out = {'success': ok, 'object_clearance_cm': round(obj_gap, 1)}
-    path_tab = min((t['table'] for t in (trace or [])), default=99)
-    path_obj = min((t['obj'] for t in (trace or [])), default=99)
-    if path_tab < -0.5:
-        out['success'] = False
-        out['why'] = '경로에서 테이블 투과 (최소 %.1fcm)' % path_tab
-    elif path_obj < -0.5:
-        out['success'] = False
-        out['why'] = '경로에서 물체 투과 (최소 %.1fcm)' % path_obj
-    elif obj_gap < -0.5:
-        out['success'] = False
-        out['why'] = '물체 투과: %s %.1fcm' % (obj_pair, obj_gap)
-    elif not ok:
+    path_min = min(min((t['table'] for t in (trace or [])), default=99),
+                   min((t['obj'] for t in (trace or [])), default=99))
+    q = C.quality(trace) if trace else None
+    uses_arm = task['kind'] in ('reach', 'point', 'pick')
+    qscore = (q or {}).get('score', 100 if not uses_arm else 0)
+
+    stage, why = C.stage_verdict(path_min, reached,
+                                 qscore if uses_arm else 100, NATURAL_MIN)
+    out = {'stage': stage, 'stage_ko': C.STAGE_KO[stage],
+           'success': stage == 'success',
+           'object_clearance_cm': round(obj_gap, 1),
+           'path_min_cm': round(path_min, 1)}
+    if why:
+        out['why'] = why
+    elif stage != 'success' and not reached:
         d = me._dist(world.hand(), world.object_pos(task['target'])) * 100
         out['why'] = '판정 미달 (손-대상 %.0fcm)' % d
     return out
@@ -161,9 +166,9 @@ def run_batch(n=6, kinds=('look', 'reach'), planner_name='oracle',
         rec = run_episode(t, planner, run_id, answer_client=answer_client)
         v = rec['verdict']
         ans = (' | "%s"' % rec['answer'][:30]) if rec.get('answer') else ''
-        print('  %s [%-5s] %-34s %s%s' % (
+        print('  %s [%-5s] %-34s [%s] %s%s' % (
             '✓' if v['success'] else '✗', t['kind'], t['instruction'][:34],
-            v.get('why', '')[:40], ans))
+            v.get('stage_ko', '?'), v.get('why', '')[:36], ans))
         records.append(rec)
 
     # 역할 6+7: 감사 -> 커리큘럼 -> 총평 -> 리포트

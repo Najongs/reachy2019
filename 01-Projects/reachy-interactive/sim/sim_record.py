@@ -76,9 +76,15 @@ def aggregate(run_id):
                              (r.get('findings') or ['?'])[0]})
     n = len(recs)
     ok_n = sum(v[0] for v in by_kind.values())
+    stages = {}
+    for r in recs:
+        st = r['verdict'].get('stage_ko') or (
+            '성공' if r['verdict'].get('success') else '실패')
+        stages[st] = stages.get(st, 0) + 1
     summary = {
         'run_id': run_id, 'n': n, 'success': ok_n,
         'rate': round(ok_n / n, 3) if n else 0,
+        'stages': stages,
         'by_kind': {k: {'ok': v[0], 'n': v[1]} for k, v in by_kind.items()},
         'pierced': pierced, 'failures': failures,
     }
@@ -101,6 +107,8 @@ def report(run_id, orchestra=None):
              '- 유형별: ' + ', '.join('%s %d/%d' % (k, v['ok'], v['n'])
                                       for k, v in
                                       sorted(summary['by_kind'].items())),
+             '- 단계 분해: ' + ', '.join('%s %d' % (k, v) for k, v in
+                                          sorted(summary['stages'].items())),
              '- 물체 투과: %s' % (', '.join(summary['pierced']) or '없음'), '',
              '| 태스크 | 지시 | 계획 | 판정 | 품질 | 물체여유(cm) | 산출물 |',
              '|---|---|---|---|---|---|---|']
