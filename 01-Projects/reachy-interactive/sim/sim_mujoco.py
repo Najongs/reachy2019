@@ -130,7 +130,8 @@ def _meshes():
             for f in os.listdir(MESH_DIR) if f.endswith('.obj')}
 
 
-def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None):
+def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
+               light=None):
     """motion_exec.CHAINS 를 그대로 MJCF 로. 모델과 검증기가 갈라지지 않게.
 
     CAD 메시(sim/extract_meshes.py 로 reachy.glb 에서 뽑은 것)가 있으면 그것을
@@ -220,7 +221,8 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None):
         out.append('    <mesh name="m_%s" file="%s"/>' % (name, path))
     out += ['  </asset>',
            '  <worldbody>',
-           '    <light pos="0.8 0.6 1.2" dir="-.5 -.4 -1" directional="true"/>',
+           '    <light pos="%s" dir="-.5 -.4 -1" directional="true"/>'
+           % (' '.join('%.2f' % v for v in light) if light else '0.8 0.6 1.2'),
            '    <light pos="-0.6 -0.8 0.9" dir=".4 .5 -1" diffuse=".3 .3 .3"/>'] \
         + scene_xml + [
            '    <geom name="torso_keepout" type="box" material="body"',

@@ -120,13 +120,22 @@ def _succ_pick(name, tray):
     return f
 
 
+def _succ_lift(name):
+    def f(w):
+        # 물체가 테이블에서 확실히 들려 있고(중심 +12cm), 손에 쥐어져 있다.
+        op = w.object_pos(name)
+        return op[2] > w.table_top + 0.12 and w.clearance_of(name) < 3.0
+    return f
+
+
 SUCCESS = {'look': _succ_look, 'point': _succ_point,
-           'reach': _succ_reach, 'pick': _succ_pick}
+           'reach': _succ_reach, 'pick': _succ_pick, 'lift': _succ_lift}
 
 
 # --- 태스크 생성 ------------------------------------------------------------
 
-KO = {'cup': '컵', 'block': '블록', 'ball': '공', 'can': '캔'}
+KO = {'cup': '컵', 'block': '블록', 'ball': '공', 'can': '캔',
+      'bottle': '병', 'book': '책', 'apple': '사과'}
 
 
 # 환경 손잡이 기본값과 하드 한계. 오케스트라가 experiment 로 조절하되
@@ -164,15 +173,18 @@ def generate(n=8, seed=0, env=None):
     """다양한 태스크 n 개. env 로 환경(높이/물체수/간격)을 조절한다."""
     rng = _rng(seed)
     e = clamp_env(env) if env else dict(ENV_DEFAULT)
-    kinds_pool = ['cup', 'block', 'ball', 'can']
+    kinds_pool = ['cup', 'block', 'ball', 'can', 'bottle', 'book', 'apple']
     tasks = []
-    templates = ['look', 'point', 'reach', 'pick']
+    templates = ['look', 'point', 'reach', 'pick', 'lift']
     for i in range(n):
         kind = templates[i % len(templates)]
         n_obj = rng.randint(*e['objects'])
         chosen = [rng.choice(kinds_pool) for _ in range(n_obj)]
         # 테이블 높이도 환경 변수다 - 낮을수록 넘을 턱이 낮다.
         tt = round(rng.uniform(*e['table']), 3)
+        light = [round(rng.uniform(-0.6, 1.3), 2),
+                 round(rng.uniform(-1.0, 1.0), 2),
+                 round(rng.uniform(1.0, 2.2), 2)]
         scene = _place_objects(rng, chosen, min_gap=e['min_gap'],
                                table_top=tt)
         dest = None
@@ -191,10 +203,12 @@ def generate(n=8, seed=0, env=None):
             'pick': ('%s 을(를) 집어서 왼쪽 바구니에 넣어 줘.' % tko
                      if dest == 'basket0' else
                      '%s 을(를) 집어서 왼쪽 쟁반에 놓아 줘.' % tko),
+            'lift': '%s 을(를) 잡아서 들어 올려 봐.' % tko,
         }[kind]
         tasks.append({
             'id': 'task%02d_%s' % (i, kind),
             'table_top': tt,
+            'light': light,
             'kind': kind,
             'instruction': instr,
             'target': target,
@@ -224,9 +238,11 @@ def feasible(task, quick_steps=25):
         if not view.get('seen'):
             return False
         plan = planner.plan(w, task, view)
-        # 실현가능성 검사는 복귀 생략 (수백 번 돌므로 빠르게)
-        ok = A.execute(w, plan, retreat=False)
-        ok = success_fn(task)(w)
+        # 실현가능성 검사는 복귀 생략 (수백 번 돌므로 빠르게). 성공은
+        # check 시점(임무 완료 순간)에 잰다 - lift 는 제자리에 되돌려
+        # 놓으므로 사후 판정이면 무조건 미달로 나온다.
+        ok = A.execute(w, plan, retreat=False,
+                       check=lambda: success_fn(task)(w))
         return bool(ok and _clean(w, task['target']))
     except Exception:
         return False
@@ -244,7 +260,7 @@ def generate_feasible(n, seed=0, kinds=('look', 'reach'), max_tries=6,
     # 나오게 한 번에 4개(한 순환)씩 만들어 거른다. 유형 균형은 라운드로빈.
     want_idx = 0
     while len(out) < n and attempt < n * max_tries:
-        batch = generate(4, seed=seed * 1000 + attempt, env=env)
+        batch = generate(6, seed=seed * 1000 + attempt, env=env)
         wanted = kinds[want_idx % len(kinds)]
         for t in batch:
             if t['kind'] != wanted:
@@ -264,7 +280,7 @@ def build_world(task, **kw):
     objs = [world.make_object(o['name'], o['kind'], tuple(o['xy']),
                               table_top=tt)
             for o in task['scene']]
-    return world.World(objs, table_top=tt, **kw)
+    return world.World(objs, table_top=tt, light=task.get('light'), **kw)
 
 
 def success_fn(task):

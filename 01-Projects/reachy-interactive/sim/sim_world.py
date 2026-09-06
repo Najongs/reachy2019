@@ -46,6 +46,10 @@ OBJECT_LIBRARY = {
     'block': {'type': 'box',      'size': (0.03, 0.03, 0.03), 'rgba': (0.30, 0.45, 0.85, 1)},
     'ball':  {'type': 'sphere',   'size': (0.03,),       'rgba': (0.90, 0.75, 0.20, 1)},
     'can':   {'type': 'cylinder', 'size': (0.033, 0.06), 'rgba': (0.60, 0.60, 0.65, 1)},
+    # 실물풍 사물들 - 색·비율이 실제와 비슷하게.
+    'bottle': {'type': 'cylinder', 'size': (0.026, 0.09), 'rgba': (0.20, 0.55, 0.30, 1)},
+    'book':  {'type': 'box',      'size': (0.055, 0.04, 0.012), 'rgba': (0.55, 0.20, 0.15, 1)},
+    'apple': {'type': 'sphere',   'size': (0.035,),      'rgba': (0.80, 0.12, 0.10, 1)},
     'tray':  {'type': 'box',      'size': (0.07, 0.05, 0.005), 'rgba': (0.25, 0.55, 0.35, 1),
               'movable': False},
     # 바구니: 바닥 + 벽 4면. 테두리(rim) 위에서 넣어야 한다 - 옆에서
@@ -97,14 +101,15 @@ def make_object(name, kind, xy, z=None, table_top=TABLE_TOP):
 class World(object):
     """물체 목록 하나로 정의되는 장면."""
 
-    def __init__(self, objects, width=640, height=480, table_top=TABLE_TOP):
+    def __init__(self, objects, width=640, height=480, table_top=TABLE_TOP,
+                 light=None):
         import mujoco
 
         self.mujoco = mujoco
         self.table_top = table_top
         self.objects = [_table(table_top)] + list(objects)
         self.model = mujoco.MjModel.from_xml_string(
-            sm.build_mjcf(keepout=False, objects=self.objects))
+            sm.build_mjcf(keepout=False, objects=self.objects, light=light))
         self.data = mujoco.MjData(self.model)
         self.idx = sm._qpos_index(mujoco, self.model)
         self.width, self.height = width, height

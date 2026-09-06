@@ -62,6 +62,9 @@ class OraclePlanner(object):
         if task['kind'] == 'pick':
             return {'mode': 'pick', 'object': task['target'],
                     'target': task['target'], 'tray': task['tray']}
+        if task['kind'] == 'lift':
+            return {'mode': 'lift_hold', 'object': task['target'],
+                    'point': obj, 'target': task['target']}
         return {'mode': 'noop'}
 
 
@@ -132,7 +135,7 @@ class BrokerPlanner(object):
         # 유형 메타데이터는 판정에만 쓰고, 실행은 추론을 따른다 - 어긋나면
         # 기록에 남아 감사 대상이 된다. pick 은 슬라이스 밖이라 reach 로.
         action = choice.get('action')
-        if action not in ('look', 'point', 'reach', 'pick'):
+        if action not in ('look', 'point', 'reach', 'pick', 'lift'):
             action = task['kind']
         act_mismatch = (action != task['kind']) or None
         approach = choice.get('approach')
@@ -143,6 +146,10 @@ class BrokerPlanner(object):
         if box is not None and 0 <= int(box) < len(dets):
             det = dets[int(box)]
             point = _det_to_3d(world, det)
+            if action == 'lift':
+                return {'mode': 'lift_hold', 'point': point,
+                        'action': action, 'action_mismatch': act_mismatch,
+                        'raw': raw, 'grounded_det': det}
             if action == 'pick':
                 tray_pt = None
                 tb = choice.get('tray_box')
@@ -360,7 +367,7 @@ def _trace_entry(world, watch=None, target=None, carried=False, ret=False):
 def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
            stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
            table_min=None, target_name=None, ignore_objs=(), target_stop=None,
-           on_step=None, step_cap=None, carried=False):
+           on_step=None, step_cap=None, carried=False, ret=False):
     """화면 오차로 손을 target 까지. sim_servo 와 같은 방식, World 위에서."""
     import numpy as np
 
@@ -406,7 +413,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
         if trace is not None:
             trace.append(_trace_entry(world, target, target_name,
-                                      carried=carried))
+                                      carried=carried, ret=ret))
         if frames is not None:
             frames.append(_snap(world, '%s %.1fcm' % (note,
                           me._dist(world.hand(), target) * 100)))
@@ -418,24 +425,27 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         # 물러났다가 다른 각도로 재진입하고, 또 정체면 일찍 포기한다
         # (밖의 재시도 층이 재인지부터 다시 하게).
         dist_hist.append(d_now)
-        if len(dist_hist) >= 9 and dist_hist[-9] - d_now < 1.0:
-            if recovered:
+        if len(dist_hist) >= 10 and dist_hist[-10] - d_now < 1.0:
+            # 이미 코앞이면 '튕기며' 재진입하지 않는다 - 그냥 멈춘다
+            # (가드가 마지막 mm 를 막는 상황: 물러나도 소용없다).
+            if recovered or d_now <= done_cm + 3.0:
                 if frames is not None:
-                    frames.append(_snap(world, '%s 정체 포기' % note))
+                    frames.append(_snap(world, '%s 정체' % note))
                 return False
             recovered = True
             dist_hist = []
             via = via_poses()[-1]
             cur_pose = {j: world.pose.get(j, 0.0) for j in via}
-            for k in range(1, 4):
-                u = k / 3.0
+            for k in range(1, 6):
+                u = k / 5.0
+                wgt = u * u * (3 - 2 * u)
                 world.set_arm({j: cur_pose[j] + (via[j] - cur_pose[j])
-                               * 0.35 * u for j in via})
+                               * 0.35 * wgt for j in via})
                 world.nudge_gaze(target, BEHAVIOR['gaze_step_deg'])
                 if trace is not None:
                     trace.append(_trace_entry(world, target, target_name))
                 if frames is not None:
-                    frames.append(_snap(world, '%s 후퇴 재진입' % note))
+                    frames.append(_snap(world, '%s 다시 접근' % note))
             continue
         if stop_gap is not None and world.clearance()[0] <= stop_gap:
             return True
@@ -528,7 +538,25 @@ def _retreat(world, frames=None, trace=None, target_name=None):
     rest = {j: 0.0 for j in vias[0]}
     steps = max(4, int(BEHAVIOR['lift_steps']) // 2)
     cur = {j: world.pose.get(j, 0.0) for j in vias[0]}
-    for tgt in list(reversed(vias)) + [rest]:
+    # 이탈: 물체 위에서 경유 자세로 4관절을 한꺼번에 보간하면 손이 낮게
+    # 쓸며 작업 영역을 가로질러 방금 놓은 물체를 관통한다 (실측 -5cm).
+    # 팔꿈치·어깨를 먼저 접어 손을 위로 거둬들인 '접힘' 자세를 경유하고,
+    # 그 다음 통로(경유 역순)를 탄다. 서보(화면 기반)는 여기서 못 쓴다 -
+    # 이탈 목표가 화면 밖이면 무동작이 된다.
+    # 접기 전에 가드 있는 서보로 수직 이탈 - 방금 놓은 물체 위 안전
+    # 고도까지. (접힘 보간은 개루프라 물체를 감지하지 못한다.)
+    h = world.hand()
+    # 위로만 빼면 이어지는 스윙 호가 물체 위치에 따라 물체를 지난다 -
+    # 몸쪽으로 당기며 올려 호 전체를 물체에서 떼어낸다.
+    _servo(world, (h[0] - 0.08, h[1], h[2] + 0.16), 5.0, steps=12,
+           step_cap=4.0, frames=frames, note='clear', trace=trace,
+           target_name=target_name, ret=True)
+    # 접근의 정확한 역순: 이탈(위) -> 옆으로 스윙아웃(롤만) -> 통로 역순.
+    # 팔꿈치를 먼저 접으면 전완이 방금 놓은 물체를 휘두르며 지나간다.
+    cur = {j: world.pose.get(j, 0.0) for j in vias[0]}
+    swing = dict(cur)
+    swing['right_arm.shoulder_roll'] = vias[-1]['right_arm.shoulder_roll']
+    for tgt in [swing] + list(reversed(vias)) + [rest]:
         for k in range(1, steps + 1):
             u = k / float(steps)
             wgt = u * u * (3 - 2 * u)
@@ -588,6 +616,40 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
         if retreat:
             _retreat(world, frames=frames, trace=trace, target_name=tname)
         return ok
+    if mode == 'lift_hold':
+        # 잡아서 들어 올려 보이기. 성공은 들린 순간(check) 재고, 그 뒤
+        # 제자리에 내려놓고 복귀한다.
+        tname = plan.get('target')
+        watch = (world.object_pos(plan['object']) if plan.get('object')
+                 else plan.get('point'))
+        _lift_ready(world, frames=frames, trace=trace, watch=watch,
+                    target_name=tname)
+        bind, half, ok0, start = _grasp(world, obj=plan.get('object'),
+                                        point=plan.get('point'),
+                                        frames=frames, trace=trace)
+        if ok0:
+            follow = _hold_offset(world, bind)
+            h0 = world.hand()
+            _servo(world, (h0[0], h0[1], h0[2] + 0.15), 3.0, steps=20,
+                   ignore_objs=(bind,), on_step=follow, carried=True,
+                   step_cap=4.0, frames=frames, note='들어올림',
+                   trace=trace, target_name=bind, seed=7)
+            if frames is not None:
+                frames.append(_snap(world, '들었다'))
+        ok = bool(check()) if check is not None else ok0
+        if ok0:
+            follow = _hold_offset(world, bind)
+            _servo(world, (start[0], start[1], start[2] + half + 0.03), 3.0,
+                   steps=15, ignore_objs=(bind,), on_step=follow,
+                   carried=True, step_cap=4.0, frames=frames,
+                   note='내려놓기', trace=trace, target_name=bind, seed=8)
+            world.move_object(bind, start)
+            if frames is not None:
+                frames.append(_snap(world, '내려놓음'))
+        if retreat:
+            _retreat(world, frames=frames, trace=trace, target_name=tname)
+        return ok
+
     if mode == 'pick':
         watch = (world.object_pos(plan['object']) if plan.get('object')
                  else plan.get('point'))
@@ -616,6 +678,9 @@ def _reaim(world, guess, kind=None, frames=None, note='re-aim',
     import random as _random
     import sim_perceive as P
     kinds = (kind,) if isinstance(kind, str) else kind
+    # 순간이동 금지: center_on 을 바로 부르면 목이 한 번 '튕긴다'.
+    world.glide_gaze(guess[1], guess[2], x=max(guess[0], 0.05),
+                     max_step_deg=BEHAVIOR['gaze_step_deg'])
     world.center_on(guess)
     dets = P.detect(world, 1.5, 0.0, _random.Random(5))
     px = world.pixel_of(guess)
@@ -630,62 +695,72 @@ def _reaim(world, guess, kind=None, frames=None, note='re-aim',
     return (pt, det['kind']) if want_kind else pt
 
 
-def _pick(world, obj=None, tray=None, point=None, tray_point=None,
-          frames=None, trace=None):
-    """집어 쟁반에 놓기: 위 접근 -> 저속 접촉 -> 잡기 -> 나르기 -> 놓기.
+def _grasp(world, obj=None, point=None, frames=None, trace=None):
+    """접근 -> 재조준 -> 저속 접촉 잡기. (bind, half, 성공여부) 반환.
 
-    시뮬에는 손가락이 없다. '잡힘' 은 손이 대상에 접촉 수준(<=0.6cm)으로
-    닿은 것으로 근사하고, 이후 물체가 손을 따라간다(스텝 콜백). 실물에서는
-    이 지점이 그리퍼 폭 제어로 바뀐다 (sim-to-real 5단계).
-
-    obj/tray 이름이 없으면(브로커 - 참값 이름을 모른다) point 로 접근하고
-    접촉 순간 손에서 가장 가까운 움직이는 물체가 잡힌다 - 물리로 잡는
-    것의 흉내라 인지 방화벽을 깨지 않는다. 접지가 틀렸으면 엉뚱한 걸
-    집어 판정이 정직하게 실패한다.
+    잡기는 pick 과 lift 가 공유한다. 파지 지점은 물체 윗면.
     """
     cup = world.object_pos(obj) if obj else tuple(point)
     bind = obj
 
-    # 1) 위 접근: 예비점 -> 하강. 다른 물체는 1cm 회피, 대상은 접촉까지.
-    pre = (cup[0], cup[1], cup[2] + 0.10)
+    def _half_of(name):
+        for o in world.objects:
+            if o['name'] == name:
+                return {'cylinder': o['size'][1], 'sphere': o['size'][0],
+                        'box': o['size'][-1]}.get(o['type'], 0.03)
+        return 0.03
+
+    # 예비점은 '윗면' 기준이어야 한다. 중심+10cm 고정이면 병처럼 키 큰
+    # 물체는 예비점이 꼭대기 바로 위라 손 캡슐이 이미 관통한다.
+    half = _half_of(bind) if bind else 0.06
+    pre = (cup[0], cup[1], cup[2] + half + 0.075)
     _servo(world, pre, 5.0, obj_stop=1.5, steps=25, frames=frames,
            note='pre-top', trace=trace, target_name=bind, seed=1)
     if bind is None:
-        # 브로커 경로: 접지 추정은 몇 cm 틀릴 수 있다. reach 는 14cm
-        # 허용이라 견디지만 잡기는 cm 급이 필요하다 - 가까이서 다시 보고
-        # 정제한다 (참값이 아니라 카메라 재검출).
+        # 브로커 경로: 접지 추정은 몇 cm 틀릴 수 있다 - 가까이서 다시
+        # 보고 정제한다 (참값이 아니라 카메라 재검출).
         cup = _reaim(world, cup, frames=frames)
-        # 접촉 판정용 임시 바인딩: 정제점에서 가장 가까운 움직이는 물체.
         bind = min(world.movable_objects(),
                    key=lambda n: me._dist(world.object_pos(n), cup))
-
-    # 파지 지점 = 물체 윗면. 중심을 겨누면 작은 물체일수록 깊이 파고들어야
-    # 닿는다 - 사람도 컵은 테두리를 잡는다.
-    half = 0.03
-    for o in world.objects:
-        if o['name'] == bind:
-            half = {'cylinder': o['size'][1], 'sphere': o['size'][0],
-                    'box': o['size'][-1]}.get(o['type'], 0.03)
-            break
+        half = _half_of(bind)
     _servo(world, (cup[0], cup[1], cup[2] + half), 2.0, steps=30,
            obj_stop=1.0, ignore_objs=(bind,), target_stop=0.5,
            step_cap=2.5, frames=frames, note='descend', trace=trace,
            target_name=bind, seed=2)
 
     grabbed = world.clearance_of(bind) <= 0.9
+    orig = world.object_pos(bind)          # 스냅 '전' 원위치 (되돌려 놓기용)
+    if grabbed:
+        # 시각적 결착: 물체를 손 바로 밑으로 - '쥐었다' 가 보이게.
+        # (시뮬엔 손가락이 없어 그립 닫힘의 근사다. 대상 겹침은 허용.)
+        h = world.hand()
+        world.move_object(bind, (h[0], h[1], h[2] - half - 0.015))
     if frames is not None:
         frames.append(_snap(world, '잡기 %s' % ('성공' if grabbed else '실패')))
-    if not grabbed:
-        return False
+    return bind, half, grabbed, orig
 
-    # 2) 잡힘: 물체가 손을 따라간다 (손-물체 상대 위치 고정).
-    hand0 = world.hand()
-    op0 = world.object_pos(bind)
-    off = tuple(op0[i] - hand0[i] for i in range(3))
+
+def _hold_offset(world, bind):
+    """잡은 뒤 손-물체 상대 오프셋과 따라오기 콜백."""
+    h0 = world.hand()
+    o0 = world.object_pos(bind)
+    off = tuple(o0[i] - h0[i] for i in range(3))
 
     def follow():
         h = world.hand()
         world.move_object(bind, tuple(h[i] + off[i] for i in range(3)))
+    return follow
+
+
+def _pick(world, obj=None, tray=None, point=None, tray_point=None,
+          frames=None, trace=None):
+    """집어 목적지로: 잡기 -> 나르기 -> 놓기(쟁반) / 넣기(바구니)."""
+    bind, half, grabbed, _orig = _grasp(world, obj=obj, point=point,
+                                        frames=frames, trace=trace)
+    if not grabbed:
+        return False
+    follow = _hold_offset(world, bind)
+    hand0 = world.hand()
 
     # 3) 들어서 나른다: 위로 뽑고 -> 목적지 위 -> 내려놓기.
     dest = world.object_pos(tray) if tray else (tuple(tray_point)
@@ -729,9 +804,12 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
                target_name=bind, seed=6)
         if frames is not None:
             frames.append(_snap(world, 'drop'))
-        world.move_object(bind, (dest[0], dest[1], dest[2] + 0.05))
+        # 바구니 바닥 위에 안착 (떠 있지 않게).
+        floor = dest[2] + W.BASKET_WALL * 2
+        world.move_object(bind, (dest[0], dest[1], floor + half))
     else:
-        world.move_object(bind, (dest[0], dest[1], dest[2] + 0.045))
+        # 쟁반 면 위에 안착.
+        world.move_object(bind, (dest[0], dest[1], dest[2] + 0.005 + half))
     if frames is not None:
         frames.append(_snap(world, 'placed'))
     return True

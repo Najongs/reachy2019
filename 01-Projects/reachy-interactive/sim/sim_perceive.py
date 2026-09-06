@@ -35,9 +35,10 @@ import sim_world as W                              # noqa: E402
 
 # 물체 종류별 대략적 픽셀 크기 계산용 실제 치수(가장 큰 축, m).
 KIND_SIZE = {'cup': 0.10, 'block': 0.06, 'ball': 0.06, 'can': 0.12,
-             'tray': 0.14, 'basket': 0.12}
+             'tray': 0.14, 'basket': 0.12, 'bottle': 0.18, 'book': 0.11,
+             'apple': 0.07}
 KO = {'cup': '컵', 'block': '블록', 'ball': '공', 'can': '캔', 'tray': '쟁반',
-      'basket': '바구니'}
+      'basket': '바구니', 'bottle': '병', 'book': '책', 'apple': '사과'}
 
 
 def detect(world, noise_px=2.0, dropout=0.05, rng=None):
