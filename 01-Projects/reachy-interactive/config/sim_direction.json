@@ -1,8 +1,8 @@
 {
  "env": {
   "table": [
-   -0.32,
-   -0.28
+   -0.3,
+   -0.26
   ],
   "objects": [
    1,
@@ -13,5 +13,6 @@
  "kinds": [
   "lift"
  ],
- "natural_min": 45
+ "natural_min": 45,
+ "reset_params": "defaults"
 }

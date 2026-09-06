@@ -638,23 +638,21 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
                                         point=plan.get('point'),
                                         frames=frames, trace=trace)
         if ok0:
-            follow = _hold_offset(world, bind)
             h0 = world.hand()
             _servo(world, (h0[0], h0[1], h0[2] + 0.15), 3.0, steps=20,
-                   ignore_objs=(bind,), on_step=follow, carried=True,
+                   ignore_objs=(bind,), carried=True,
                    step_cap=4.0, frames=frames, note='들어올림',
                    trace=trace, target_name=bind, seed=7)
             if frames is not None:
                 frames.append(_snap(world, '들었다'))
         ok = bool(check()) if check is not None else ok0
         if ok0:
-            follow = _hold_offset(world, bind)
             _servo(world, (start[0], start[1], start[2] + half + 0.03), 3.0,
-                   steps=15, ignore_objs=(bind,), on_step=follow,
+                   steps=15, ignore_objs=(bind,),
                    carried=True, step_cap=4.0, frames=frames,
                    note='내려놓기', trace=trace, target_name=bind, seed=8)
             _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
-            _drop_anim(world, bind, start, frames=frames, steps=2)
+            world.step_physics(80)
             if frames is not None:
                 frames.append(_snap(world, '내려놓음'))
         if retreat:
@@ -726,8 +724,10 @@ def _close_on(world, bind, half, frames=None, trace=None):
     """
     g = GRIP_OPEN
     for _ in range(24):
-        c = world.clearance_of(bind)
-        if c <= 0.15:
+        # 집힘 = '움직이는 조' 가 눌러야 한다. 하강 중 고정 조가 한쪽만
+        # 스친 것은 접촉이지 파지가 아니다 (벌린 채 잡힘 오인 방지).
+        c = world.jaw_clearance(bind, jaw='moving')
+        if c <= -0.05:
             break
         if g >= 0.0 and c > 0.6:
             INCIDENTS.append('허공 조임: 중립(0도)까지 접촉 없음 - 중단')
@@ -741,17 +741,19 @@ def _close_on(world, bind, half, frames=None, trace=None):
         if frames is not None:
             frames.append(_snap(world, '그리퍼 조임'))
     for _ in range(8):
-        if world.clearance_of(bind) >= -0.15 or g <= GRIP_OPEN:
-            break
-        g -= 2.0
+        if world.jaw_clearance(bind, jaw='moving') >= -0.30 or g <= GRIP_OPEN:
+            break                            # 과조임(-0.3cm 초과)만 되풀기
+        g -= 1.0
         world.set_arm({'right_arm.hand.gripper': g})
         if frames is not None:
             frames.append(_snap(world, '조임 완화'))
-    h = world.hand()
+    slot = world.grip_slot()
     op = world.object_pos(bind)
-    enclosed = (math.hypot(h[0] - op[0], h[1] - op[1]) <= 0.022
-                and -0.012 <= h[2] - (op[2] + half) <= 0.052)
-    pinched = g < GRIP_SHUT and world.clearance_of(bind) <= 0.4
+    enclosed = (math.hypot(slot[0] - op[0], slot[1] - op[1]) <= 0.025
+                and -0.015 <= slot[2] - (op[2] + half) <= 0.055)
+    pinched = (g < GRIP_SHUT
+               and world.jaw_clearance(bind, jaw='moving') <= 0.05
+               and world.jaw_clearance(bind, jaw='fixed') <= 0.25)
     if pinched and not enclosed:
         INCIDENTS.append('모서리 접촉을 잡힘으로 오인할 뻔 - 감쌈 검사가 거부')
     grabbed = enclosed and pinched
@@ -820,17 +822,38 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
     # (-1.9cm, 깊이와 무관 실측) - 판정이 충돌로 벌점하고, 회피 자세는
     # 경유 학습의 몫이다. 파지 깊이를 얕추면 작은 물체를 놓친다.
     def _descend(pt):
-        _servo(world, (pt[0], pt[1], pt[2] + half + 0.030), 1.2, steps=30,
+        # 정렬 기준은 '조 슬롯 중심' 이다 - 손목점을 물체에 맞추면 슬롯이
+        # 비껴가 고정 조만 닿는다 (실측). 슬롯-손목 오프셋을 보정해 슬롯이
+        # 물체 위에 오도록 서보 목표를 잡는다.
+        h = world.hand(); slot = world.grip_slot()
+        off = (h[0] - slot[0], h[1] - slot[1], h[2] - slot[2])
+        _servo(world, (pt[0] + off[0], pt[1] + off[1],
+                       pt[2] + half * 0.4 + off[2]), 1.2, steps=30,
                obj_stop=1.0, ignore_objs=(bind,), target_stop=-0.5,
                step_cap=2.5, stall_slack=0.6, frames=frames, note='descend',
                trace=trace, target_name=bind, seed=2)
 
     def _aligned(pt):
-        h = world.hand()
-        return (math.hypot(h[0] - pt[0], h[1] - pt[1]) <= 0.012
-                and pt[2] + half - 0.005 <= h[2] <= pt[2] + half + 0.045)
+        slot = world.grip_slot()
+        return (math.hypot(slot[0] - pt[0], slot[1] - pt[1]) <= 0.014
+                and pt[2] + half - 0.01 <= slot[2] <= pt[2] + half + 0.05)
 
     _descend(cup)
+    # 집게면 기울기: 조 분리 방향이 수평에서 벗어난 각도. 이 팔은
+    # wrist_roll 이 없어 자세에 따라 집게가 대각으로 기운다 - 기울면
+    # 세워진 물체를 물리적으로 못 문다 (실측 ~60도에서 전패). 학습이
+    # '수평 집게가 되는 자세' 를 찾도록 신호로 남긴다.
+    mjm = world._gid.get('right_arm_jaw_moving')
+    mjf = world._gid.get('right_arm_jaw_fixed')
+    if mjm is not None and mjf is not None:
+        v = world.data.geom_xpos[mjm] - world.data.geom_xpos[mjf]
+        import numpy as _np
+        n = _np.linalg.norm(v) or 1.0
+        tilt = abs(math.degrees(math.asin(abs(float(v[2])) / n)))
+        if tilt > 35.0:
+            INCIDENTS.append('집게면 기울어짐 %.0f도 - 이 자세로는 수평 파지 불가'
+                             % tilt)
+
     if not _aligned(cup):
         # 위치가 안 잡혔으면 닫지 않는다 (사용자: 다 도달해서 위치를
         # 잡고 닫아라). 한 번 재조준·재하강하고, 그래도 아니면 실패 -
@@ -878,7 +901,6 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
                                         frames=frames, trace=trace)
     if not grabbed:
         return False
-    follow = _hold_offset(world, bind)
     hand0 = world.hand()
 
     # 3) 들어서 나른다: 위로 뽑고 -> 목적지 위 -> 내려놓기.
@@ -893,12 +915,16 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
                       if o['name'] == tray), None)
     # 나를 때는 높이 든다 - 다른 물체 위를 지나가는 게 안전하다. 스텝도
     # 상한을 둬 obj_stop 을 한 걸음에 뚫고 지나가지 않게 한다.
+    # 물리 운반: 부착 없음 - 조임 마찰이 지탱 못 하면 떨어진다 (정직).
     up = (hand0[0], hand0[1], hand0[2] + 0.14)
-    _servo(world, up, 4.0, steps=20, ignore_objs=(bind,), on_step=follow,
-           carried=True, step_cap=4.0, frames=frames, note='lift-carry',
+    _servo(world, up, 4.0, steps=20, ignore_objs=(bind,), carried=True,
+           step_cap=4.0, frames=frames, note='lift-carry',
            trace=trace, target_name=bind, seed=3)
+    if me._dist(world.hand(), world.object_pos(bind)) > 0.18:
+        INCIDENTS.append('운반 중 낙하 (마찰 부족)')
+        return False
     _servo(world, (dest[0], dest[1], dest[2] + 0.16), 4.0, steps=35,
-           ignore_objs=(bind,), on_step=follow, obj_stop=1.0, carried=True,
+           ignore_objs=(bind,), obj_stop=1.0, carried=True,
            step_cap=4.0, frames=frames, note='carry', trace=trace,
            target_name=bind, seed=4)
     if tray is None:
@@ -908,7 +934,7 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
                              frames=frames, note='re-aim dest',
                              want_kind=True)
         _servo(world, (dest[0], dest[1], dest[2] + 0.10), 3.0, steps=15,
-               ignore_objs=(bind,), on_step=follow, carried=True,
+               ignore_objs=(bind,), carried=True,
                frames=frames, note='place', trace=trace, target_name=bind,
                seed=5)
 
@@ -918,21 +944,14 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
         hz = W.OBJECT_LIBRARY['basket']['size'][2]
         rim = dest[2] + hz * 2
         _servo(world, (dest[0], dest[1], rim + 0.10), 3.0, steps=15,
-               ignore_objs=(bind,), on_step=follow, carried=True,
+               ignore_objs=(bind,), carried=True,
                frames=frames, note='over-rim', trace=trace,
                target_name=bind, seed=6)
-        _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
-        if frames is not None:
-            frames.append(_snap(world, 'drop'))
-        # 바구니 바닥 위로 낙하.
-        floor = dest[2] + W.BASKET_WALL * 2
-        _drop_anim(world, bind, (dest[0], dest[1], floor + half),
-                   frames=frames)
-    else:
-        # 쟁반 면 위로 낙하.
-        _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
-        _drop_anim(world, bind, (dest[0], dest[1], dest[2] + 0.005 + half),
-                   frames=frames)
+    # 놓기 = 벌리면 중력이 한다. 순간이동/가짜 낙하 없음.
+    _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
+    world.step_physics(100)
+    if frames is not None:
+        frames.append(_snap(world, 'drop'))
     if frames is not None:
         frames.append(_snap(world, 'placed'))
     return True

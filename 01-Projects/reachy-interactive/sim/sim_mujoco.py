@@ -156,6 +156,20 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
             obj_mats.append('    <material name="%s" rgba="%s" specular=".3"/>'
                             % (mat, ' '.join('%.3f' % c for c in o['rgba'])))
             ct = 8 if o.get('collide', True) else 0
+            if o.get('movable'):
+                # 물리 세계의 실물: 자유 바디. 팔(contype 1/2)과 정적
+                # 지오메트리(8)에 부딪히고, 중력에 떨어지고, 마찰로 잡힌다.
+                size = ' '.join('%.4f' % v for v in o['size'])
+                pos = ' '.join('%.4f' % v for v in o['pos'])
+                scene_xml += [
+                    '    <body name="%s" pos="%s">' % (o['name'], pos),
+                    '      <freejoint name="%s_free"/>' % o['name'],
+                    '      <geom name="%s" type="%s" material="%s" '
+                    'contype="8" conaffinity="11" mass="0.08" '
+                    'friction="1.2 0.01 0.001" pos="0 0 0" size="%s"/>'
+                    % (o['name'], o['type'], mat, size),
+                    '    </body>']
+                continue
             if o.get('parts'):
                 # 복합 물체(바구니 등): 부품 지오메트리 여러 개, 이름은
                 # name_p0.. 로 - World 가 접두사로 묶어 다룬다.
@@ -164,7 +178,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
                                  for i in range(3))
                     scene_xml.append(
                         '    <geom name="%s_p%d" type="%s" material="%s" '
-                        'contype="%d" conaffinity="0" pos="%s" size="%s"/>'
+                        'contype="%d" conaffinity="8" pos="%s" size="%s"/>'
                         % (o['name'], k, part['type'], mat, ct,
                            ' '.join('%.4f' % v for v in ppos),
                            ' '.join('%.4f' % v for v in part['size'])))
@@ -173,7 +187,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
             pos = ' '.join('%.4f' % p for p in o['pos'])
             scene_xml.append(
                 '    <geom name="%s" type="%s" material="%s" contype="%d" '
-                'conaffinity="0" pos="%s" size="%s"/>'
+                'conaffinity="8" pos="%s" size="%s"/>'
                 % (o['name'], o['type'], mat, ct, pos, size))
     elif scene:
         scene_xml = [
@@ -192,7 +206,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
 
     out = ['<mujoco model="reachy2019">',
            '  <compiler angle="degree"/>',
-           '  <option gravity="0 0 0"/>',
+           '  <option gravity="0 0 -9.81" timestep="0.002"/>',
            '  <visual><headlight ambient=".45 .45 .45" diffuse=".7 .7 .7"/>',
            '    <map znear=".01"/><quality shadowsize="2048"/>',
            # 오프스크린 버퍼 기본값이 640x480 이라 그보다 큰 프레임을 요청하면
@@ -296,7 +310,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
     # 충돌 그룹. 같은 팔의 이웃 링크는 팔꿈치에서 늘 겹치므로(캡슐 끝이
     # 만난다) 서로 보지 않게 한다. 의미 있는 것은 '반대 팔' 과 '금지 구역'
     # 뿐이다.  right=1, left=2, keepout=4
-    GROUP = {'right_arm': (1, 6), 'left_arm': (2, 5)}
+    GROUP = {'right_arm': (1, 14), 'left_arm': (2, 13)}   # +8: 물체와 접촉
     order = ['upper_arm', 'forearm', 'hand']
     for side, chain in me.CHAINS.items():
         mat = 'rightm' if side == 'right_arm' else 'leftm'
@@ -345,6 +359,10 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
             nxt = chain[i + 1][1] if i + 1 < len(chain) else None
             if nxt and any(abs(v) > 1e-6 for v in nxt):
                 r = RADII[order[min(seg, len(order) - 1)]]
+                if side == 'right_arm' and seg >= 2:
+                    # 손목->그리퍼 링크: 굵은 캡슐(4.1cm)이면 조보다 먼저
+                    # 물체를 눌러 '잡힘' 이 난다 - 구조물 굵기로 슬림하게.
+                    r = 0.020
                 ct, ca = GROUP[side]
                 out.append('%s<geom name="%s_%s" type="capsule" '
                            'material="%s" contype="%d" conaffinity="%d" '
@@ -362,7 +380,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
             # 거울상으로 둔다. 손바닥은 작은 구.
             out.append('%s<geom name="right_arm_palm" type="sphere" '
                        'material="%s" contype="%d" conaffinity="%d" '
-                       'size="0.018"/>' % (pad, 'hidden' if mesh else mat,
+                       'size="0.012"/>' % (pad, 'hidden' if mesh else mat,
                                            ct, ca))
             out.append('%s<geom name="right_arm_jaw_moving" type="box" '
                        'material="%s" contype="%d" conaffinity="%d" '
@@ -400,6 +418,8 @@ def _set_pose(data, idx, pose):
     40라디안(=132도)으로 돌렸고, 팔이 엉뚱한 데로 갔다.
     """
     for joint, adr in idx.items():
+        if joint.endswith('_free'):
+            continue                      # 자유 바디는 물리가 움직인다
         data.qpos[adr] = math.radians(pose.get(joint, 0.0))
 
 

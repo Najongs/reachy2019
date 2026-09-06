@@ -136,8 +136,17 @@ class World(object):
         # 뚫고 올라왔다 - 실물이면 모서리에 팔을 박는 경로다. 휴식은 테이블
         # 여유 13.6cm 로 안전하고, 팔을 쓰는 동작은 execute 가 '들어올리기'
         # 단계를 먼저 거친다.
+        self._dofadr = {}
+        for jid in range(self.model.njnt):
+            n = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, jid)
+            if n:
+                self._dofadr[n] = self.model.jnt_dofadr[jid]
+        self._free = {o['name']: mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, o['name'])
+            for o in self.objects if o.get('movable')}
         self.pose = {j: 0.0 for j in self.idx}
         self._forward()
+        self.step_physics(40)              # 물체들이 테이블에 안착
 
     # -- 상태 --------------------------------------------------------------
 
@@ -145,9 +154,26 @@ class World(object):
         sm._set_pose(self.data, self.idx, self.pose)
         self.mujoco.mj_forward(self.model, self.data)
 
+    def step_physics(self, substeps=6):
+        """물리를 적분한다. 팔은 위치 구동(각 하위스텝마다 자세 재고정 +
+        관절 속도 0)이고 자유 바디(물체)만 중력·접촉으로 움직인다.
+        부딪히면 밀려나고, 잡히려면 마찰이 실제로 지탱해야 한다."""
+        mj = self.mujoco
+        for _ in range(substeps):
+            sm._set_pose(self.data, self.idx, self.pose)
+            for joint, adr in self.idx.items():
+                if not joint.endswith('_free'):
+                    dof = self._dofadr.get(joint)
+                    if dof is not None:
+                        self.data.qvel[dof] = 0.0
+            mj.mj_step(self.model, self.data)
+        sm._set_pose(self.data, self.idx, self.pose)
+        mj.mj_forward(self.model, self.data)
+
     def set_arm(self, pose):
         self.pose.update(pose)
         self._forward()
+        self.step_physics()
 
     def set_gaze(self, y, z, x=0.5):
         """시선을 (y, z at x) 로 즉시. 실물 Orbita 가 못 보는 방향이면 None.
@@ -244,6 +270,8 @@ class World(object):
         return me.forward_kinematics(me.CHAINS['right_arm'], self.pose)
 
     def object_pos(self, name):
+        if name in self._free:
+            return tuple(float(v) for v in self.data.xpos[self._free[name]])
         if name in self._centers:
             return self._centers[name]
         return tuple(float(v) for v in self.model.geom_pos[self._gid[name]])
@@ -252,6 +280,14 @@ class World(object):
         return [o['name'] for o in self.objects if o.get('movable')]
 
     def move_object(self, name, pos):
+        if name in self._free:
+            adr = self.idx[name + '_free']
+            self.data.qpos[adr:adr + 3] = pos
+            self.data.qpos[adr + 3:adr + 7] = (1, 0, 0, 0)
+            dof = self._dofadr[name + '_free']
+            self.data.qvel[dof:dof + 6] = 0
+            self.mujoco.mj_forward(self.model, self.data)
+            return
         if name in self._parts:
             old = self._centers[name]
             d = tuple(pos[i] - old[i] for i in range(3))
@@ -295,6 +331,33 @@ class World(object):
                 and margin * self.height < px[1] < (1 - margin) * self.height)
 
     # -- 안전/투과 ---------------------------------------------------------
+
+    def jaw_clearance(self, name, jaw=None):
+        """그리퍼 조(움직/고정)와 이 물체 사이 최소 표면거리(cm).
+
+        조임 판정 전용 - 팔 전체 최소를 쓰면 손목 캡슐 접촉이 조임으로
+        오인된다 (실측: 조가 안 닿았는데 잡힘 처리)."""
+        mj = self.mujoco
+        names = {'moving': ('right_arm_jaw_moving',),
+                 'fixed': ('right_arm_jaw_fixed',)}.get(
+            jaw, ('right_arm_jaw_moving', 'right_arm_jaw_fixed',
+                  'right_arm_palm'))
+        jids = [self._gid[n] for n in names if n in self._gid]
+        oids = self._parts.get(name) or [self._gid[name]]
+        return min(mj.mj_geomDistance(self.model, self.data, g, o, 1.0, None)
+                   for g in jids for o in oids) * 100
+
+    def grip_slot(self):
+        """두 조 사이 슬롯의 세계좌표 중심 - 물체가 '여기' 에 와야 집힌다.
+        손목 FK 점과 어긋나 있어(자세 따라 회전) 정렬은 이걸 기준으로."""
+        mj = self.mujoco
+        gm = self._gid.get('right_arm_jaw_moving')
+        gf = self._gid.get('right_arm_jaw_fixed')
+        if gm is None or gf is None:
+            return self.hand()
+        a = self.data.geom_xpos[gm]
+        b = self.data.geom_xpos[gf]
+        return tuple(float((a[i] + b[i]) / 2) for i in range(3))
 
     def clearance_of(self, name):
         """팔 전체와 이 물체 하나 사이 최소 표면거리(cm)."""
