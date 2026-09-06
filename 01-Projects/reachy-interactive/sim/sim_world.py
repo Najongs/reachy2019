@@ -106,10 +106,43 @@ class World(object):
         self._forward()
 
     def set_gaze(self, y, z, x=0.5):
-        """시선을 (y, z at x) 로. 실물 Orbita 가 못 보는 방향이면 None."""
+        """시선을 (y, z at x) 로 즉시. 실물 Orbita 가 못 보는 방향이면 None.
+
+        즉시 이동은 내부 프로브/미세 되먹임용이다. 눈에 보이는 시선 이동은
+        glide_gaze 를 써라 - 실물 목은 순간이동하지 않는다.
+        """
         disks = sm.set_gaze(self.pose, y, z, x)
         self._forward()
+        self._gaze_pt = (max(x, 0.05), y, z)
         return disks
+
+    def glide_gaze(self, y, z, x=0.5, on_step=None, max_step_deg=6.0):
+        """시선을 현재 방향에서 목표로 '돌려서' 가져간다.
+
+        실물 목에는 속도 상한이 있다(실기 커밋과 같은 원칙). 시뮬이 시선을
+        한 스텝에 박아 넣으면 눈 카메라 뷰가 프레임 사이에서 뚝 바뀌어
+        영상이 끊겨 보이고, 자연스러움 평가도 왜곡된다. 시선 방향을
+        max_step_deg 씩 나눠 보간한다. on_step(i, n) 으로 중간 프레임을
+        찍을 수 있다.
+        """
+        target = (max(x, 0.05), y, z)
+        cur = getattr(self, '_gaze_pt', None) or (0.5, 0.0, 0.0)
+
+        def _norm(v):
+            n = math.sqrt(sum(c * c for c in v)) or 1.0
+            return tuple(c / n for c in v)
+
+        a, b = _norm(cur), _norm(target)
+        dot = max(-1.0, min(1.0, sum(x1 * x2 for x1, x2 in zip(a, b))))
+        ang = math.degrees(math.acos(dot))
+        n = max(1, int(math.ceil(ang / max(max_step_deg, 0.5))))
+        for i in range(1, n + 1):
+            t = i / n
+            pt = tuple(c0 + (c1 - c0) * t for c0, c1 in zip(cur, target))
+            self.set_gaze(pt[1], pt[2], x=pt[0])
+            if on_step is not None:
+                on_step(i, n)
+        return n
 
     def look_at(self, point):
         return self.set_gaze(point[1], point[2], x=max(point[0], 0.05))

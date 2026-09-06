@@ -39,7 +39,8 @@ BOUNDS = {'step_deg': (1.5, 8.0), 'gain': (0.3, 1.4), 'damping': (1.0, 10.0),
           'table_min': (0.2, 3.0), 'lift_steps': (3, 14),
           # 경로 모양 - 우회를 줄일 수 있는 손잡이. 투과는 문지기가 거른다.
           'ready_pitch': (-40.0, 15.0), 'ready_roll': (-110.0, -25.0),
-          'ready_yaw': (0.0, 60.0), 'ready_elbow': (-125.0, -60.0)}
+          'ready_yaw': (0.0, 60.0), 'ready_elbow': (-125.0, -60.0),
+          'gaze_step_deg': (2.0, 12.0)}
 INT_PARAMS = ('lift_steps',)
 
 

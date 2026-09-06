@@ -216,6 +216,7 @@ BEHAVIOR = {
     'ready_roll': -66.0,    # 준비 자세 벌림 (덜 벌리면 우회가 준다)
     'ready_yaw': 32.0,      # 준비 자세 상완 비틀기
     'ready_elbow': -124.0,  # 준비 자세 팔꿈치
+    'gaze_step_deg': 6.0,   # 시선 활강 한 스텝 각도 (작으면 목이 차분)
 }
 
 
@@ -416,7 +417,14 @@ def execute(world, plan, frames=None, trace=None):
     """계획을 월드에서 실행한다. (성공했다고 주장하지 않음 - 검증은 따로)"""
     mode = plan.get('mode')
     if mode == 'gaze':
-        world.center_on(plan['point'])
+        # 시선은 돌려서 간다 - 순간이동하면 눈 뷰가 프레임 사이에 뚝 바뀐다.
+        p = plan['point']
+        cb = None
+        if frames is not None:
+            cb = lambda i, n: frames.append(_snap(world, 'gaze %d/%d' % (i, n)))
+        world.glide_gaze(p[1], p[2], x=max(p[0], 0.05), on_step=cb,
+                         max_step_deg=BEHAVIOR['gaze_step_deg'])
+        world.center_on(p)          # 미세 센터링 (잔여 오차만)
         if frames is not None:
             frames.append(_snap(world, 'gaze'))
         return True

@@ -181,7 +181,7 @@ def sweep(world, memory, pans=(-35, -18, 0, 18, 35), noise_px=2.0,
     """시선을 좌우로 훑으며 기억을 채운다. 훑은 프레임 수를 돌려준다."""
     for pan in pans:
         y = 0.5 * math.tan(math.radians(pan))
-        world.set_gaze(y, W.TABLE_TOP - 0.08)
+        world.glide_gaze(y, W.TABLE_TOP - 0.08)
         dets = detect(world, noise_px, dropout, rng)
         memory.update(world, dets)
         if frames is not None:
@@ -195,7 +195,7 @@ def gaze_toward(world, item):
     y = 0.5 * math.tan(math.radians(pan))
     # tilt 각도 -> 시선 z (x=0.5 평면 기준)
     z = -math.hypot(0.5, y) * math.tan(math.radians(tilt))
-    world.set_gaze(y, z)
+    world.glide_gaze(y, z)
 
 
 def main():
@@ -222,7 +222,7 @@ def main():
     print(mem.summary())
 
     # 화면 밖 기억 시험: 왼쪽 끝을 본 뒤에도 오른쪽 물체를 기억하나
-    world.set_gaze(0.45, W.TABLE_TOP - 0.08)
+    world.glide_gaze(0.45, W.TABLE_TOP - 0.08)
     dets_now = detect(world, rng=rng)
     visible_kinds = {d['kind'] for d in dets_now}
     remembered = {it['kind'] for it in mem.items}
