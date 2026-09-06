@@ -255,6 +255,10 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
            '        <joint name="eye.tilt" axis="0 1 0" range="-60 60"/>',
            # 실물 Orbita 는 시선축 둘레로도 살짝 돈다(대각 시선에서 최대 12도).
            # set_gaze 가 orbita 기구학으로 그 잔차를 채운다.
+           # 머리 메시는 팬/틸트를 따라 돈다 - 카메라만 돌고 머리가
+           # 멈춰 있으면 제3자 화면이 어색하다 (사용자 지적).
+           ('        <geom type="mesh" mesh="m_head" material="cad" '
+            'contype="0" conaffinity="0"/>' if 'head' in mesh else ''),
            '        <body name="eye_roll" pos="0 0 0">',
            '          <inertial pos="0 0 0" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
            '          <joint name="eye.roll" axis="1 0 0" range="-45 45"/>',
@@ -264,27 +268,29 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
            '          <camera name="robot_eye" pos="0 0 0" '
            'xyaxes="0 -1 0 0 0 1" fovy="58"/>',
            '        </body>',
-           '      </body>',
-           '    </body>',
-           # 안테나는 사슬에 없다(머리 위 별도 모터). 감정 표현이 잘 보이므로
-           # 힌지로 붙여 준다.
-           '    <body name="left_antenna" pos="-0.02 0.06 %.3f">'
-           % (me.HEAD_SPHERE_CENTER[2] + me.HEAD_SPHERE_RADIUS - 0.01),
-           '      <inertial pos="0 0 .05" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
-           '      <joint name="head.left_antenna" axis="0 1 0" range="-140 140"/>',
-           ('      <geom type="mesh" mesh="m_left_antenna" material="cad" '
+           # 안테나는 머리에 붙어 있다 - 목을 따라 같이 돌아야 한다.
+           # (월드 휴식 위치는 예전과 동일: eye_pan/tilt 만큼 상대 보정)
+           '        <body name="left_antenna" pos="%.3f 0.06 %.3f">'
+           % (-0.02 - 0.06, me.HEAD_SPHERE_CENTER[2] + me.HEAD_SPHERE_RADIUS
+              - 0.01 - 0.11),
+           '          <inertial pos="0 0 .05" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
+           '          <joint name="head.left_antenna" axis="0 1 0" range="-140 140"/>',
+           ('          <geom type="mesh" mesh="m_left_antenna" material="cad" '
             'contype="0" conaffinity="0"/>' if 'left_antenna' in mesh else
-            '      <geom type="capsule" material="ant" contype="0" '
+            '          <geom type="capsule" material="ant" contype="0" '
             'conaffinity="0" fromto="0 0 0 0 0 .1" size=".008"/>'),
-           '    </body>',
-           '    <body name="right_antenna" pos="-0.02 -0.06 %.3f">'
-           % (me.HEAD_SPHERE_CENTER[2] + me.HEAD_SPHERE_RADIUS - 0.01),
-           '      <inertial pos="0 0 .05" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
-           '      <joint name="head.right_antenna" axis="0 1 0" range="-140 140"/>',
-           ('      <geom type="mesh" mesh="m_right_antenna" material="cad" '
+           '        </body>',
+           '        <body name="right_antenna" pos="%.3f -0.06 %.3f">'
+           % (-0.02 - 0.06, me.HEAD_SPHERE_CENTER[2] + me.HEAD_SPHERE_RADIUS
+              - 0.01 - 0.11),
+           '          <inertial pos="0 0 .05" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>',
+           '          <joint name="head.right_antenna" axis="0 1 0" range="-140 140"/>',
+           ('          <geom type="mesh" mesh="m_right_antenna" material="cad" '
             'contype="0" conaffinity="0"/>' if 'right_antenna' in mesh else
-            '      <geom type="capsule" material="ant" contype="0" '
+            '          <geom type="capsule" material="ant" contype="0" '
             'conaffinity="0" fromto="0 0 0 0 0 .1" size=".008"/>'),
+           '        </body>',
+           '      </body>',
            '    </body>']
 
     # 충돌 그룹. 같은 팔의 이웃 링크는 팔꿈치에서 늘 겹치므로(캡슐 끝이
@@ -320,8 +326,10 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
                 # 실물 그리퍼 축: viewer 의 'z' 는 glb 노드 로컬 z 인데,
                 # 휴식 자세에서 그 방향은 몸통 기준 x 다 (glb 실측:
                 # 로컬 z -> 월드 [1,0,0]). 음수=벌림, invert 규약 반영.
+                # 피벗은 glb 노드 원점 (바디 원점에서 y-2.7, z+3.5cm 실측).
                 out.append('%s<joint name="%s" axis="-1 0 0" '
-                           'range="%g %g"/>' % (pad, jname, lim[0], lim[1]))
+                           'pos="0 -0.027 0.035" range="%g %g"/>'
+                           % (pad, jname, lim[0], lim[1]))
             elif any(axis):                     # 회전축이 있으면 관절
                 out.append('%s<joint name="%s" axis="%d %d %d" range="%g %g"/>'
                            % (pad, jname, axis[0], axis[1], axis[2],

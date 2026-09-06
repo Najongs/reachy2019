@@ -55,6 +55,9 @@ NODE_TO_BODY = {
     'left_gripper_joint': 'left_arm_hand_wrist_pitch',
     'left_ear_joint': 'left_antenna',
     'right_ear_joint': 'right_antenna',
+    # 머리 전체(neck_joint 서브트리)는 목을 따라 도는 별도 바디다 -
+    # 통짜 world 에 구우면 카메라만 돌고 머리는 정지해 보인다.
+    'neck_joint': 'head',
 }
 
 
@@ -69,6 +72,9 @@ def body_rest_positions():
     z = me.HEAD_SPHERE_CENTER[2] + me.HEAD_SPHERE_RADIUS - 0.01
     rest['left_antenna'] = (-0.02, 0.06, z)
     rest['right_antenna'] = (-0.02, -0.06, z)
+    # 머리 바디는 eye_tilt 밑에 붙는다 (sim_mujoco 의 팬/틸트 사슬 휴식
+    # 위치: eye_pan (0,0,0.09) + eye_tilt (0.06,0,0.02)).
+    rest['head'] = (0.06, 0.0, 0.11)
     rest['world'] = (0.0, 0.0, 0.0)
     return rest
 
