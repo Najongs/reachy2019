@@ -54,13 +54,13 @@ class OraclePlanner(object):
         """유형별로 목표를 돌려준다.  {mode, target_xyz?, ...}"""
         obj = world.object_pos(task['target'])
         if task['kind'] == 'look':
-            return {'mode': 'gaze', 'point': obj}
+            return {'mode': 'gaze', 'point': obj, 'target': task['target']}
         if task['kind'] in ('point', 'reach'):
-            return {'mode': 'reach', 'point': obj,
+            return {'mode': 'reach', 'point': obj, 'target': task['target'],
                     'done_cm': 8.0 if task['kind'] == 'reach' else 12.0}
         if task['kind'] == 'pick':
             return {'mode': 'pick', 'object': task['target'],
-                    'tray': task['tray']}
+                    'target': task['target'], 'tray': task['tray']}
         return {'mode': 'noop'}
 
 
@@ -127,13 +127,22 @@ class BrokerPlanner(object):
         if choice is None:
             return {'mode': 'noop', 'raw': raw, 'why': '접지 응답 해석 불가'}
 
+        # 행동 유형도 opus 가 지시문에서 추론한다 (이론상 인지의 몫).
+        # 유형 메타데이터는 판정에만 쓰고, 실행은 추론을 따른다 - 어긋나면
+        # 기록에 남아 감사 대상이 된다. pick 은 슬라이스 밖이라 reach 로.
+        action = choice.get('action')
+        if action not in ('look', 'point', 'reach', 'pick'):
+            action = task['kind']
+        act_mismatch = (action != task['kind']) or None
+
         box = choice.get('box')
         if box is not None and 0 <= int(box) < len(dets):
             det = dets[int(box)]
             point = _det_to_3d(world, det)
-            mode = 'gaze' if task['kind'] == 'look' else 'reach'
-            done = 12.0 if task['kind'] == 'point' else 8.0
+            mode = 'gaze' if action == 'look' else 'reach'
+            done = 12.0 if action == 'point' else 8.0
             return {'mode': mode, 'point': point, 'done_cm': done,
+                    'action': action, 'action_mismatch': act_mismatch,
                     'raw': raw, 'grounded_det': det}
         if choice.get('memory') and mem is not None:
             item = mem.find(choice['memory'])
@@ -144,8 +153,10 @@ class BrokerPlanner(object):
                 if dets2:
                     det = max(dets2, key=lambda d: d['size_px'])
                     point = _det_to_3d(world, det)
-                    mode = 'gaze' if task['kind'] == 'look' else 'reach'
+                    mode = 'gaze' if action == 'look' else 'reach'
                     return {'mode': mode, 'point': point, 'done_cm': 8.0,
+                            'action': action,
+                            'action_mismatch': act_mismatch,
                             'raw': raw, 'grounded_det': det}
         return {'mode': 'noop', 'raw': raw, 'why': '대상을 찾지 못함'}
 
@@ -274,7 +285,8 @@ def save_behavior(params=None):
 load_behavior()
 
 
-def _lift_ready(world, frames=None, trace=None, steps=None, watch=None):
+def _lift_ready(world, frames=None, trace=None, steps=None, watch=None,
+                target_name=None):
     """휴식 -> 준비 자세, 3단계로: 벌리고 -> 굽히고 -> 돌려 넣기.
 
     관절을 한꺼번에 보간하면 전완이 테이블 앞모서리를 스친다(실측 -5cm).
@@ -300,19 +312,25 @@ def _lift_ready(world, frames=None, trace=None, steps=None, watch=None):
                 (h[i] + watch[i]) / 2.0 for i in range(3))
             world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
             if trace is not None:
-                trace.append(_trace_entry(world, watch))
+                trace.append(_trace_entry(world, watch, target_name))
             if frames is not None:
                 frames.append(_snap(world, 'lift'))
         cur = tgt
     return True
 
 
-def _trace_entry(world, watch=None):
+def _trace_entry(world, watch=None, target=None):
+    # 대상 물체는 따로 잰다: 집기·접근은 대상에 '닿는' 게 목표라, 대상
+    # 접촉을 충돌로 세면 다가가는 것 자체가 벌점이 된다 (사용자 지적).
+    # 테이블·다른 물체만 회피 대상이고, 대상은 관통(-1cm 초과)만 금지.
+    ignore = ('table', target) if target else ('table',)
     e = {'table': world.clearance_of('table'),
-         'obj': world.clearance(ignore=('table',))[0],
+         'obj': world.clearance(ignore=ignore)[0],
          'hand': tuple(round(v, 4) for v in world.hand()),
          'joints': {j: round(world.pose.get(j, 0.0), 2)
                     for j in sv.SERVO_JOINTS}}
+    if target:
+        e['tgt'] = world.clearance_of(target)
     if watch is not None:
         # 실물은 눈 뷰만 보고 동작한다 - 목표를 시야에서 잃으면 서보가
         # 눈이 먼다. 목표가 화면 안에 있었는지를 궤적에 남겨 품질로 잰다.
@@ -323,7 +341,7 @@ def _trace_entry(world, watch=None):
 
 def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
            stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
-           table_min=None):
+           table_min=None, target_name=None):
     """화면 오차로 손을 target 까지. sim_servo 와 같은 방식, World 위에서."""
     import numpy as np
 
@@ -357,6 +375,8 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
                 size + n[4])
 
     blocked = 0
+    dist_hist = []
+    recovered = False
     for step in range(steps):
         # 머리는 손과 물체의 중간을 본다 - 손이 다가갈수록 물체로 수렴.
         # 실물 visual servoing 도 손과 목표가 같이 보여야 오차를 잰다.
@@ -364,12 +384,37 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         aim = tuple((h[i] + target[i]) / 2.0 for i in range(3))
         world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
         if trace is not None:
-            trace.append(_trace_entry(world, target))
+            trace.append(_trace_entry(world, target, target_name))
         if frames is not None:
             frames.append(_snap(world, '%s %.1fcm' % (note,
                           me._dist(world.hand(), target) * 100)))
-        if me._dist(world.hand(), target) * 100 <= done_cm:
+        d_now = me._dist(world.hand(), target) * 100
+        if d_now <= done_cm:
             return True
+        # 진행 감시: 최근 8스텝간 1cm 도 못 좁혔으면 정체다. 45스텝을
+        # 소진하며 '미도달' 로 끝나는 대신, 한 번은 준비 자세 쪽으로
+        # 물러났다가 다른 각도로 재진입하고, 또 정체면 일찍 포기한다
+        # (밖의 재시도 층이 재인지부터 다시 하게).
+        dist_hist.append(d_now)
+        if len(dist_hist) >= 9 and dist_hist[-9] - d_now < 1.0:
+            if recovered:
+                if frames is not None:
+                    frames.append(_snap(world, '%s 정체 포기' % note))
+                return False
+            recovered = True
+            dist_hist = []
+            via = via_poses()[-1]
+            cur_pose = {j: world.pose.get(j, 0.0) for j in via}
+            for k in range(1, 4):
+                u = k / 3.0
+                world.set_arm({j: cur_pose[j] + (via[j] - cur_pose[j])
+                               * 0.35 * u for j in via})
+                world.nudge_gaze(target, BEHAVIOR['gaze_step_deg'])
+                if trace is not None:
+                    trace.append(_trace_entry(world, target, target_name))
+                if frames is not None:
+                    frames.append(_snap(world, '%s 후퇴 재진입' % note))
+            continue
         if stop_gap is not None and world.clearance()[0] <= stop_gap:
             return True
         if obj_stop is not None and world.clearance(ignore=('table',))[0] <= obj_stop:
@@ -458,12 +503,16 @@ def execute(world, plan, frames=None, trace=None):
         return True
     if mode == 'reach':
         # 실물 순서: 팔을 먼저 테이블 위로 들어 올리고, 위에서 접근한다.
-        _lift_ready(world, frames=frames, trace=trace, watch=plan['point'])
+        tname = plan.get('target')
+        _lift_ready(world, frames=frames, trace=trace, watch=plan['point'],
+                    target_name=tname)
         return _servo(world, plan['point'], plan['done_cm'], obj_stop=1.0,
-                      frames=frames, note='reach', trace=trace)
+                      frames=frames, note='reach', trace=trace,
+                      target_name=tname)
     if mode == 'pick':
         _lift_ready(world, frames=frames, trace=trace,
-                    watch=world.object_pos(plan['object']))
+                    watch=world.object_pos(plan['object']),
+                    target_name=plan.get('target'))
         return _pick(world, plan['object'], plan['tray'], frames=frames)
     return False
 

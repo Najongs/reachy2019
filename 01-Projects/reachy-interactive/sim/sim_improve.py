@@ -88,14 +88,15 @@ def episode(task, keep_frames=False, natural_min=55):
         reached = bool(T.success_fn(task)(world))
         final_cm = me._dist(world.hand(),
                             world.object_pos(task['target'])) * 100
-        path_min = min(min((t['table'] for t in trace), default=99),
-                       min((t['obj'] for t in trace), default=99))
+        path_tab = min((t['table'] for t in trace), default=99)
+        path_obj = min((t['obj'] for t in trace), default=99)
+        path_tgt = min((t.get('tgt', 99) for t in trace), default=99)
         q = C.quality(trace) if trace else {'score': 0}
         # look 처럼 팔을 안 쓰는 태스크는 궤적이 없다 - 품질 문턱을 건너뛴다
         # (sim_pipeline._verdict 와 같은 규칙).
         uses_arm = task['kind'] in ('reach', 'point', 'pick')
         stage, why = C.stage_verdict(
-            path_min, reached,
+            path_tab, path_obj, path_tgt, reached,
             q.get('score', 0) if uses_arm else 100, natural_min)
         q['stage'], q['why'] = stage, why
         q['final_cm'] = round(final_cm, 1)

@@ -73,6 +73,12 @@ def _succ_look(name):
     return f
 
 
+def _clean(w, name):
+    """안전 판정: 다른 물체는 스침도 금지, 대상은 관통(-1cm)만 금지."""
+    others = w.clearance(ignore=('table', name))[0] > -0.5
+    return others and w.clearance_of(name) > -1.0
+
+
 def _succ_point(name):
     def f(w):
         # 손끝에서 어깨로의 방향이 물체를 향하고, 팔이 뻗어 있으면 성공.
@@ -85,8 +91,7 @@ def _succ_point(name):
         no = math.sqrt(sum(c * c for c in v_obj)) or 1
         cos = sum(v_arm[i] * v_obj[i] for i in range(3)) / (na * no)
         reach = math.sqrt(sum((hand[i] - shoulder[i]) ** 2 for i in range(3)))
-        clean = w.clearance(ignore=('table',))[0] > -0.5
-        return cos > 0.94 and reach > 0.35 and clean
+        return cos > 0.94 and reach > 0.35 and _clean(w, name)
     return f
 
 
@@ -94,8 +99,7 @@ def _succ_reach(name, within=0.14):
     def f(w):
         # 손이 물체 근처에 오되, 물체를 뚫지 않아야 진짜 성공.
         near = me._dist(w.hand(), w.object_pos(name)) < within
-        clean = w.clearance(ignore=('table',))[0] > -0.5
-        return near and clean
+        return near and _clean(w, name)
     return f
 
 
@@ -172,8 +176,7 @@ def feasible(task, quick_steps=25):
         plan = planner.plan(w, task, view)
         A.execute(w, plan)
         ok = success_fn(task)(w)
-        clean = w.clearance(ignore=('table',))[0] > -0.5
-        return bool(ok and clean)
+        return bool(ok and _clean(w, task['target']))
     except Exception:
         return False
     finally:

@@ -104,10 +104,25 @@ STAGE_KO = {'collision': '충돌', 'unnatural': '부자연',
             'missed': '미도달', 'success': '성공'}
 
 
-def stage_verdict(path_min_cm, reached, quality_score, natural_min=55):
-    """(stage, why). 단계 순서대로 걸리는 첫 항목이 판정이다."""
-    if path_min_cm < -0.5:
-        return 'collision', '경로에서 충돌 (최소 여유 %.1fcm)' % path_min_cm
+TARGET_PEN_CM = -1.0    # 대상 물체 허용 관통 - 접촉(잡기)은 목표지 충돌이 아니다
+
+
+def stage_verdict(path_tab, path_obj, path_tgt, reached, quality_score,
+                  natural_min=55):
+    """(stage, why). 단계 순서대로 걸리는 첫 항목이 판정이다.
+
+    충돌의 정의가 대상/비대상으로 갈린다: 테이블·다른 물체는 스치는 것도
+    금지(-0.5cm)지만, **대상 물체는 닿는 게 목표**라 접촉은 허용하고
+    관통(-1cm 초과)만 충돌로 본다. '충돌하지 마' 를 대상까지 걸면
+    집기가 원천적으로 불가능해진다.
+    """
+    if path_tab < -0.5:
+        return 'collision', '경로에서 테이블 충돌 (%.1fcm)' % path_tab
+    if path_obj < -0.5:
+        return 'collision', '경로에서 다른 물체 충돌 (%.1fcm)' % path_obj
+    if path_tgt < TARGET_PEN_CM:
+        return 'collision', '대상 관통 (%.1fcm - 접촉 한도 %.1f)' % (
+            path_tgt, TARGET_PEN_CM)
     if quality_score < natural_min:
         return 'unnatural', '품질 %d < 문턱 %d (거칠거나 우회)' % (
             quality_score, natural_min)

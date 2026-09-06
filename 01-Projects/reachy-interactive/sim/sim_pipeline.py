@@ -61,8 +61,13 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
 
         plan = planner.plan(world, task, view)
         rec['plan'] = {'mode': plan.get('mode'), 'raw': plan.get('raw'),
+                       'action': plan.get('action'),
+                       'action_mismatch': plan.get('action_mismatch'),
                        'why': plan.get('why')}
 
+        # 대상 이름은 궤적 계측용(대상/비대상 충돌 분리)이지 계획 정보가
+        # 아니다 - 접지는 여전히 박스 번호로만 한다.
+        plan.setdefault('target', task['target'])
         trace = []
         A.execute(world, plan, frames=frames, trace=trace)
         verdict = _verdict(world, task, trace)
@@ -89,6 +94,8 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
             # 경로 전체의 최소 여유 - 최종 상태만 보면 중간 투과를 놓친다.
             'table_min_cm': round(min((t['table'] for t in trace), default=99), 1),
             'object_min_cm': round(min((t['obj'] for t in trace), default=99), 1),
+            'target_min_cm': round(min((t.get('tgt', 99) for t in trace),
+                                       default=99), 1),
             # 품질(효율·저크·여유) - 성공만으로는 거칠게 스친 동작과 부드럽게
             # 돌아간 동작을 못 가른다. sim_improve 가 이 값을 보고 행동을 조인다.
             'quality': C.quality(trace) if trace else None,
@@ -125,19 +132,22 @@ def _verdict(world, task, trace=None):
     태스크는 품질 문턱을 건너뛴다(움직임이 없으니 잴 것도 없다).
     """
     reached = bool(T.success_fn(task)(world))
-    obj_gap, obj_pair = world.clearance(ignore=('table',))
-    path_min = min(min((t['table'] for t in (trace or [])), default=99),
-                   min((t['obj'] for t in (trace or [])), default=99))
+    obj_gap, obj_pair = world.clearance(ignore=('table', task['target']))
+    tgt_gap = world.clearance_of(task['target'])
+    path_tab = min((t['table'] for t in (trace or [])), default=99)
+    path_obj = min((t['obj'] for t in (trace or [])), default=99)
+    path_tgt = min((t.get('tgt', 99) for t in (trace or [])), default=99)
     q = C.quality(trace) if trace else None
     uses_arm = task['kind'] in ('reach', 'point', 'pick')
     qscore = (q or {}).get('score', 100 if not uses_arm else 0)
 
-    stage, why = C.stage_verdict(path_min, reached,
+    stage, why = C.stage_verdict(path_tab, path_obj, path_tgt, reached,
                                  qscore if uses_arm else 100, NATURAL_MIN)
     out = {'stage': stage, 'stage_ko': C.STAGE_KO[stage],
            'success': stage == 'success',
            'object_clearance_cm': round(obj_gap, 1),
-           'path_min_cm': round(path_min, 1)}
+           'target_clearance_cm': round(tgt_gap, 1),
+           'path_min_cm': round(min(path_tab, path_obj), 1)}
     if why:
         out['why'] = why
     elif stage != 'success' and not reached:
