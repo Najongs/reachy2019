@@ -313,7 +313,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
                            'size="0.010 0.008 0.045" '
                            'pos="%.4f %.4f %.4f"/>'
                            % (pad, 'hidden' if mesh else 'grip', ct0, ca0,
-                              trans[0], trans[1] + 0.030, trans[2] - 0.001))
+                              trans[0], trans[1] + 0.020, trans[2] - 0.001))
             out.append('%s<body name="%s" pos="%.4f %.4f %.4f">'
                        % (pad, _body_name(jname), trans[0], trans[1], trans[2]))
             depth += 1
@@ -327,7 +327,9 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
                 # 휴식 자세에서 그 방향은 몸통 기준 x 다 (glb 실측:
                 # 로컬 z -> 월드 [1,0,0]). 음수=벌림, invert 규약 반영.
                 # 피벗은 glb 노드 원점 (바디 원점에서 y-2.7, z+3.5cm 실측).
-                out.append('%s<joint name="%s" axis="-1 0 0" '
+                # 부호 실측: -50 에서 조 간격이 최대(벌림)가 되는 방향.
+                # (-1,0,0) 은 반대였다 - 닫고 접근하는 그림이 나왔다.
+                out.append('%s<joint name="%s" axis="1 0 0" '
                            'pos="0 -0.027 0.035" range="%g %g"/>'
                            % (pad, jname, lim[0], lim[1]))
             elif any(axis):                     # 회전축이 있으면 관절
