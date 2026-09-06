@@ -143,6 +143,15 @@ class BrokerPlanner(object):
         if box is not None and 0 <= int(box) < len(dets):
             det = dets[int(box)]
             point = _det_to_3d(world, det)
+            if action == 'pick':
+                tray_pt = None
+                tb = choice.get('tray_box')
+                if tb is not None and 0 <= int(tb) < len(dets):
+                    tray_pt = _det_to_3d(world, dets[int(tb)])
+                return {'mode': 'pick', 'point': point,
+                        'tray_point': tray_pt,
+                        'action': action, 'action_mismatch': act_mismatch,
+                        'raw': raw, 'grounded_det': det}
             mode = 'gaze' if action == 'look' else 'reach'
             done = 12.0 if action == 'point' else 8.0
             return {'mode': mode, 'point': point, 'done_cm': done,
@@ -324,7 +333,7 @@ def _lift_ready(world, frames=None, trace=None, steps=None, watch=None,
     return True
 
 
-def _trace_entry(world, watch=None, target=None):
+def _trace_entry(world, watch=None, target=None, carried=False):
     # 대상 물체는 따로 잰다: 집기·접근은 대상에 '닿는' 게 목표라, 대상
     # 접촉을 충돌로 세면 다가가는 것 자체가 벌점이 된다 (사용자 지적).
     # 테이블·다른 물체만 회피 대상이고, 대상은 관통(-1cm 초과)만 금지.
@@ -334,7 +343,9 @@ def _trace_entry(world, watch=None, target=None):
          'hand': tuple(round(v, 4) for v in world.hand()),
          'joints': {j: round(world.pose.get(j, 0.0), 2)
                     for j in sv.SERVO_JOINTS}}
-    if target:
+    if target and not carried:
+        # carried(운반 중)면 재지 않는다: 잡힌 물체는 손에 붙어 있어
+        # 팔-대상 겹침이 파지 그 자체다. 잡기 깊이는 하강 구간이 남긴다.
         e['tgt'] = world.clearance_of(target)
     if watch is not None:
         # 실물은 눈 뷰만 보고 동작한다 - 목표를 시야에서 잃으면 서보가
@@ -346,7 +357,8 @@ def _trace_entry(world, watch=None, target=None):
 
 def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
            stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
-           table_min=None, target_name=None):
+           table_min=None, target_name=None, ignore_objs=(), target_stop=None,
+           on_step=None, step_cap=None, carried=False):
     """화면 오차로 손을 target 까지. sim_servo 와 같은 방식, World 위에서."""
     import numpy as np
 
@@ -356,6 +368,8 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
     if table_min is None:
         table_min = BEHAVIOR['table_min']
     step_deg = BEHAVIOR['step_deg']
+    if step_cap is not None:
+        step_deg = min(step_deg, step_cap)   # 접촉 직전 하강 등 정밀 구간
     gain = BEHAVIOR['gain']
     damping = BEHAVIOR['damping']
 
@@ -389,7 +403,8 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         aim = tuple((h[i] + target[i]) / 2.0 for i in range(3))
         world.nudge_gaze(aim, BEHAVIOR['gaze_step_deg'])
         if trace is not None:
-            trace.append(_trace_entry(world, target, target_name))
+            trace.append(_trace_entry(world, target, target_name,
+                                      carried=carried))
         if frames is not None:
             frames.append(_snap(world, '%s %.1fcm' % (note,
                           me._dist(world.hand(), target) * 100)))
@@ -422,8 +437,12 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
             continue
         if stop_gap is not None and world.clearance()[0] <= stop_gap:
             return True
-        if obj_stop is not None and world.clearance(ignore=('table',))[0] <= obj_stop:
+        if obj_stop is not None and world.clearance(
+                ignore=('table',) + tuple(ignore_objs))[0] <= obj_stop:
             return True                     # 물체에 닿기 직전 - 여기서 멈춘다
+        if (target_stop is not None and target_name
+                and world.clearance_of(target_name) <= target_stop):
+            return True                     # 대상 접촉 - 잡기는 여기가 목적지
         e = err({})
         base = err({}, measured=False)
         if e is None or base is None:
@@ -453,10 +472,13 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         saved = dict(world.pose)
         world.set_arm(trial)
         tab = world.clearance_of('table')
-        obj = world.clearance(ignore=('table',))[0]
+        obj = world.clearance(ignore=('table',) + tuple(ignore_objs))[0]
         if obj_stop is not None and obj < obj_stop:
             world.set_arm(saved)
             return True                       # 물체에 닿기 직전 - 여기서 멈춘다
+        if (target_stop is not None and target_name
+                and world.clearance_of(target_name) <= target_stop):
+            return True                       # 대상 접촉 달성 (스텝 유지)
         if tab < table_min:
             half = {j: saved[j] + (trial[j] - saved[j]) * 0.4 for j in trial}
             world.set_arm(half)
@@ -467,6 +489,8 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
                     break                     # 계속 막히면 더 못 간다
                 continue
         blocked = 0
+        if on_step is not None:
+            on_step()
     return me._dist(world.hand(), target) * 100 <= done_cm
 
 
@@ -529,34 +553,125 @@ def execute(world, plan, frames=None, trace=None):
                       frames=frames, note='reach', trace=trace,
                       target_name=tname)
     if mode == 'pick':
-        _lift_ready(world, frames=frames, trace=trace,
-                    watch=world.object_pos(plan['object']),
+        watch = (world.object_pos(plan['object']) if plan.get('object')
+                 else plan.get('point'))
+        _lift_ready(world, frames=frames, trace=trace, watch=watch,
                     target_name=plan.get('target'))
-        return _pick(world, plan['object'], plan['tray'], frames=frames)
+        return _pick(world, obj=plan.get('object'), tray=plan.get('tray'),
+                     point=plan.get('point'),
+                     tray_point=plan.get('tray_point'),
+                     frames=frames, trace=trace)
     return False
 
 
-def _pick(world, obj, tray, frames=None):
-    """집어 쟁반에 놓기. (현재 기구학 한계로 위에서 집기는 어려움 - 기록됨)"""
-    cup = world.object_pos(obj)
-    above = (cup[0], cup[1], cup[2] + 0.14)
-    _servo(world, above, 3.0, obj_stop=1.0, frames=frames,
-           note='approach', seed=1)
-    reached = _servo(world, (cup[0], cup[1], cup[2] - 0.02), 1.0,
-                     obj_stop=0.5, frames=frames, note='descend', seed=2)
-    gap, _ = world.clearance()
-    grabbed = me._dist(world.hand(), cup) * 100 < 7.0 and gap > -0.5
-    if grabbed:
-        tp = world.object_pos(tray)
-        world.move_object(obj, (cup[0], cup[1], cup[2]))   # 집힘
-        # 쟁반 위로 옮긴다(손을 따라).
-        _servo(world, (tp[0], tp[1] - 0.02, tp[2] + 0.12), 3.5,
-               frames=frames, note='carry', seed=3)
+def _reaim(world, guess, kind=None, frames=None, note='re-aim'):
+    """추정점 근처를 다시 보고 검출로 정제한다 (카메라만 - 참값 없음).
+
+    가까울수록 물체가 화면에 크게 잡혀 크기 단서(깊이)가 좋아진다.
+    kind 를 주면 그 종류의 검출만 후보로 쓴다 (쟁반 등).
+    """
+    import random as _random
+    import sim_perceive as P
+    world.center_on(guess)
+    dets = P.detect(world, 1.5, 0.0, _random.Random(5))
+    px = world.pixel_of(guess)
+    if not dets or px is None:
+        return guess
+    pool = [d for d in dets if kind is None or d['kind'] == kind] or dets
+    det = min(pool, key=lambda d: (d['u'] - px[0]) ** 2
+              + (d['v'] - px[1]) ** 2)
+    if frames is not None:
+        frames.append(_snap(world, note))
+    return _det_to_3d(world, det)
+
+
+def _pick(world, obj=None, tray=None, point=None, tray_point=None,
+          frames=None, trace=None):
+    """집어 쟁반에 놓기: 위 접근 -> 저속 접촉 -> 잡기 -> 나르기 -> 놓기.
+
+    시뮬에는 손가락이 없다. '잡힘' 은 손이 대상에 접촉 수준(<=0.6cm)으로
+    닿은 것으로 근사하고, 이후 물체가 손을 따라간다(스텝 콜백). 실물에서는
+    이 지점이 그리퍼 폭 제어로 바뀐다 (sim-to-real 5단계).
+
+    obj/tray 이름이 없으면(브로커 - 참값 이름을 모른다) point 로 접근하고
+    접촉 순간 손에서 가장 가까운 움직이는 물체가 잡힌다 - 물리로 잡는
+    것의 흉내라 인지 방화벽을 깨지 않는다. 접지가 틀렸으면 엉뚱한 걸
+    집어 판정이 정직하게 실패한다.
+    """
+    cup = world.object_pos(obj) if obj else tuple(point)
+    bind = obj
+
+    # 1) 위 접근: 예비점 -> 하강. 다른 물체는 1cm 회피, 대상은 접촉까지.
+    pre = (cup[0], cup[1], cup[2] + 0.10)
+    _servo(world, pre, 5.0, obj_stop=1.5, steps=25, frames=frames,
+           note='pre-top', trace=trace, target_name=bind, seed=1)
+    if bind is None:
+        # 브로커 경로: 접지 추정은 몇 cm 틀릴 수 있다. reach 는 14cm
+        # 허용이라 견디지만 잡기는 cm 급이 필요하다 - 가까이서 다시 보고
+        # 정제한다 (참값이 아니라 카메라 재검출).
+        cup = _reaim(world, cup, frames=frames)
+        # 접촉 판정용 임시 바인딩: 정제점에서 가장 가까운 움직이는 물체.
+        bind = min(world.movable_objects(),
+                   key=lambda n: me._dist(world.object_pos(n), cup))
+
+    # 파지 지점 = 물체 윗면. 중심을 겨누면 작은 물체일수록 깊이 파고들어야
+    # 닿는다 - 사람도 컵은 테두리를 잡는다.
+    half = 0.03
+    for o in world.objects:
+        if o['name'] == bind:
+            half = {'cylinder': o['size'][1], 'sphere': o['size'][0],
+                    'box': o['size'][-1]}.get(o['type'], 0.03)
+            break
+    _servo(world, (cup[0], cup[1], cup[2] + half), 2.0, steps=30,
+           obj_stop=1.0, ignore_objs=(bind,), target_stop=0.5,
+           step_cap=2.5, frames=frames, note='descend', trace=trace,
+           target_name=bind, seed=2)
+
+    grabbed = world.clearance_of(bind) <= 0.9
+    if frames is not None:
+        frames.append(_snap(world, '잡기 %s' % ('성공' if grabbed else '실패')))
+    if not grabbed:
+        return False
+
+    # 2) 잡힘: 물체가 손을 따라간다 (손-물체 상대 위치 고정).
+    hand0 = world.hand()
+    op0 = world.object_pos(bind)
+    off = tuple(op0[i] - hand0[i] for i in range(3))
+
+    def follow():
         h = world.hand()
-        world.move_object(obj, (tp[0], tp[1], world.table_top + 0.05))
-        if frames is not None:
-            frames.append(_snap(world, 'placed'))
-    return grabbed
+        world.move_object(bind, tuple(h[i] + off[i] for i in range(3)))
+
+    # 3) 들어서 나른다: 위로 뽑고 -> 쟁반 위 -> 내려놓기.
+    dest = world.object_pos(tray) if tray else (tuple(tray_point)
+                                                if tray_point else None)
+    if dest is None:
+        return False
+    # 나를 때는 높이 든다 - 다른 물체 위를 지나가는 게 안전하다. 스텝도
+    # 상한을 둬 obj_stop 을 한 걸음에 뚫고 지나가지 않게 한다.
+    up = (hand0[0], hand0[1], hand0[2] + 0.14)
+    _servo(world, up, 4.0, steps=20, ignore_objs=(bind,), on_step=follow,
+           carried=True, step_cap=4.0, frames=frames, note='lift-carry',
+           trace=trace, target_name=bind, seed=3)
+    _servo(world, (dest[0], dest[1], dest[2] + 0.16), 4.0, steps=35,
+           ignore_objs=(bind,), on_step=follow, obj_stop=1.0, carried=True,
+           step_cap=4.0, frames=frames, note='carry', trace=trace,
+           target_name=bind, seed=4)
+    if tray is None:
+        # 쟁반 접지도 오차가 크다(납작해서 크기 단서가 나쁨) - 위에서
+        # 다시 보고 정제한 곳에 놓는다.
+        dest = _reaim(world, dest, kind='tray', frames=frames,
+                      note='re-aim tray')
+        _servo(world, (dest[0], dest[1], dest[2] + 0.10), 3.0, steps=15,
+               ignore_objs=(bind,), on_step=follow, carried=True,
+               frames=frames, note='place', trace=trace, target_name=bind,
+               seed=5)
+
+    # 4) 놓기: 쟁반 면 위에.
+    world.move_object(bind, (dest[0], dest[1], dest[2] + 0.045))
+    if frames is not None:
+        frames.append(_snap(world, 'placed'))
+    return True
 
 
 # ============================================================ 루프 ===========

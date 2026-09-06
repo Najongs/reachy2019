@@ -17,6 +17,7 @@
 답변 규칙:
 - 반드시 JSON 한 줄로만 답한다: {"action": "행동", "approach": "top"|"side", "box": 번호, "reason": "짧은 근거"}
 - look 이면 approach 는 생략해도 된다.
+- action 이 "pick" 이면 목적지 쟁반의 박스 번호를 "tray_box" 로 함께 답하라 (쟁반이 화면에 없으면 null).
 - 대상이 화면에 없고 기억에만 있으면: {"action": "행동", "box": null, "memory": "종류이름", "reason": "..."}
   (memory 는 기억 항목의 종류: cup / block / ball / can / tray)
 - 대상을 화면에서도 기억에서도 못 찾으면: {"box": null, "memory": null, "reason": "..."}

@@ -156,7 +156,7 @@ def _verdict(world, task, trace=None):
     return out
 
 
-def run_batch(n=6, kinds=('look', 'reach'), planner_name='oracle',
+def run_batch(n=6, kinds=('look', 'reach', 'pick'), planner_name='oracle',
               url='http://127.0.0.1:8080', token=None, seed=0, tag=''):
     run_id = R.new_run(tag or planner_name)
     print('run %s | 계획자 %s | 태스크 %d개 생성(실현가능성 필터)...'

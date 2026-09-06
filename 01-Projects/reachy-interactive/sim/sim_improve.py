@@ -231,7 +231,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         for tryn in range(6):
             ts = T.generate_feasible(
                 n_tasks, seed=seed * 977 + k + tryn * 131071,
-                kinds=('reach',), env=env)
+                kinds=('reach', 'pick'), env=env)
             if len(ts) >= n_tasks:
                 return ts
         if fallback:
