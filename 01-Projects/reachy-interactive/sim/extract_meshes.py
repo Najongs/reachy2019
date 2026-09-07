@@ -28,7 +28,9 @@ sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
 
 import motion_exec as me                          # noqa: E402
 
-GLB = os.path.join(HERE, '..', '..', '..', '03-Resources', '3d-models',
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
+import para  # PARA 기준 경로
+GLB = os.path.join(para.RESOURCES, '3d-models',
                    'reachy.glb')
 OUT = os.path.join(HERE, 'meshes')
 

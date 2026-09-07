@@ -18,9 +18,12 @@ sim_safety 의 판정은 팔 반지름 가정에 그대로 좌우된다(pick_to_
 """
 
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_GLB = os.path.join(HERE, '..', '..', '..', '03-Resources',
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
+import para  # PARA 기준 경로
+DEFAULT_GLB = os.path.join(para.RESOURCES,
                            '3d-models', 'reachy.glb')
 
 # 재어 둔 값 (reachy.glb, 95 백분위 / 관절 여백 5cm). 모델을 못 읽을 때
