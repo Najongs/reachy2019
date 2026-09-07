@@ -18,7 +18,12 @@ fi
 PY=/home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3
 # 학습 전에 그날의 실데이터(대화 로그 + 사람 사진)부터 - 하루 한 번.
 # 사용자 결정: 업데이트에는 텍스트 대화와 사람 데이터 갱신이 동행한다.
-KD=$(TZ=Asia/Seoul date +%F)
+# 밤 창(20~08)이 자정을 넘으므로 '그 밤이 시작된 저녁 날짜' 를 키로 쓴다
+if [ "$KH" -lt 8 ]; then
+    KD=$(TZ=Asia/Seoul date -d yesterday +%F)
+else
+    KD=$(TZ=Asia/Seoul date +%F)
+fi
 STAMP=$BASE/sim_data/daily_update.stamp
 if [ "$(cat "$STAMP" 2>/dev/null)" != "$KD" ]; then
     echo "$(TZ=Asia/Seoul date '+%F %T KST') 실데이터 일일 갱신 시작" \
