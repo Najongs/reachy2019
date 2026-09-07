@@ -395,8 +395,11 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             scored = [(base_rank, base, 'current', dict(current))]
             for name, cand in pool:
                 c = evaluate(cand, tasks, natural_min)
-                # 문지기: 충돌은 기준보다 늘 수 없다 (안전 후퇴 금지).
-                if c['collision'] > base['collision']:
+                # 문지기: 충돌 급증 금지. +1 까지는 탐색 허용 - 절대
+                # 불허면 충돌 '근처' 의 해(낮은 물체 파지)를 영영 못
+                # 배운다 (충돌 과회피, 사용자 지적). 순위에서 충돌이
+                # 첫 키라 결국 줄이는 방향으로 수렴한다.
+                if c['collision'] > base['collision'] + 1:
                     continue
                 scored.append((rank(c), c, name, cand))
                 if rank(c) > best[0]:

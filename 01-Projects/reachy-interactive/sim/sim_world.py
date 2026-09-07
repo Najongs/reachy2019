@@ -392,13 +392,20 @@ class World(object):
         b = self.data.geom_xpos[gf]
         return tuple(float((a[i] + b[i]) / 2) for i in range(3))
 
-    def clearance_of(self, name):
-        """팔 전체와 이 물체 하나 사이 최소 표면거리(cm)."""
+    def clearance_of(self, name, exclude_jaws=False):
+        """팔 전체와 이 물체 하나 사이 최소 표면거리(cm).
+
+        exclude_jaws: 조/손바닥 제외 - 파지 하강 때 조 끝이 테이블에
+        접근하는 건 올바른 동작이라, 테이블 가드가 이를 재면 낮은 물체
+        (책 등)는 구조적으로 접근 불가가 된다 (충돌 과회피의 뿌리)."""
         mj = self.mujoco
         oids = self._parts.get(name) or [self._gid[name]]
+        skip = {'right_arm_jaw_moving', 'right_arm_jaw_fixed',
+                'right_arm_palm'} if exclude_jaws else set()
         return min(mj.mj_geomDistance(self.model, self.data, gid, oid, 1.0,
                                       None)
-                   for gid, _ in self._arm_gids for oid in oids) * 100
+                   for gid, gn in self._arm_gids if gn not in skip
+                   for oid in oids) * 100
 
     def clearance(self, ignore=()):
         """팔 전체와 (충돌하는) 물체들 사이 최소 표면거리(cm), 부위쌍.

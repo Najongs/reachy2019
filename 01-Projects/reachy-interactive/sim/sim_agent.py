@@ -368,7 +368,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
            stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
            table_min=None, target_name=None, ignore_objs=(), target_stop=None,
            on_step=None, step_cap=None, carried=False, ret=False,
-           stall_slack=3.0):
+           stall_slack=3.0, grasping=False):
     """화면 오차로 손을 target 까지. sim_servo 와 같은 방식, World 위에서."""
     import numpy as np
 
@@ -491,7 +491,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
         # 스텝을 줄여 보고 그래도 안 되면 버린다(실물은 상판 위로만 다닌다).
         saved = dict(world.pose)
         world.set_arm(trial)
-        tab = world.clearance_of('table')
+        tab = world.clearance_of('table', exclude_jaws=grasping)
         obj = world.clearance(ignore=('table',) + tuple(ignore_objs))[0]
         if obj_stop is not None and obj < obj_stop:
             world.set_arm(saved)
@@ -862,7 +862,10 @@ def _nudge_hand(world, dxyz, target_name=None, substeps=5, frames=None,
             return False
         saved = dict(world.pose)
         world.set_arm(pose)
-        if world.clearance_of('table') < 0.2:
+        # 조 제외 - 파지 정렬 중 조 끝이 테이블에 붙는 건 정상이다.
+        # (조 포함으로 재면 낮은 물체에서 모든 하위스텝이 되돌려져
+        # IK 가 무동작이 된다 - 정렬 잔차 6~17cm 의 주범.)
+        if world.clearance_of('table', exclude_jaws=True) < 0.15:
             world.set_arm(saved)
             return False
         if trace is not None:
@@ -884,7 +887,10 @@ def _level_pinch(world, target, frames=None, max_iter=12):
     def cost(delta):
         tilt, slot = world.ghost_eval(delta)
         drift = math.hypot(slot[0] - target[0], slot[1] - target[1])
-        return tilt + drift * 120.0, tilt
+        # 이동 벌점을 세게 - 120 이면 기울기 몇 도와 슬롯 10cm 후퇴를
+        # 맞바꿔, 만회 불가능한(도달 한계·금지영역) 자세를 고른다 (실측:
+        # book 슬롯 9.8cm 후퇴 -> IK 첫 스텝부터 거부).
+        return tilt + drift * 350.0, tilt
 
     cur = {j: world.pose.get(j, 0.0) for j in ORIENT_JOINTS}
     best_c, best_t = cost({})
@@ -934,8 +940,8 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
     _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
     pre = (cup[0], cup[1], cup[2] + half + 0.075)
     _servo(world, pre, 5.0, obj_stop=1.5, steps=25, target_stop=-0.5,
-           frames=frames, note='pre-top', trace=trace, target_name=bind,
-           seed=1)
+           grasping=True, frames=frames, note='pre-top', trace=trace,
+           target_name=bind, seed=1)
     _level_pinch(world, cup, frames=frames)   # 파지 자세: 집게면 수평화
     if bind is None:
         # 브로커 경로: 접지 추정은 몇 cm 틀릴 수 있다 - 가까이서 다시
@@ -964,13 +970,13 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
         _servo(world, (pt[0] + off[0], pt[1] + off[1],
                        pt[2] + half * 0.4 + off[2]), 1.2, steps=30,
                obj_stop=1.0, ignore_objs=(bind,), target_stop=-0.5,
-               step_cap=2.5, stall_slack=0.6, frames=frames, note='descend',
-               trace=trace, target_name=bind, seed=2)
+               step_cap=2.5, stall_slack=0.6, grasping=True, frames=frames,
+               note='descend', trace=trace, target_name=bind, seed=2)
 
     def _aligned(pt):
         slot = world.grip_slot()
         return (math.hypot(slot[0] - pt[0], slot[1] - pt[1]) <= 0.014
-                and pt[2] + half - 0.01 <= slot[2] <= pt[2] + half + 0.05)
+                and pt[2] + half - 0.012 <= slot[2] <= pt[2] + half + 0.025)
 
     _descend(cup)
     # 슬롯 잔차를 IK 미세이동으로 소거 + 고전 파지 트릭: 목표를 고정 조
@@ -986,11 +992,12 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
     for _round in range(2):
         for _k in range(3):
             gx, gy = _slot_goal()
+            gz = cup[2] + half + 0.005      # 슬롯을 윗면 바로 위로 (실측 접촉대)
             slot = world.grip_slot()
-            ex, ey = gx - slot[0], gy - slot[1]
-            if math.hypot(ex, ey) <= 0.006:
+            ex, ey, ez = gx - slot[0], gy - slot[1], gz - slot[2]
+            if math.hypot(ex, ey) <= 0.006 and abs(ez) <= 0.012:
                 break
-            _nudge_hand(world, (ex, ey, 0.0), target_name=bind,
+            _nudge_hand(world, (ex, ey, ez), target_name=bind,
                         frames=frames, trace=trace, note='슬롯 교정')
         if world.pinch_tilt() <= 12.0:
             break
