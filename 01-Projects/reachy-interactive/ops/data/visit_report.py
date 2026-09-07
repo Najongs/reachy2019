@@ -22,12 +22,12 @@ import sys
 from collections import defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BASE = os.path.abspath(os.path.join(HERE, '..', '..', '..',
-                                    '04-Archives', 'person-dataset'))
-DEFAULT_DB = os.path.join(BASE, 'persons', 'persons.db')
-DEFAULT_LOGS = os.path.abspath(os.path.join(HERE, '..', '..', '..',
-                                            '04-Archives',
-                                            'conversation-logs', 'pi'))
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', '..')))
+import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
+BASE = para.PERSON_DATASET
+DEFAULT_DB = os.path.join(para.PERSONS, 'persons.db')
+DEFAULT_LOGS = para.PI_LOGS
 
 
 def load_turns(log_root):

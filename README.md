@@ -15,7 +15,10 @@ Pollen Robotics Reachy 2019 로봇을 **음성으로 대화하고, 카메라로 
 | **01-Projects/** | 진행 중인 작업 결과물. `reachy-interactive/` = 음성·비전·동작 시스템 전체 |
 | **02-Areas/** | 지속 운영 영역. `robot-ops/` = 배포·네트워크·부팅 등 운영 문서 |
 | **03-Resources/** | 참고 자료. Reachy 2019 원본 SDK, Luos 펌웨어, 3D 모델, 로봇 사진 |
-| **04-Archives/** | 비활성. 참고용 데모 소스(flyers·tictactoe), 대화 로그 |
+| **04-Archives/** | 비활성·축적 데이터. 대화 로그(`conversation-logs/`), 사람 데이터셋(`person-dataset/`), 시뮬 런 산출물(`sim-runs/`), 참고용 데모 소스(flyers·tictactoe) |
+
+데이터를 읽고 쓰는 코드는 경로를 직접 세지 않고 **`01-Projects/reachy-interactive/para.py`** 에서 얻는다
+(스크립트가 각자 `..` 개수로 루트를 세다 폴더 이동 후 깊이가 어긋나, 가짜 보관고 `01-Projects/04-Archives/` 에 데이터를 쓴 사고의 재발 방지).
 
 ## 빠른 시작
 

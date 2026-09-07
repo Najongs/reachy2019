@@ -27,9 +27,11 @@ import tempfile
 
 # 저장소 안(04-Archives/person-dataset)에 둔다. 대화 로그와 같은 성격이라
 # 같은 자리에 모이는 편이 찾기 쉽다. .gitignore 에 들어 있어 커밋에는 안 섞인다.
-DEFAULT_LOCAL = os.path.abspath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    '..', '..', '..', '04-Archives', 'person-dataset', 'persons'))
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
+DEFAULT_LOCAL = para.PERSONS
 REMOTE_DIR = 'reachy_logs/persons'
 # ssh 는 포트가 -p, scp 는 -P 다. 섞어 쓰면 scp 가 -p 를 "시각 보존"으로 읽어
 # 엉뚱하게 실패한다.

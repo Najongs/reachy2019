@@ -30,10 +30,12 @@ import sqlite3
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BASE = os.path.abspath(os.path.join(HERE, '..', '..', '..',
-                                    '04-Archives', 'person-dataset'))
-DEFAULT_DB = os.path.join(BASE, 'persons', 'persons.db')
-DEFAULT_ROOT = os.path.join(BASE, 'persons')
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', '..')))
+import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
+BASE = para.PERSON_DATASET
+DEFAULT_DB = os.path.join(para.PERSONS, 'persons.db')
+DEFAULT_ROOT = para.PERSONS
 VENV_PY = '/home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3'
 
 COCO_PERSON = 1        # torchvision COCO 라벨에서 'person'

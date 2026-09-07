@@ -110,12 +110,15 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
     import sim_pipeline as PL
     client = BrokerClient(url, token=token, session='sim-director')
     st = _load_state()
-    # 시작할 때 지난 런의 산출물을 날짜 archive 로 내린다 - sim_data 가
-    # 수백 개 폴더로 부풀지 않게 (한 번 764M/431개까지 갔다).
+    # 시작할 때 지난 런의 산출물을 저장소 보관고(04-Archives)로 내린다 -
+    # sim_data 가 수백 개 폴더로 부풀지 않게 (한 번 764M/431개까지 갔다).
+    # 보관 위치는 프로젝트 밖: 대화 로그·사람 데이터와 같은 성격 (사용자).
     try:
         import re, shutil
         data = os.path.join(HERE, '..', 'sim_data')
-        dst = os.path.join(data, 'archive',
+        sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
+        import para  # PARA 기준 경로
+        dst = os.path.join(para.SIM_RUNS,
                            'run-%s' % time.strftime('%Y%m%d'))
         for name in os.listdir(data):
             if name in ('archive', 'director.log', 'improve_10h.log'):

@@ -28,9 +28,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'robot'))
 
-CONFIG = os.path.join(HERE, '..', 'config')
-PI_LOGS = os.path.join(HERE, '..', '..', '..',
-                       '04-Archives', 'conversation-logs', 'pi')
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
+import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
+CONFIG = os.path.join(para.PROJECT, 'config')
+PI_LOGS = para.PI_LOGS
 
 
 def export(n_tasks=6, min_success=5, min_quality=70, natural_min=65):

@@ -28,10 +28,11 @@ import os
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# broker/ -> reachy-interactive/config and repo 04-Archives/conversation-logs
-CONFIG = os.path.normpath(os.path.join(HERE, '..', 'config'))
-DEFAULT_LOGS = os.path.normpath(
-    os.path.join(HERE, '..', '..', '..', '04-Archives', 'conversation-logs'))
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
+import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
+CONFIG = os.path.join(para.PROJECT, 'config')
+DEFAULT_LOGS = para.CONVERSATION_LOGS
 
 NOTES_PATH = os.path.join(CONFIG, 'quick_notes.json')
 PROPOSED_PATH = os.path.join(CONFIG, 'quick_notes.proposed.json')

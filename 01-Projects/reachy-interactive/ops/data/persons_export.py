@@ -22,12 +22,13 @@ import shutil
 import sqlite3
 import sys
 
-_BASE = os.path.abspath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    '..', '..', '..', '04-Archives', 'person-dataset'))
-DEFAULT_DB = os.path.join(_BASE, 'persons', 'persons.db')
-DEFAULT_ROOT = os.path.join(_BASE, 'persons')
-DEFAULT_OUT = os.path.join(_BASE, 'dataset')
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
+DEFAULT_DB = os.path.join(para.PERSONS, 'persons.db')
+DEFAULT_ROOT = para.PERSONS
+DEFAULT_OUT = para.PERSON_EXPORT
 
 
 def select(conn, args):

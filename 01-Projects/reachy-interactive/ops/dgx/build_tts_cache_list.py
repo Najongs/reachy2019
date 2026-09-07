@@ -24,11 +24,12 @@ import re
 import sys
 from collections import Counter
 
-DEFAULT_LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            '..', '..', '..', '04-Archives',
-                            'conversation-logs', 'pi')
-DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           '..', 'config', 'cached_lines.json')
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
+DEFAULT_LOGS = para.PI_LOGS
+DEFAULT_OUT = os.path.join(para.PROJECT, 'config', 'cached_lines.json')
 
 # 미리 합성해 둘 값이 없는 답변들.
 #   - 너무 길면 캐시가 커지기만 하고, 그렇게 긴 말이 똑같이 반복되지도 않는다.

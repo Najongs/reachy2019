@@ -25,9 +25,11 @@ import time
 
 TRANSCRIPT_DIR = os.path.expanduser(
     '~/.claude/projects/-home-kiro-ai-NAJY-reachy-2019-newcode')
-# repo-root/04-Archives/conversation-logs (broker/ 에서 세 단계 위)
-REPO_LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         '..', '..', '..', '04-Archives', 'conversation-logs')
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..')))
+import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
+REPO_LOGS = para.CONVERSATION_LOGS
 
 
 def _read_events(path):
