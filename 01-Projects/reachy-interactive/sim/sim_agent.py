@@ -748,6 +748,7 @@ GRIP_SHUT = 10.0
 # 관찰자용 사건 기록부. 에피소드 시작 때 비우고, 절차가 이상 징후를
 # 남기면 여기 쌓인다 - 개선 루프가 지적 원장으로 자동 승격한다.
 INCIDENTS = []
+GRASP_REPORT = {}       # 마지막 파지 시도의 계측 (원인 판정용)
 
 
 def _close_on(world, bind, half, frames=None, trace=None):
@@ -815,6 +816,10 @@ def _close_on(world, bind, half, frames=None, trace=None):
     if frames is not None:
         frames.append(_snap(world, '잡기 %s' % ('성공' if grabbed else '실패')))
     why = None if grabbed else ('감쌈 안 됨' if pinched else '맞물림 안 됨')
+    GRASP_REPORT.update(closed=g > GRIP_OPEN + 1.0, grabbed=grabbed,
+                        why=why,
+                        squeeze_cm=round(-min(0.0, world.jaw_clearance(bind)),
+                                         2))
     return grabbed, why
 
 
@@ -1025,6 +1030,11 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
             cup = _reaim(world, cup, frames=frames, note='재조준')
         _descend(cup)
     if not _aligned(cup):
+        slot = world.grip_slot()
+        GRASP_REPORT.update(closed=False, grabbed=False,
+                            align_cm=round(math.hypot(
+                                slot[0] - cup[0], slot[1] - cup[1]) * 100, 1),
+                            tilt_deg=round(world.pinch_tilt(), 0))
         if frames is not None:
             frames.append(_snap(world, '정렬 실패 - 닫지 않음'))
         return bind, half, False, world.object_pos(bind)

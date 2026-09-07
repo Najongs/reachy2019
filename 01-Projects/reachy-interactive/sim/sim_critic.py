@@ -232,6 +232,33 @@ def _parse_json(raw):
     return out if isinstance(out, dict) else None
 
 
+CAUSES = ('경로 충돌', '파지 시도 없음', '정렬 미달(닫힘 미발행)',
+          '맞물림 실패', '들기/운반 중 놓침', '품질 미달')
+
+
+def diagnose(q):
+    """이 에피소드가 '왜' 실패했는지 계측으로 판정한다.
+
+    평가의 일은 점수만이 아니라 원인이다 (사용자) - 방향 결정은 최다
+    원인을 겨냥해야 한다. 규칙은 파지 리포트(닫힘/맞물림/정렬)와 단계
+    판정을 잇는다.
+    """
+    if q.get('stage') == 'success':
+        return None
+    if q.get('stage') == 'collision':
+        return '경로 충돌'
+    g = q.get('grasp') or {}
+    if not g:
+        return '파지 시도 없음'
+    if not g.get('closed'):
+        return '정렬 미달(닫힘 미발행)'
+    if not g.get('grabbed'):
+        return '맞물림 실패'
+    if q.get('stage') == 'missed':
+        return '들기/운반 중 놓침'
+    return '품질 미달'
+
+
 CRITIQUE_PROMPT = """로봇 팔 동작 품질 비평가다. 이미지는 한 동작의 필름 스트립이다: 위쪽 절반 = 로봇 눈 시점, 아래쪽 절반 = 제3자 시점 (같은 순간, 번호 1이 시작). 붉은 테두리 프레임은 그 순간 투과가 있었던 것. 눈 시점에서 대상이 안 보이는데 팔이 움직이는 구간이 있으면 반드시 지적하라.
 
 지시: {instruction}
@@ -240,7 +267,7 @@ CRITIQUE_PROMPT = """로봇 팔 동작 품질 비평가다. 이미지는 한 동
 전체 흐름을 보고 사람 눈에 자연스러운지 비평하라. 성공 여부는 판정하지 마라(그건 계측이 한다). 오직 '어떻게 움직였는가' 만.
 
 JSON 한 줄로만 답하라:
-{{"naturalness": 1~10, "rubric": {{"smooth": 1~10, "direct": 1~10, "posture": 1~10, "tempo": 1~10}}, "worst_frame": 번호, "issues": ["짧은 지적", ...], "advice": {{"파라미터": "up"|"down"}}}}
+{{"naturalness": 1~10, "rubric": {{"smooth": 1~10, "direct": 1~10, "posture": 1~10, "tempo": 1~10}}, "worst_frame": 번호, "failure_cause": "실패의 시각적 원인 한 구절 (성공이면 null)", "fix_hint": "그 원인을 고칠 구체적 힌트 한 문장", "issues": ["짧은 지적", ...], "advice": {{"파라미터": "up"|"down"}}}}
 
 rubric 뜻: smooth=급격한 방향전환·떨림 없음, direct=군더더기 없는 경로, posture=중간 자세가 사람 팔처럼 자연스러운가, tempo=속도가 일정한가. worst_frame=가장 어색한 프레임 번호.
 

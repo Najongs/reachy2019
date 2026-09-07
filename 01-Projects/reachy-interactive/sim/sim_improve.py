@@ -81,6 +81,7 @@ def episode(task, keep_frames=False, natural_min=55):
     frames = [] if keep_frames else None
     trace = []
     A.INCIDENTS.clear()
+    A.GRASP_REPORT.clear()
     try:
         planner = A.OraclePlanner()
         view = planner.perceive(world, task)
@@ -104,6 +105,8 @@ def episode(task, keep_frames=False, natural_min=55):
         q['final_cm'] = round(final_cm, 1)
         q['reached'] = reached
         q['incidents'] = list(A.INCIDENTS)
+        q['grasp'] = dict(A.GRASP_REPORT)
+        q['cause'] = C.diagnose(q)
         return stage, q, frames
     finally:
         world.close()
@@ -119,6 +122,9 @@ def evaluate(params, tasks, natural_min=55):
         counts[stage] += 1
         scores.append(q.get('score', 0))
         counts.setdefault('incidents', set()).update(q.get('incidents') or [])
+        if q.get('cause'):
+            cz = counts.setdefault('causes', {})
+            cz[q['cause']] = cz.get(q['cause'], 0) + 1
         # 거리는 '부족분' 만 센다. 도달했으면 0 - 도달한 것끼리 0.1cm 를
         # 다투게 두면 거리가 품질(자연스러움)을 영원히 눌러, 비평이
         # 짚어준 과신전·우회가 순위에 반영될 기회를 잃는다 (실제로 그랬다).
@@ -505,6 +511,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                 perfect_streak = 0
 
             history.append({'iter': it,
+                            'causes': report.get('causes'),
                             'counts': {k: base[k] for k in C.STAGES},
                             'quality': round(base['quality'], 1),
                             'exam': {k: report[k] for k in C.STAGES},
@@ -620,7 +627,12 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
           % (qs[0], qs[-1], best_ever['quality'], natural_min,
              len(history) - 1))
     last = history[-1]
+    cause_total = {}
+    for h2 in history:
+        for c2, n2 in (h2.get('causes') or {}).items():
+            cause_total[c2] = cause_total.get(c2, 0) + n2
     return {'checkpoint': out,
+            'causes': cause_total,
             'quality_first': qs[0], 'quality_last': qs[-1],
             'exam': last.get('exam'), 'natural_min': natural_min,
             'incidents': sorted(run_incidents),

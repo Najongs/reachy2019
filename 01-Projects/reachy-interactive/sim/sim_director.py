@@ -43,6 +43,10 @@ DIRECTOR_PROMPT = """로봇 학습 파이프라인의 감독이다. 방금 끝�
 ## 이번 사이클 증거
 {evidence}
 
+'실패원인 분포' 가 판단의 축이다: 방향은 최다 원인을 겨냥하라 -
+정렬 미달이면 서보/자세, 맞물림 실패면 조임/깊이, 놓침이면 마찰/속도,
+경로 충돌이면 경유/환경. 원인과 무관한 손잡이를 돌리지 마라.
+
 ## 지금 방향 (이전 결정)
 {direction}
 
@@ -165,6 +169,7 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
                 '학습': {k: summary.get(k) for k in
                          ('quality_first', 'quality_last', 'exam',
                           'natural_min', 'incidents', 'duels', 'picked')},
+                '실패원인 분포(이번 사이클)': summary.get('causes'),
                 '실전배치': batch_line,
                 '미결지적': {i: f['note'] for i, f in enumerate(fb)
                              if not f.get('done')},
