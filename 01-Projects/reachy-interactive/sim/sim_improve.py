@@ -252,7 +252,15 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             print('  태스크 생성 부족(%d) - 기존 유지' % len(ts), flush=True)
             return fallback
         if not ts:
-            raise RuntimeError('실현 가능한 태스크를 만들 수 없음')
+            # 포켓이 희소하면 굶어 죽지 말고 무필터로 훈련한다 - 판정이
+            # 정직하므로 어려운 태스크도 거리/기울기 신호를 준다.
+            raw = [t for t in T.generate(6, seed=seed * 977 + k, env=env)
+                   if t['kind'] in kinds][:n_tasks]
+            if raw:
+                print('[주의] 실현가능 태스크 없음 - 무필터 %d개로 훈련'
+                      % len(raw), flush=True)
+                return raw
+            raise RuntimeError('태스크 생성 실패')
         return ts
 
     env = T.clamp_env(env0) if env0 else dict(T.ENV_DEFAULT)

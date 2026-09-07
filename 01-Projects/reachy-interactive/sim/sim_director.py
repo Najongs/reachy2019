@@ -118,6 +118,15 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
         if deadline is None and cyc > (cycles or 1):
             break
         try:
+            # 원장 위생은 사이클 시작에 먼저 - 뒤가 예외로 죽어도 부풀지
+            # 않게 (실측: 태스크 생성 예외 7연속에 미결 26건까지 부풂).
+            fb0 = I.load_feedback()
+            open0 = [i for i, f in enumerate(fb0) if not f.get('done')]
+            for i in open0[:-12]:
+                fb0[i]['done'] = True
+                fb0[i]['note'] += ' [자동정리]'
+            if len(open0) > 12:
+                I.save_feedback(fb0)
             # 1) 짧은 학습
             summary = I.run(iters=CYCLE_ITERS, seed=seed * 1000 + cyc,
                             token=token, url=url,
