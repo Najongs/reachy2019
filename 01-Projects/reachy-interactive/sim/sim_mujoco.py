@@ -228,7 +228,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
            'shininess=".4"/>',
            # 메시를 쓰면 충돌용 캡슐은 안 보이게 한다 (둘 다 그리면 겹쳐 보인다)
            '    <material name="hidden" rgba="0 0 0 0"/>',
-           '    <material name="grip" rgba=".72 .73 .78 1" specular=".45"/>',
+           '    <material name="grip" rgba=".72 .73 .78 .35" specular=".45"/>',
            '    <material name="wood" rgba=".55 .42 .28 1"/>',
            '    <material name="cup"  rgba=".85 .35 .20 1" specular=".4"/>',
            '    <material name="tray" rgba=".25 .55 .35 1"/>'] + obj_mats
