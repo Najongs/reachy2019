@@ -1298,8 +1298,28 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
     # 는 아무것도 알아채지 못한다. ops/pi/pi_watchdog.sh 가 이 줄이 끊기면
     # 서비스를 다시 올린다.
     heartbeat_at = 0.0
+    motor_probe_at = 0.0
     turns = 0
     while True:
+        # 모터 자동 복구: 연결은 시작 때 한 번뿐이라, 꺼진 채 부팅되면
+        # 나중에 전원을 켜도 재시작 전까지 영영 '소리만' 모드였다.
+        # 소리만 모드에서 90초마다 모터를 조용히 찔러 보고, 응답이 오면
+        # 스스로 내려간다 - systemd 가 즉시 되살리며 완전한 동작 모드로
+        # 부팅된다 (사람이 전원만 켜면 2분 안에 팔이 돌아온다).
+        if (reachy is None and args.motions and not args.no_robot
+                and time.time() - motor_probe_at >= 90.0):
+            motor_probe_at = time.time()
+            try:
+                from base_pose import connect as _probe_connect
+                _r = _probe_connect(io=args.io, with_head=True)
+                logger.info('모터 전원 감지 - 동작 모드로 재시작합니다')
+                try:
+                    speak('모터가 켜졌네요. 잠깐만요, 기지개 켜고 올게요.')
+                except Exception:
+                    pass
+                os._exit(0)
+            except Exception:
+                pass                      # 아직 꺼져 있음 - 조용히 계속
         if time.time() - heartbeat_at >= HEARTBEAT_EVERY:
             heartbeat_at = time.time()
             logger.info('심장박동: %s, 턴 %d건, 마지막 밝기 %s',
