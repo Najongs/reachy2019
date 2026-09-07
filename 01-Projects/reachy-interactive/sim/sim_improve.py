@@ -82,6 +82,7 @@ def episode(task, keep_frames=False, natural_min=55):
     trace = []
     A.INCIDENTS.clear()
     A.GRASP_REPORT.clear()
+    A.CONTACT_OK = False               # 예외로 새면 다음 에피소드가 오염된다
     try:
         planner = A.OraclePlanner()
         view = planner.perceive(world, task)
@@ -116,7 +117,7 @@ def evaluate(params, tasks, natural_min=55):
     """태스크 묶음 -> {'collision','unnatural','missed','success', 'quality'}."""
     A.BEHAVIOR.update(_clamp(params))
     counts = {k: 0 for k in C.STAGES}
-    scores, dists = [], []
+    scores, dists, aligns = [], [], []
     for t in tasks:
         stage, q, _ = episode(t, natural_min=natural_min)
         counts[stage] += 1
@@ -125,6 +126,11 @@ def evaluate(params, tasks, natural_min=55):
         if q.get('cause'):
             cz = counts.setdefault('causes', {})
             cz[q['cause']] = cz.get(q['cause'], 0) + 1
+        g = q.get('grasp') or {}
+        counts['grabbed'] = counts.get('grabbed', 0) + \
+            (1 if g.get('grabbed') else 0)
+        # 파지 시도조차 없으면(정렬 리포트 없음) 최악값으로 - 시도가 보상
+        aligns.append(g.get('align_cm', 30.0) if g else 30.0)
         # 거리는 '부족분' 만 센다. 도달했으면 0 - 도달한 것끼리 0.1cm 를
         # 다투게 두면 거리가 품질(자연스러움)을 영원히 눌러, 비평이
         # 짚어준 과신전·우회가 순위에 반영될 기회를 잃는다 (실제로 그랬다).
@@ -134,6 +140,7 @@ def evaluate(params, tasks, natural_min=55):
             dists.append(max(0.0, q.get('final_cm', 99.0) - 14.0))
     counts['quality'] = sum(scores) / max(len(scores), 1)
     counts['miss_cm'] = sum(dists) / max(len(dists), 1)
+    counts['grasp_cm'] = sum(aligns) / max(len(aligns), 1)
     return counts
 
 
@@ -258,23 +265,18 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             print('  태스크 생성 부족(%d) - 기존 유지' % len(ts), flush=True)
             return fallback
         if not ts:
-            # 포켓이 희소하면 굶어 죽지 말고 무필터로 훈련한다 - 판정이
-            # 정직하므로 어려운 태스크도 거리/기울기 신호를 준다.
-            # 여러 배치에서 모아 n_tasks 를 채운다 (1개짜리 훈련셋은
-            # 신호가 너무 얇다 - 시험 0/1 로 밤새 정체한 원인).
-            raw = []
-            for extra in range(10):
-                for t in T.generate(6, seed=seed * 977 + k + extra * 17,
-                                    env=env):
-                    if t['kind'] in kinds:
-                        raw.append(t)
-                if len(raw) >= n_tasks:
-                    break
-            raw = raw[:n_tasks]
-            if raw:
-                print('[주의] 실현가능 태스크 없음 - 무필터 %d개로 훈련'
-                      % len(raw), flush=True)
-                return raw
+            # 포켓이 희소하면 굶어 죽지 말고 스위트스팟 커리큘럼으로 -
+            # 무작위 어려운 태스크(성공 0, 신호=거리뿐)보다 잡기 좋은
+            # 자리의 쉬운 태스크가 파지 신호(맞물림/정렬)를 흘린다.
+            sweet = T.generate_sweet(n_tasks, seed=seed * 977 + k,
+                                     kinds=kinds, env=env)
+            filt = [t for t in sweet if T.feasible(t)]
+            use = filt if len(filt) >= max(2, n_tasks // 2) else sweet
+            if use:
+                print('[주의] 실현가능 태스크 없음 - 스위트스팟 %d개'
+                      '(사전검증 %d)로 훈련' % (len(use), len(filt)),
+                      flush=True)
+                return use
             raise RuntimeError('태스크 생성 실패')
         return ts
 
@@ -298,7 +300,11 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     run_incidents = set()
 
     def rank(counts):
-        """충돌 적게 > 성공 많이 > 목표에 가깝게 > 품질 높게.
+        """충돌 적게 > 성공 > 맞물림 > 가깝게 > 정렬 잔차 > 품질.
+
+        성공이 0 인 밤에도 기울기가 서게, 파지 계측(맞물림 수·슬롯
+        정렬 잔차)을 성공과 거리 사이의 신호로 승격했다 (실패원인
+        분포 최다가 맞물림/정렬이라서).
 
         거리는 **부족분**(도달 못한 만큼)이다. 도달하면 0 이라 전원
         성공이면 거리 동률 -> 품질이 결정한다. 실패 중에는 '더 가까이'
@@ -306,7 +312,10 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         품질(비평이 짚는 과신전·우회)이 영원히 발언권을 잃는다.
         """
         return (-counts['collision'], counts['success'],
-                -round(counts.get('miss_cm', 99.0), 1), counts['quality'])
+                counts.get('grabbed', 0),
+                -round(counts.get('miss_cm', 99.0), 1),
+                -round(counts.get('grasp_cm', 30.0), 1),
+                counts['quality'])
 
     base = evaluate(current, tasks, natural_min)
     report = evaluate(current, exam, natural_min)

@@ -350,10 +350,14 @@ def _trace_entry(world, watch=None, target=None, carried=False, ret=False):
          'hand': tuple(round(v, 4) for v in world.hand()),
          'joints': {j: round(world.pose.get(j, 0.0), 2)
                     for j in sv.SERVO_JOINTS}}
-    if target and not carried:
-        # carried(운반 중)면 재지 않는다: 잡힌 물체는 손에 붙어 있어
-        # 팔-대상 겹침이 파지 그 자체다. 잡기 깊이는 하강 구간이 남긴다.
-        e['tgt'] = world.clearance_of(target)
+    if target and not carried and not CONTACT_OK:
+        # carried(운반 중)·CONTACT_OK(탐침~닫기)면 재지 않는다: 잡힌
+        # 물체는 손에 붙어 있고, 조임·탐침 접촉은 파지 그 자체다 (사용자:
+        # 집으면서 나는 충돌은 괜찮다). 접근·하강 중 들이받기만 잡는다.
+        # 조는 뺀다: 하강·호핑에서 조가 물체 옆면을 스치며 감싸는 건
+        # 파지의 일부다 (조-물체는 파지 판정·밀어냄·과조임이 감시).
+        # 여기 남는 건 손목/팔뚝으로 들이받기.
+        e['tgt'] = world.clearance_of(target, exclude_jaws=True)
     if ret:
         e['ret'] = 1        # 복귀 구간: 품질(효율 등)에선 빼고 충돌 검사엔 넣는다
     if watch is not None:
@@ -749,6 +753,7 @@ GRIP_SHUT = 10.0
 # 남기면 여기 쌓인다 - 개선 루프가 지적 원장으로 자동 승격한다.
 INCIDENTS = []
 GRASP_REPORT = {}       # 마지막 파지 시도의 계측 (원인 판정용)
+CONTACT_OK = False      # 의도된 접촉 구간(탐침~닫기) - 대상 관통 검사 면제
 
 
 def _close_on(world, bind, half, frames=None, trace=None):
@@ -919,6 +924,30 @@ def _level_pinch(world, target, frames=None, max_iter=12):
     return world.pinch_tilt()
 
 
+def _probe_band(world, bind, frames=None, trace=None, max_steps=4):
+    """닫기 전 접촉대 탐침: 조 틈이 물체를 실제로 감쌀 때까지 미세 하강.
+
+    정렬 게이트는 xy·z 창만 보는데, z 창 상단에서 닫으면 조 끝이 물체
+    윗면을 스치기만 한다 (맞물림 실패의 한 갈래). 조-물체 틈이 좁아질
+    때까지 0.6cm 씩 내려가 접촉대 안에서 닫게 한다.
+    """
+    for _ in range(max_steps):
+        gap = world.jaw_clearance(bind)     # cm 단위다 (m 아님!)
+        if gap <= 0.6:
+            break                           # 접촉대 도달
+        before = world.grip_slot()[2]
+        _nudge_hand(world, (0.0, 0.0, -0.006), target_name=bind,
+                    frames=frames, trace=trace, note='접촉대 탐침')
+        if world.jaw_clearance(bind) < -0.2:
+            # 지나쳤다 - 한 스텝 되올리고 끝 (관통 충돌 방지)
+            _nudge_hand(world, (0.0, 0.0, 0.006), target_name=bind,
+                        frames=frames, trace=trace, note='탐침 되올림')
+            break
+        if abs(world.grip_slot()[2] - before) < 0.001:
+            break                           # 가드/한계로 더 못 내려감
+    GRASP_REPORT['probe_gap_cm'] = round(world.jaw_clearance(bind), 2)
+
+
 def _grasp(world, obj=None, point=None, frames=None, trace=None):
     """접근 -> 재조준 -> 저속 접촉 잡기. (bind, half, 성공여부) 반환.
 
@@ -983,6 +1012,11 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
         return (math.hypot(slot[0] - pt[0], slot[1] - pt[1]) <= 0.014
                 and pt[2] + half - 0.012 <= slot[2] <= pt[2] + half + 0.025)
 
+    # 하강부터는 의도된 접촉 구간이다: 짧은 조로 깊게 감싸는 자세에서
+    # 손 캡슐·손바닥이 물체 윗면에 ~1cm 겹치는 건 기하학적 필연 (실측
+    # -1.0~-1.9cm 로 전부 '대상 관통' 오판). 이송·복귀 들이받기는 그대로.
+    global CONTACT_OK
+    CONTACT_OK = True
     _descend(cup)
     # 슬롯 잔차를 IK 미세이동으로 소거 + 고전 파지 트릭: 목표를 고정 조
     # 쪽으로 0.8cm 치우친다 - 움직 조가 눌렀을 때 물체가 고정 조에
@@ -1037,11 +1071,51 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
                             tilt_deg=round(world.pinch_tilt(), 0))
         if frames is not None:
             frames.append(_snap(world, '정렬 실패 - 닫지 않음'))
+        CONTACT_OK = False
         return bind, half, False, world.object_pos(bind)
 
     orig = world.object_pos(bind)          # 원위치 (되돌려 놓기용)
-    grabbed, why = _close_on(world, bind, half, frames=frames, trace=trace)
+    slot = world.grip_slot()
+    GRASP_REPORT.update(align_cm=round(math.hypot(
+        slot[0] - cup[0], slot[1] - cup[1]) * 100, 1),
+        tilt_deg=round(world.pinch_tilt(), 0))
+    try:
+        grabbed, why = _grasp_contact(world, bind, half, cup,
+                                      _aligned, frames=frames, trace=trace)
+    finally:
+        CONTACT_OK = False
     return bind, half, grabbed, orig
+
+
+def _grasp_contact(world, bind, half, cup, _aligned,
+                   frames=None, trace=None):
+    """의도된 접촉 구간: 탐침 -> 닫기 -> (실패 시) 재파지 1회."""
+    _probe_band(world, bind, frames=frames, trace=trace)
+    grabbed, why = _close_on(world, bind, half, frames=frames, trace=trace)
+    if not grabbed and why == '맞물림 안 됨':
+        # 재파지 1회: 정렬은 맞았는데 맞물림만 실패 - 다시 벌리고 새
+        # 물체 위치로 재정렬해 탐침부터 다시. (한 번만 - 시간 예산)
+        _set_gripper(world, GRIP_OPEN, frames, '재파지 - 다시 벌림')
+        cup = world.object_pos(bind)
+        for _k in range(2):
+            # 목표는 '지금' 물체 위치 + 고정 조 쪽 0.8cm 치우침
+            mjm = world._gid['right_arm_jaw_moving']
+            mjf = world._gid['right_arm_jaw_fixed']
+            d = world.data.geom_xpos[mjf] - world.data.geom_xpos[mjm]
+            n = math.hypot(float(d[0]), float(d[1])) or 1.0
+            gx = cup[0] + 0.008 * float(d[0]) / n
+            gy = cup[1] + 0.008 * float(d[1]) / n
+            slot = world.grip_slot()
+            _nudge_hand(world, (gx - slot[0], gy - slot[1],
+                                cup[2] + half + 0.005 - slot[2]),
+                        target_name=bind, frames=frames, trace=trace,
+                        note='재파지 정렬')
+        if _aligned(world.object_pos(bind)):
+            _probe_band(world, bind, frames=frames, trace=trace)
+            grabbed, why = _close_on(world, bind, half,
+                                     frames=frames, trace=trace)
+            GRASP_REPORT['regrasp'] = True
+    return grabbed, why
 
 
 def _drop_anim(world, bind, to_pos, frames=None, steps=3):

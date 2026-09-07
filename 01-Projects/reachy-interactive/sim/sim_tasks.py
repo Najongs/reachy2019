@@ -220,6 +220,53 @@ def generate(n=8, seed=0, env=None):
     return tasks
 
 
+# 팔 바로 앞의 '잡기 좋은 창' - 커리큘럼용 (실측 슬롯 잔차가 작던 영역)
+SWEET_X = (0.28, 0.33)
+SWEET_Y = (-0.20, -0.06)
+
+
+def generate_sweet(n, seed=0, kinds=('pick', 'lift'), env=None):
+    """스위트스팟 커리큘럼: 팔의 실현가능 포켓 안 쉬운 태스크들.
+
+    실현가능 필터가 빈손일 때 무작위 어려운 태스크로 훈련하면 성공 0 에
+    신호가 부족분 거리뿐이다. 잡기 좋은 자리·중간 원통·기본 높이로 성공
+    밀도를 올려 파지 신호(맞물림/정렬)가 흐르게 한다. 판정은 그대로.
+    """
+    rng = _rng(seed)
+    tasks = []
+    easy_kinds = ['can', 'cup', 'bottle']       # 원통 - 수평 집게에 유리
+    kinds = list(kinds) or ['pick', 'lift']
+    for i in range(n):
+        kind = kinds[i % len(kinds)]
+        okind = easy_kinds[i % len(easy_kinds)]
+        tt = world.TABLE_TOP                    # 기본 높이 (턱 변주 없음)
+        xy = (round(rng.uniform(*SWEET_X), 3),
+              round(rng.uniform(*SWEET_Y), 3))
+        scene = [world.make_object('%s0' % okind, okind, xy, table_top=tt)]
+        dest = None
+        if kind == 'pick':
+            dest = 'tray0'                      # 쟁반이 바구니보다 쉬움
+            scene.append(world.make_object(dest, 'tray', TRAY_XY,
+                                           table_top=tt))
+        tko = KO.get(okind, '물건')
+        instr = ('%s 을(를) 집어서 왼쪽 쟁반에 놓아 줘.' % tko
+                 if kind == 'pick' else
+                 '%s 을(를) 잡아서 들어 올려 봐.' % tko)
+        tasks.append({
+            'id': 'sweet%02d_%s' % (i, kind),
+            'table_top': tt,
+            'light': [0.3, 0.0, 1.6],
+            'kind': kind,
+            'instruction': instr,
+            'target': scene[0]['name'],
+            'tray': dest,
+            'scene': [{'name': o['name'], 'kind': o['kind'],
+                       'xy': [round(o['pos'][0], 3), round(o['pos'][1], 3)]}
+                      for o in scene],
+        })
+    return tasks
+
+
 def feasible(task, quick_steps=25):
     """이 태스크에 '안전한 해가 존재하는가' 를 오라클 서보로 빠르게 확인.
 
