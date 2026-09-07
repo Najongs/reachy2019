@@ -111,6 +111,14 @@ echo "── 미리 합성할 답변 목록 갱신 (자주 나온 답변)"
 python3 ops/build_tts_cache_list.py --write | tail -3
 
 echo
+echo "── 실수요 흡수 (대화 로그 -> 시뮬 태스크 수요, config/real_commands.json)"
+if [ -x "$VENV_PY" ]; then
+  "$VENV_PY" sim/sim_bridge.py --absorb 2>&1 | tail -3 || echo "   ! 흡수 실패 (계속 진행)"
+else
+  python3 sim/sim_bridge.py --absorb 2>&1 | tail -3 || echo "   ! 흡수 실패 (계속 진행)"
+fi
+
+echo
 echo "── 완료. 다음 단계:"
 echo "   • 제안 검토: config/quick_notes.proposed.json"
 echo "   • 반영: build_notes.py --merge  또는  quick_notes.json 직접 편집"

@@ -16,6 +16,18 @@ if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
     exit 0                                  # 이미 돌고 있음
 fi
 PY=/home/kiro-ai/NAJY/trossen-ai-simulation/.venv/bin/python3
+# 학습 전에 그날의 실데이터(대화 로그 + 사람 사진)부터 - 하루 한 번.
+# 사용자 결정: 업데이트에는 텍스트 대화와 사람 데이터 갱신이 동행한다.
+KD=$(TZ=Asia/Seoul date +%F)
+STAMP=$BASE/sim_data/daily_update.stamp
+if [ "$(cat "$STAMP" 2>/dev/null)" != "$KD" ]; then
+    echo "$(TZ=Asia/Seoul date '+%F %T KST') 실데이터 일일 갱신 시작" \
+        >> sim_data/night_schedule.log
+    timeout 3000 bash ops/daily_update.sh >> sim_data/daily_update.log 2>&1 \
+        && echo "$KD" > "$STAMP" \
+        || echo "$(TZ=Asia/Seoul date '+%F %T KST') 일일 갱신 실패 - 내일 재시도" \
+            >> sim_data/night_schedule.log
+fi
 setsid nohup "$PY" sim/sim_director.py --hours 11.5 --token reachy2019 \
     --seed "$(date +%j)" > sim_data/director.log 2>&1 < /dev/null &
 echo $! > "$PIDF"
