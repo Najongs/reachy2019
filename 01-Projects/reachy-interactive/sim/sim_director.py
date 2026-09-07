@@ -106,6 +106,21 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
     import sim_pipeline as PL
     client = BrokerClient(url, token=token, session='sim-director')
     st = _load_state()
+    # 시작할 때 지난 런의 산출물을 날짜 archive 로 내린다 - sim_data 가
+    # 수백 개 폴더로 부풀지 않게 (한 번 764M/431개까지 갔다).
+    try:
+        import re, shutil
+        data = os.path.join(HERE, '..', 'sim_data')
+        dst = os.path.join(data, 'archive',
+                           'run-%s' % time.strftime('%Y%m%d'))
+        for name in os.listdir(data):
+            if name in ('archive', 'director.log', 'improve_10h.log'):
+                continue
+            if re.match(r'(improve-|\d{8}-)', name):
+                os.makedirs(dst, exist_ok=True)
+                shutil.move(os.path.join(data, name), dst)
+    except Exception as e:
+        print('[정리 건너뜀] %s' % e, flush=True)
     deadline = time.time() + hours * 3600 if hours else None
     cyc = 0
     print('감독 루프: %s (사이클=학습 %d회 + 배치 + 방향 결정)'
