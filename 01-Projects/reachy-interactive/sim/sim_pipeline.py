@@ -165,6 +165,14 @@ def run_batch(n=6, kinds=('look', 'reach', 'pick'), planner_name='oracle',
     print('run %s | 계획자 %s | 태스크 %d개 생성(실현가능성 필터)...'
           % (run_id, planner_name, n))
     tasks = T.generate_feasible(n, seed=seed, kinds=kinds)
+    if not tasks:
+        # 포켓 희소기: 배치가 0건으로 헛도는 것보다 무필터가 낫다 -
+        # 판정은 정직하고, 브로커 대조 데이터가 계속 쌓여야 한다.
+        tasks = [t for t in T.generate(3 * n, seed=seed)
+                 if t['kind'] in kinds][:n]
+        if tasks:
+            print('[주의] 실현가능 없음 - 무필터 %d개 배치' % len(tasks),
+                  flush=True)
 
     answer_client = None
     if planner_name == 'broker':
