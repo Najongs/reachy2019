@@ -20,7 +20,7 @@ Pi 는 armv7l / Raspbian Buster - 파이썬·패키지 오래됨을 전제.
 | reachy-broker | systemd --user | 브로커 :8080 (/reply /motion /vision) |
 | ollama | 시스템 | EXAONE 3.5 (GPU0) |
 | broker_watchdog | cron (~/reachy-ops/ 심 → ops/dgx/broker_watchdog.sh) | /health 감시 |
-| sim_improve.py | 수동 (nohup setsid) | 장기 개선 루프 (GPU0 EGL) |
+| sim_director.py | **cron 야간 전용** (20:10~07:55 KST) | 시뮬 학습 감독 - 실물과 같은 opus CLI 를 쓰므로 로봇 수면시간에만 돈다 |
 | daily_update.sh | cron | 로그 수집·리포트 |
 
 ## 규칙
