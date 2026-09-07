@@ -330,7 +330,11 @@ class PresenceWatcher(object):
                     body = False
                     if self.detect_person is None:
                         body = res is not None      # 검출기가 없으면 얼굴만 믿는다
-                    elif now - self._net_at > PERSON_NET_INTERVAL:
+                    elif (res is not None
+                          or now - self._net_at > PERSON_NET_INTERVAL):
+                        # 얼굴(값싼 Haar)이 보이면 무거운 SSD 확인을 간격
+                        # 기다리지 않고 바로 - 인지되는 즉시 찍기 위해서다
+                        # (사용자). 얼굴 오검(문틀)이어도 SSD 가 걸러 준다.
                         self._net_at = now
                         try:
                             got = self.detect_person(frame)
@@ -372,7 +376,8 @@ class PresenceWatcher(object):
                         if self.on_person is not None:
                             try:
                                 self.on_person(frame, self.face_box_rel,
-                                               self.person_box, self.person_conf)
+                                               self.person_box, self.person_conf,
+                                               self._still)
                             except Exception:
                                 logger.debug('on_person failed', exc_info=True)
                     else:

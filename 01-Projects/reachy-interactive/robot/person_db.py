@@ -87,6 +87,7 @@ class PersonDB(object):
 
         self._visit_id = None
         self._visit_count = 0
+        self._visit_face_count = 0
         self._last_shot = 0.0
         self._visit_auto = False   # 이 방문을 스스로 열었는지(복도가 연 것과 구분)
         self._auto_seq = 0
@@ -127,6 +128,7 @@ class PersonDB(object):
         """새 방문 시작 (복도 그리터의 'appeared' 시점)."""
         self._visit_id = visit_id
         self._visit_count = 0
+        self._visit_face_count = 0
         self._last_shot = 0.0
         self._visit_auto = False
 
@@ -141,7 +143,8 @@ class PersonDB(object):
             except Exception:
                 logger.debug('interacted update failed', exc_info=True)
         self._visit_id = None
-        self._visit_count = 0        # 다음 방문을 위해 비워 둔다
+        self._visit_count = 0
+        self._visit_face_count = 0        # 다음 방문을 위해 비워 둔다
         self._visit_auto = False
 
     def _autostart_visit(self):
@@ -158,6 +161,7 @@ class PersonDB(object):
             self._auto_seq += 1
             self._visit_id = time.strftime('auto-%Y%m%d-%H%M%S-') + str(self._auto_seq)
             self._visit_count = 0
+            self._visit_face_count = 0
             self._visit_auto = True
 
     @property
@@ -169,8 +173,13 @@ class PersonDB(object):
         """
         return self._visit_id
 
-    def should_capture(self, faceless=False):
-        """지금 한 장 더 찍어도 되는지 (간격·장수·용량 제한)."""
+    def should_capture(self, faceless=False, frontal=False):
+        """지금 한 장 더 찍어도 되는지 (간격·장수·용량 제한).
+
+        frontal(정면 얼굴 있음)은 우대한다: 간격을 절반으로 줄이고, 방문
+        내내 얼굴 사진이 한 장도 없으면 장수 한도에서 한 장 여유를 준다 -
+        학습 데이터는 정면이 가장 값지다 (사용자).
+        """
         now = time.strftime('%Y-%m-%d')
         if now != self._day:                 # 날짜가 바뀌면 카운터 초기화
             self._day = now
@@ -178,9 +187,14 @@ class PersonDB(object):
             self.prune()
         if self._day_count >= self.daily_max:
             return False
-        if self._visit_count >= self.per_visit_max:
+        cap = self.per_visit_max
+        if frontal and self._visit_face_count == 0:
+            cap += 1                         # 정면 첫 장은 자리를 만들어 준다
+        if self._visit_count >= cap:
             return False
         gap = FACELESS_INTERVAL if faceless else self.visit_interval
+        if frontal:
+            gap = self.visit_interval * 0.5
         if time.time() - self._last_shot < gap:
             return False
         if self._free_mb() < self.min_free_mb:
@@ -191,7 +205,7 @@ class PersonDB(object):
     # -- 저장 -----------------------------------------------------------------
 
     def add(self, frame, face=None, sharpness=None, person=None,
-            person_conf=None):
+            person_conf=None, still=True):
         """프레임 한 장을 데이터셋에 넣는다. 저장했으면 행 id, 아니면 None.
 
         Args:
@@ -203,9 +217,17 @@ class PersonDB(object):
         """
         if frame is None:
             return None
+        if not still:
+            # 목이 도는 동안의 프레임은 통째로 흐른다 - 저장을 미루면 다음
+            # 폴링(1초 안쪽)에 정지 화면으로 다시 온다. 선명도 필터보다
+            # 싸게, 흔들림의 최대 원인을 원천에서 끊는다 (사용자: 클린).
+            logger.debug('목 회전 중 - 촬영 보류')
+            return None
         self._autostart_visit()
         # 얼굴이든 몸이든 검출기가 사람을 확인했으면 보통 간격(4초)으로 찍는다.
-        if not self.should_capture(faceless=(face is None and person is None)):
+        # 정면(얼굴 있음)은 간격·장수에서 우대한다.
+        if not self.should_capture(faceless=(face is None and person is None),
+                                   frontal=face is not None):
             return None
 
         import cv2
@@ -238,7 +260,7 @@ class PersonDB(object):
         ok = False
         try:
             ok = bool(cv2.imwrite(path, frame,
-                                  [int(cv2.IMWRITE_JPEG_QUALITY), 80]))
+                                  [int(cv2.IMWRITE_JPEG_QUALITY), 92]))
         except Exception:
             logger.debug('사진 저장 중 오류', exc_info=True)
         if not ok or not os.path.exists(path):
@@ -258,7 +280,7 @@ class PersonDB(object):
             if crop.size:
                 rel_face = os.path.join(day, stamp + '_face.jpg')
                 cv2.imwrite(os.path.join(self.root, rel_face), crop,
-                            [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 92])
 
         px = py = pw = ph = None
         if person is not None:
@@ -277,6 +299,8 @@ class PersonDB(object):
         self._conn.commit()
 
         self._visit_count += 1
+        if face is not None:
+            self._visit_face_count += 1
         self._day_count += 1
         self._last_shot = time.time()
         logger.info('사람 사진 저장 %s (방문 %s, %d/%d장)',

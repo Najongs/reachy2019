@@ -2030,7 +2030,8 @@ def main():
                             turn_logger.visit_of = (
                                 lambda _db=person_db: _db.visit_id)
 
-                        def _collect(frame, box_rel, person_rel=None, conf=None):
+                        def _collect(frame, box_rel, person_rel=None,
+                                     conf=None, still=True):
                             if frame is None:
                                 return
                             h, w = frame.shape[:2]
@@ -2046,7 +2047,7 @@ def main():
                                           (min(1.0, x2) - max(0.0, x1)) * w,
                                           (min(1.0, y2) - max(0.0, y1)) * h)
                             person_db.add(frame, face=face, person=person,
-                                          person_conf=conf)
+                                          person_conf=conf, still=still)
 
                         watcher.on_person = _collect
                         st = person_db.stats()
