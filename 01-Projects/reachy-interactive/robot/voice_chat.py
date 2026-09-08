@@ -1336,7 +1336,10 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                         else '없음')
         # Re-assert neck stiffness each loop: the Orbita disks can thermally
         # cut torque while holding the head, and go limp until re-gripped.
-        if reachy is not None and getattr(reachy, 'head', None) is not None:
+        # 자는 동안에는 건너뛴다 - 절전(토크 차단)을 매 바퀴 되살리면
+        # 모터 전력을 끊은 의미가 없다.
+        if (reachy is not None and getattr(reachy, 'head', None) is not None
+                and not (sleeper is not None and sleeper.asleep)):
             try:
                 reachy.head.compliant = False
             except Exception:
@@ -1364,6 +1367,18 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                         motion_handler.executor._settle_quietly()
                 except Exception:
                     logger.debug('자는 동안 팔 내리기 실패', exc_info=True)
+            if not was_asleep and reachy is not None:
+                # 절전: 팔을 내린 뒤 모든 모터 토크를 끊는다 (모터 전력
+                # 절약 - 사용자 지정). 깨면 목은 루프의 재강직이, 팔은
+                # hold_ready/idle 경로가 다시 힘을 준다.
+                try:
+                    for m in getattr(reachy, 'motors', []) or []:
+                        m.compliant = True
+                    if getattr(reachy, 'head', None) is not None:
+                        reachy.head.compliant = True
+                    logger.info('절전: 모터 토크 차단 (모든 모터 compliant)')
+                except Exception:
+                    logger.debug('모터 토크 차단 실패', exc_info=True)
         else:
             # Small random motions while waiting keep the robot looking alive:
             # the head glances/breathes and (with arms) the held pose breathes
@@ -1805,7 +1820,7 @@ def main():
                         help='이보다 밝으면 불이 켜진 것으로 본다 (0~1)')
     parser.add_argument('--sleep-after', type=float, default=180.0,
                         help='어둡고 사람도 없는 상태가 이만큼 이어지면 잠든다(초)')
-    parser.add_argument('--quiet-hours', default='20-8',
+    parser.add_argument('--quiet-hours', default='18-9',
                         help="사람이 없으면 밝기와 무관하게 자는 시간대 '시작-끝' "
                              "(기본 20-8 = 근무시간 8~20시 밖). 'off' 면 밝기만 "
                              '본다. 모터를 내려 두면 카메라도 없으므로 이때는 '

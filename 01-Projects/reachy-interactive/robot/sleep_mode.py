@@ -50,13 +50,14 @@ class SleepWatcher(object):
             자동차 불빛, 휴대폰 화면 따위로 깨지 않게)
         quiet_hours ((int, int)): (시작시, 끝시) 이 사이에는 사람이 안 보이면
             밝기와 무관하게 잔다. 카메라가 없을 때의 유일한 안전망이다.
-            None 이면 시간대 규칙을 쓰지 않는다. 기본 (20, 8) = 근무시간
-            아침 8시~저녁 8시 밖에는 사람이 없으면 잔다.
+            None 이면 시간대 규칙을 쓰지 않는다. 기본 (18, 9) = 근무시간
+            아침 9시~저녁 6시 밖에는 사람이 없으면 잔다 (사용자 지정
+            2026-09-08).
         watcher: None 이어도 된다 (카메라 없이 시간대만으로 판단)
     """
 
     def __init__(self, watcher, dark_below=0.15, light_above=0.25,
-                 quiet_for=180.0, wake_for=3.0, quiet_hours=(20, 8)):
+                 quiet_for=180.0, wake_for=3.0, quiet_hours=(18, 9)):
         self.watcher = watcher
         self.quiet_hours = quiet_hours
         self.dark_below = dark_below

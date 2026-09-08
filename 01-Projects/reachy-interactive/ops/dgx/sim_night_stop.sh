@@ -1,7 +1,7 @@
 #!/bin/bash
-# 야간 시뮬 종료 - 낮(08~20 KST)이면 내린다. 서버 타임존 무관.
+# 야간 시뮬 종료 - 낮(09~18 KST, 로봇 근무시간)이면 내린다. 서버 타임존 무관.
 KH=$(TZ=Asia/Seoul date +%H)
-if [ "$KH" -ge 20 ] || [ "$KH" -lt 8 ]; then
+if [ "$KH" -ge 18 ] || [ "$KH" -lt 9 ]; then
     exit 0                                  # 밤 - 계속 돌게 둔다
 fi
 BASE=/home/kiro-ai/NAJY/reachy-2019/01-Projects/reachy-interactive
