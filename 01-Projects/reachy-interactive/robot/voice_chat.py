@@ -74,6 +74,9 @@ VISION_WORDS = ('보여', '보이', '뭐가 있', '이게 뭐', '이거 뭐', '�
 # Motion routing: a body part must co-occur with an action verb, or a gesture
 # noun with a command-ish tail. "팔 아파" has the noun but no verb -> chat.
 BODY_WORDS = ('팔', '손', '고개', '안테나', '머리', '몸',
+              # 어깨가 빠져 있어서 "왼쪽 어깨를 돌려 줘" 가 잡담으로 새고,
+              # 대화 모델이 움직인 척 답했다 (실측 2026-09-08 아침).
+              '어깨', '팔꿈치', '손목', '허리',
               '물건', '이거', '저거', '그거', '컵', '공', '펜', '상자', '보관함', '트레이')
 # Single-syllable stems ('드','놓','숙','젖') matched inside ordinary words
 # (만드는/놓고 가요/몸살/젖었어) - only multi-syllable, verb-shaped stems now.
@@ -82,7 +85,10 @@ ACTION_STEMS = ('들어', '들고', '들어서', '올려', '올리', '내려', '
                 '집어', '집게', '놓아', '놓고', '옮겨', '건네', '넣어', '꺼내',
                 '굴려', '빙글', '잡아',
                 '펴', '뻗', '세워', '펼쳐', '펼', '휘둘', '휘저', '뻗쳐',
-                '틀어', '틀', '젖혀', '숙여', '까딱', '꺾')
+                '틀어', '틀', '젖혀', '숙여', '까딱', '꺾',
+                # 정렬 요청 ("어깨를 일직선으로/수평으로 맞춰") - 신체 단어와
+                # 함께일 때만 동작이 되므로 과잉 발동 위험이 낮다
+                '일직선', '수평', '정렬', '맞춰', '맞추', '반듯')
 # Phrases that LOOK like body+verb but are everyday hallway talk, never a
 # command to the robot ("먼저 들어가볼게요", "그거 드셨어요", "몸살 나서").
 NOT_MOTION = ('들어가', '들어오', '들어온', '들어간', '들어갈', '드셨', '드세요',
