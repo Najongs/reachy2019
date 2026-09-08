@@ -315,6 +315,18 @@ def validate(moves, seed_pose, available_joints, check_collision=True):
         if not pose:
             continue
 
+        # 중력 규칙 강제: 팔을 높이 들 때(shoulder_pitch -60 이하) 팔꿈치를
+        # 편 채(-45 이상)면 팔 무게에 걸려 목표에 못 미친다 - 실측: 아침
+        # 왼팔 동작에서 87도까지 지연(stall 경고 8건). 프롬프트가 이미
+        # 경고하지만 로컬 모델이 늘 지키지는 않으므로 여기서 굽혀 준다.
+        for side in ('right_arm', 'left_arm'):
+            sp = pose.get(side + '.shoulder_pitch')
+            if sp is not None and sp <= -60.0:
+                ej = side + '.elbow_pitch'
+                cur_e = pose.get(ej, current.get(ej, 0.0))
+                if cur_e > -45.0 and ej in available:
+                    pose[ej] = -70.0
+
         try:
             duration = float(frame.get('duration', 1.0))
         except (TypeError, ValueError):
