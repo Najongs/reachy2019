@@ -8,13 +8,29 @@
 | 1 | 사용자 명령 | `sim_tasks.generate` | look/point/reach/pick, 한국어 지시문 |
 | 2 | 환경 생성 | `sim_world` + `sim_tasks.feasible` | 템플릿 배치 + **실현가능성 필터** |
 | 3 | 답변 (ollama) | 브로커 `/reply` | "네, 컵으로 손을 가져갈게요" |
-| 4 | 동작 생성 (opus) | `sim_agent.BrokerPlanner` + `/vision` | 시각 접지 + 서보 |
+| 4 | 동작 생성 | `sim_agent.BrokerPlanner` + `/vision` | 시각 접지 + 서보 |
 | 5 | 피드백·개선 | `sim_critic` + `sim_improve` | 품질·비평·결투·파라미터 채택 |
 | 6 | 오케스트라 | `sim_orchestra` | **지표 감사**, 커리큘럼, 총평 |
 | 7 | 기록·문서 | `sim_record` | `sim_data/<run>/` + `docs/eval/<run>.md` |
 
 최상위 러너는 `sim_pipeline.run_batch`: 1→2→3→4→(5 재시도)→7 을 태스크마다
 돌리고 배치 끝에 6 을 한 번 부른다.
+
+## 모델 정렬 원칙 (사용자 결정 2026-09-08)
+
+**행동·답변 모델은 실전 로봇과 반드시 같은 것을 쓴다 - 평가만 opus.**
+시뮬의 모든 LLM 호출은 실전과 같은 브로커(8080)를 지나므로, 브로커의
+모델을 바꾸면 시뮬·실전이 함께 바뀐다 (따로 어긋날 수 없는 구조):
+
+| 경로 | 모델 | 쓰는 쪽 | 성격 |
+|---|---|---|---|
+| `/reply` | ollama exaone3.5:7.8b | 로봇 대화 = 시뮬 3(답변) | 행동 (동일해야 함) |
+| `/motion` | ollama qwen2.5:7b | 로봇 동작 JSON = 시뮬 sim_play/sim_train | 행동 (동일해야 함) |
+| `/vision` | opus | 로봇 시각접지 = 시뮬 4(접지) / 비평·결투·오케스트라·감독 | 접지는 행동(실전도 opus 라 동일), 나머지는 평가 |
+| (LLM 없음) | - | 시뮬 훈련 에피소드의 팔 궤적 (BEHAVIOR 서보 스택) | 행동 - 파라미터가 실전 이관 대상 |
+
+시각 접지를 ollama 로 옮기는 것은 드라이버 550+ 업그레이드 후에나 가능
+(현 ollama 0.3.14 는 비전 모델 미지원, 새 ollama 는 GPU 를 못 쓴다).
 
 ```bash
 python3 sim/sim_pipeline.py -n 6 --planner oracle          # harness 검증
