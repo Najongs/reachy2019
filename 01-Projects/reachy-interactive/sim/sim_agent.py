@@ -775,7 +775,10 @@ def _close_on(world, bind, half, frames=None, trace=None):
         # 맞물림 실패). 물리 정착 스텝이 미끄러짐을 처리한다.
         c = world.jaw_clearance(bind, jaw='moving')
         c_f = world.jaw_clearance(bind, jaw='fixed')
-        if c <= -0.05 and c_f <= 0.2:
+        # 사용자 관찰: 위치는 좋은데 살짝 무는 정도라 들 때 빠진다.
+        # 살짝 닿음(-0.05)이 아니라 -0.15 까지 압착 - 완화 한도(-0.30)
+        # 안이라 과조임 보호는 그대로다.
+        if c <= -0.15 and c_f <= 0.2:
             break
         if c <= -0.35:
             break                            # 한쪽만 깊이 파고듦 - 중단
