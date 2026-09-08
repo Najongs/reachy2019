@@ -54,7 +54,7 @@ NODE_TO_BODY = {
     'left_forearm_yaw_joint': 'left_arm_hand_forearm_yaw',
     'left_wrist_pitch_joint': 'left_arm_hand_wrist_pitch',
     'left_wrist_roll_joint': 'left_arm_hand_wrist_pitch',
-    'left_gripper_joint': 'left_arm_hand_wrist_pitch',
+    'left_gripper_joint': 'left_arm_hand_gripper',
     'left_ear_joint': 'left_antenna',
     'right_ear_joint': 'right_antenna',
     # 머리 전체(neck_joint 서브트리)는 목을 따라 도는 별도 바디다 -

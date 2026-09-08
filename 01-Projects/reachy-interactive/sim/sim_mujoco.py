@@ -318,15 +318,17 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
         seg = 0
         for i, (jname, trans, axis, lim) in enumerate(chain):
             pad = '    ' + '  ' * depth
-            if jname == 'right_arm.hand.gripper':
+            if jname.endswith('.hand.gripper'):
                 # 고정 조(반대편 손가락)는 손목에 붙어 있다 - 그리퍼 바디
-                # 밖(부모 스코프)에 거울상 충돌 상자로.
+                # 밖(부모 스코프)에 거울상 충돌 상자로. 왼손도 같은 모듈
+                # (2026-09-08 왼손 그리퍼 장착, 오프셋 동일 - 스톡 SDK 의
+                # 링크 이동도 좌우 동일하고 모터 방향만 반전).
                 ct0, ca0 = GROUP[side]
-                out.append('%s<geom name="right_arm_jaw_fixed" type="box" '
+                out.append('%s<geom name="%s_jaw_fixed" type="box" '
                            'material="grip" contype="%d" conaffinity="%d" '
                            'size="0.010 0.006 0.042" '
                            'pos="%.4f %.4f %.4f"/>'
-                           % (pad, ct0, ca0,
+                           % (pad, side, ct0, ca0,
                               trans[0], trans[1] + 0.023, trans[2] - 0.001))
             out.append('%s<body name="%s" pos="%.4f %.4f %.4f">'
                        % (pad, _body_name(jname), trans[0], trans[1], trans[2]))
@@ -336,16 +338,20 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
             # 순기구학만 쓰고 중력도 0 이라 값 자체는 무의미하다.
             out.append('%s<inertial pos="0 0 0" mass="0.05" '
                        'diaginertia="1e-4 1e-4 1e-4"/>' % pad)
-            if jname == 'right_arm.hand.gripper':
+            if jname.endswith('.hand.gripper'):
                 # 실물 그리퍼 축: viewer 의 'z' 는 glb 노드 로컬 z 인데,
                 # 휴식 자세에서 그 방향은 몸통 기준 x 다 (glb 실측:
                 # 로컬 z -> 월드 [1,0,0]). 음수=벌림, invert 규약 반영.
                 # 피벗은 glb 노드 원점 (바디 원점에서 y-2.7, z+3.5cm 실측).
                 # 부호 실측: -50 에서 조 간격이 최대(벌림)가 되는 방향.
                 # (-1,0,0) 은 반대였다 - 닫고 접근하는 그림이 나왔다.
-                out.append('%s<joint name="%s" axis="1 0 0" '
+                # 왼손은 모터 방향 반전(+50=벌림, 스톡 한계 거울) - 축도
+                # 반전해 같은 물리 그림을 만든다 (부호는 아래 검증 스크립트
+                # 로 실측 확인).
+                ax = '1 0 0' if side == 'right_arm' else '-1 0 0'
+                out.append('%s<joint name="%s" axis="%s" '
                            'pos="0 -0.027 0.035" range="%g %g"/>'
-                           % (pad, jname, lim[0], lim[1]))
+                           % (pad, jname, ax, lim[0], lim[1]))
             elif any(axis):                     # 회전축이 있으면 관절
                 out.append('%s<joint name="%s" axis="%d %d %d" range="%g %g"/>'
                            % (pad, jname, axis[0], axis[1], axis[2],
@@ -359,7 +365,7 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
             nxt = chain[i + 1][1] if i + 1 < len(chain) else None
             if nxt and any(abs(v) > 1e-6 for v in nxt):
                 r = RADII[order[min(seg, len(order) - 1)]]
-                if side == 'right_arm' and seg >= 2:
+                if seg >= 2:
                     # 손목->그리퍼 링크: 굵은 캡슐(4.1cm)이면 조보다 먼저
                     # 물체를 눌러 '잡힘' 이 난다 - 구조물 굵기로 슬림하게.
                     r = 0.020
@@ -373,28 +379,19 @@ def build_mjcf(use_mesh=True, keepout=True, scene=False, objects=None,
                 seg += 1
         pad = '    ' + '  ' * depth
         ct, ca = GROUP[side]
-        if side == 'right_arm':
-            # 실물 그리퍼: 움직이는 조는 그리퍼 바디(위 힌지)에 이미 메시로
-            # 붙는다. 충돌은 조 메시의 바운딩(중심 y-0.031, 반크기
-            # .010/.008/.045)을 상자로 근사하고, 고정 조는 손목 쪽 y+ 에
-            # 거울상으로 둔다. 손바닥은 작은 구.
-            out.append('%s<geom name="right_arm_palm" type="sphere" '
-                       'material="%s" contype="%d" conaffinity="%d" '
-                       'size="0.012"/>' % (pad, 'hidden' if mesh else mat,
-                                           ct, ca))
-            # 충돌 상자는 보이는 조 메시의 잡는 면과 일치해야 한다 -
-            # 어긋나면 '안 닿았는데 집히는' 그림이 된다 (사용자 발견:
-            # 옛 상자는 안쪽으로 0.8cm 튀어나와 있었다). 항상 보이게 해
-            # 닿는 곳과 보이는 곳을 같게 유지한다.
-            out.append('%s<geom name="right_arm_jaw_moving" type="box" '
-                       'material="grip" contype="%d" conaffinity="%d" '
-                       'size="0.010 0.006 0.042" pos="0 -0.020 -0.001"/>'
-                       % (pad, ct, ca))
-        else:
-            out.append('%s<geom name="%s_tip" type="sphere" material="%s" '
-                       'contype="%d" conaffinity="%d" size="%.4f"/>'
-                       % (pad, side, 'hidden' if mesh else mat, ct, ca,
-                          RADII['hand']))
+        # 실물 그리퍼(이제 양손): 움직이는 조는 그리퍼 바디(위 힌지)에
+        # 메시로 붙고, 충돌은 조 메시 바운딩 상자 근사. 고정 조는 손목
+        # 쪽 y+ 거울상, 손바닥은 작은 구. 충돌 상자는 보이는 조 메시의
+        # 잡는 면과 일치해야 한다 - 어긋나면 '안 닿았는데 집히는' 그림
+        # (사용자 발견: 옛 상자는 안쪽으로 0.8cm 튀어나와 있었다).
+        out.append('%s<geom name="%s_palm" type="sphere" '
+                   'material="%s" contype="%d" conaffinity="%d" '
+                   'size="0.012"/>' % (pad, side, 'hidden' if mesh else mat,
+                                       ct, ca))
+        out.append('%s<geom name="%s_jaw_moving" type="box" '
+                   'material="grip" contype="%d" conaffinity="%d" '
+                   'size="0.010 0.006 0.042" pos="0 -0.020 -0.001"/>'
+                   % (pad, side, ct, ca))
         while depth > 0:
             depth -= 1
             out.append('    ' + '  ' * depth + '</body>')
