@@ -48,7 +48,10 @@ LEFT_CHAIN = [
     ('left_arm.elbow_pitch', (0, 0, -0.28), (0, 1, 0), (-125, 0)),
     ('left_arm.hand.forearm_yaw', (0, 0, 0), (0, 0, 1), (-100, 100)),
     ('left_arm.hand.wrist_pitch', (0, 0, -0.25), (0, 1, 0), (-45, 45)),
-    # wrist_roll and gripper physically absent on the left arm.
+    # wrist_roll 은 여전히 없다. 그리퍼는 2026-09-08 왼손 모듈 교체로 생겼다.
+    # 실행 한계는 하드웨어([-20,69])보다 좁힌 [-10, 50] - 오른손이
+    # [-69,20]->[-50,10] 으로 좁혀 모터를 보호하는 것의 거울이다.
+    ('left_arm.hand.gripper', (0, -0.01, -0.1075), (0, 0, 0), (-10, 50)),
 ]
 
 CHAINS = {'right_arm': RIGHT_CHAIN, 'left_arm': LEFT_CHAIN}

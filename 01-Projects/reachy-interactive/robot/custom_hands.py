@@ -49,6 +49,33 @@ class RightForceGripperNoWristRoll(ForceGripper):
     ])
 
 
+class LeftForceGripperNoWristRoll(ForceGripper):
+    """왼손 그리퍼 (wrist_roll 없음). 2026-09-08 왼손 모듈 교체로 그리퍼 장착.
+
+    스톡 LeftForceGripper 에서 dxl_26(wrist_roll)만 뺐다. 사라진 링크
+    오프셋(-0.0325m)은 그리퍼 링크에 접어 넣어 기구학이 맞다.
+    한계 [-20, 69]: 오른손([-69, 20])의 거울 - 양수=벌림.
+    """
+
+    dxl_motors = OrderedDict([
+        ('forearm_yaw', {
+            'id': 24, 'offset': 0.0, 'orientation': 'indirect',
+            'angle-limits': [-100, 100],
+            'link-translation': [0, 0, 0], 'link-rotation': [0, 0, 1],
+        }),
+        ('wrist_pitch', {
+            'id': 25, 'offset': 0.0, 'orientation': 'indirect',
+            'angle-limits': [-45, 45],
+            'link-translation': [0, 0, -0.25], 'link-rotation': [0, 1, 0],
+        }),
+        ('gripper', {
+            'id': 27, 'offset': 0.0, 'orientation': 'direct',
+            'angle-limits': [-20, 69],
+            'link-translation': [0, -0.01, -0.1075], 'link-rotation': [0, 0, 0],
+        }),
+    ])
+
+
 class LeftWristPitchOnlyHand(Hand):
     """Left hand with just forearm_yaw + wrist_pitch.
 
@@ -86,5 +113,6 @@ def register_hands():
     """Make the custom hands usable as Arm(hand=...) names."""
     from reachy.parts import arm
 
-    arm.hands['gripper_no_wrist_roll'] = {'right': RightForceGripperNoWristRoll}
+    arm.hands['gripper_no_wrist_roll'] = {'right': RightForceGripperNoWristRoll,
+                                          'left': LeftForceGripperNoWristRoll}
     arm.hands['wrist_pitch_only'] = {'left': LeftWristPitchOnlyHand}

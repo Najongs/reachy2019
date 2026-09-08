@@ -123,27 +123,38 @@ def goto_base_pose(reachy, duration=4, wait=True, interpolation_mode='minjerk'):
 
 
 def connect(io='/dev/ttyUSB*', with_head=True,
-            right_hand='gripper_no_wrist_roll', left_hand='wrist_pitch_only'):
+            right_hand='gripper_no_wrist_roll',
+            left_hand='gripper_no_wrist_roll'):
     """Connect to Reachy with both arms and, optionally, the head.
 
-    Hands default to this robot's real hardware (probed 2026-09-02): both
-    wrist_roll motors are physically gone and the left gripper too, so the
-    stock 'force_gripper'/'empty_hand' classes fail at connection time. The
-    defaults use the custom classes from custom_hands.py instead.
+    실제 하드웨어 이력: 양쪽 wrist_roll 없음(2026-09-02 실측). 왼손은
+    2026-09-08 모듈 교체로 그리퍼가 생겨 기본이 그리퍼 손이다. 혹시
+    왼손 모듈이 옛 것(그리퍼 없음)으로 돌아오면 자동으로 구형 손으로
+    한 번 더 시도한다 - 손 하나 때문에 로봇 전체가 소리만 모드로
+    떨어지지 않게.
     """
     from reachy import Reachy, parts
 
     from custom_hands import register_hands
     register_hands()
 
-    kwargs = {
-        'right_arm': parts.RightArm(io=io, hand=right_hand),
-        'left_arm': parts.LeftArm(io=io, hand=left_hand),
-    }
-    if with_head:
-        kwargs['head'] = parts.Head(io=io)
+    def _build(lh):
+        kwargs = {
+            'right_arm': parts.RightArm(io=io, hand=right_hand),
+            'left_arm': parts.LeftArm(io=io, hand=lh),
+        }
+        if with_head:
+            kwargs['head'] = parts.Head(io=io)
+        return Reachy(**kwargs)
 
-    return Reachy(**kwargs)
+    try:
+        return _build(left_hand)
+    except Exception:
+        if left_hand == 'wrist_pitch_only':
+            raise
+        logging.getLogger(__name__).warning(
+            '왼손 그리퍼 연결 실패 - 구형 손(wrist_pitch_only)으로 재시도')
+        return _build('wrist_pitch_only')
 
 
 def main():
@@ -156,7 +167,7 @@ def main():
     parser.add_argument('--right-hand', default='gripper_no_wrist_roll', choices=hand_choices,
                         help="hand attached to the right arm (default matches this robot: "
                              "wrist_roll motor dxl_16 is missing)")
-    parser.add_argument('--left-hand', default='wrist_pitch_only', choices=hand_choices,
+    parser.add_argument('--left-hand', default='gripper_no_wrist_roll', choices=hand_choices,
                         help="hand attached to the left arm (default matches this robot: "
                              "wrist_roll dxl_26 and gripper dxl_27 are missing)")
     parser.add_argument('--duration', type=float, default=4, help='move duration (in seconds)')

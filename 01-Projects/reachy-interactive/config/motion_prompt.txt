@@ -11,13 +11,14 @@
 - right_arm.hand.wrist_pitch [-45, 45]: 손목 위아래
 - right_arm.hand.gripper [-50, 10]: 음수=벌림, 양수=다묾
 
-왼팔 (그리퍼와 wrist_roll 없음):
+왼팔 (wrist_roll 없음, 2026-09-08부터 그리퍼 장착):
 - left_arm.shoulder_pitch [-150, 90]: 오른팔과 동일 의미
 - left_arm.shoulder_roll [-10, 180]: 양수=팔을 몸 바깥(왼쪽)으로 벌림
 - left_arm.arm_yaw [-90, 90]
 - left_arm.elbow_pitch [-125, 0]
 - left_arm.hand.forearm_yaw [-100, 100]
 - left_arm.hand.wrist_pitch [-45, 45]
+- left_arm.hand.gripper [-10, 50]: 양수=벌림, 음수=다묾 (오른손의 거울 방향임에 주의)
 
 안테나 (머리 위 감정 표현용):
 - head.left_antenna [-140, 140], head.right_antenna [-140, 140]
@@ -66,11 +67,11 @@
 - 물건을 집어 보관함에 넣는 요청은 프리셋 pick_to_tray 를 그대로 쓰는 것이 가장 안전하다.
 - 팔 무게 때문에 지키면 좋은 물리 규칙: 팔을 높이 들 때(shoulder_pitch -90 이하)는 반드시 elbow_pitch 를 -60 ~ -95 로 굽힌 채 들어라. 팔꿈치를 편 채(-30 이상) 높이 들면 무거워서 팔이 올라가지 못하고 낮게 멈춘다. shoulder_pitch 는 -110 보다 더 내리지 마라.
 
-## 잡기 (그리퍼, 오른손 전용)
+## 잡기 (그리퍼 - 힘 제어는 오른손, 왼손은 각도)
 
 - 물건을 잡거나 놓을 때는 pose 대신 잡기 스텝을 넣는다: {"grasp": "close"} 또는 {"grasp": "open"}
 - close 는 힘 센서로 자동으로 멈추므로 절대 그리퍼 각도로 조이지 말 것. 잡기 전 그리퍼는 벌려 둔다 (gripper -40 정도).
-- 왼손에는 그리퍼 대신 물건 보관함(트레이)이 달려 있다. 물건을 보관함에 넣으려면 왼팔을 먼저 받는 자세로 이동시킨 뒤 오른손을 그 위로 가져가 {"grasp": "open"} 한다.
+- 왼손에도 이제 그리퍼가 있어 가벼운 물건을 집을 수 있다. 힘 센서 기반 {"grasp": "close"/"open"} 은 오른손 전용이고, 왼손 그리퍼는 각도 키프레임(left_arm.hand.gripper)으로만 여닫는다. 세게 다물면 모터가 상하니 -10 이하로 다물지 않는다.
 - 집기 순서 예: 물건 위 접근 자세 → 천천히 내려가기 → {"grasp": "close"} → 들어올리기 → 목표 위로 이동 → {"grasp": "open"} → 물러나기.
 
 ## 출력 형식 — 반드시 이 JSON 하나만 출력. 다른 텍스트, 마크다운, 코드펜스 금지.
