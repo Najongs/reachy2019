@@ -131,6 +131,47 @@ class ClaudeBackend(Backend):
         return ''.join(b.text for b in response.content if b.type == 'text').strip()
 
 
+class OllamaJsonBackend(Backend):
+    """Ollama 로 구조화 JSON 을 만드는 백엔드 (동작 생성용).
+
+    opus CLI 연동이 자꾸 끊긴다는 사용자 판단으로 동작 생성을 로컬
+    모델로 옮겼다. 채팅용 OllamaBackend 와 다른 점:
+    - 시스템 프롬프트를 직접 받는다 (전역 페르소나가 아니라 동작 설계서)
+    - format=json 으로 JSON 만 나오게 강제한다
+    - 발화용 후처리(문장 자르기·이모지 제거)를 하지 않는다 - JSON 이 깨진다
+    - 이미지는 무시한다 (qwen2.5 는 텍스트 전용; 시각 접지는 /vision 몫)
+    """
+
+    def __init__(self, model='qwen2.5:7b', system='', host='127.0.0.1:11434',
+                 timeout=60, num_predict=600, num_ctx=8192):
+        self.model = model
+        self.system = system
+        self.url = 'http://{}/api/chat'.format(host)
+        self.timeout = timeout
+        self.num_predict = num_predict
+        self.num_ctx = num_ctx
+
+    def reply(self, text, history, session='default', image=None):
+        import urllib.request
+        body = json.dumps({
+            'model': self.model,
+            'messages': [{'role': 'system', 'content': self.system},
+                         {'role': 'user', 'content': text}],
+            'stream': False,
+            'format': 'json',
+            'keep_alive': -1,
+            'options': {'num_predict': self.num_predict,
+                        'num_ctx': self.num_ctx,
+                        'temperature': 0.2},
+        }).encode('utf-8')
+        req = urllib.request.Request(
+            self.url, data=body,
+            headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        return (data.get('message', {}).get('content') or '').strip()
+
+
 class ClaudeCliBackend(Backend):
     """Claude via a persistent Claude Code CLI process.
 
@@ -1009,6 +1050,9 @@ def main():
     parser.add_argument('--ollama-ctx', type=int, default=OllamaBackend.NUM_CTX,
                         help='context window; must fit the persona or Ollama '
                              'truncates it away (default: %(default)s)')
+    parser.add_argument('--motion-backend', default='cli',
+                        choices=('cli', 'ollama'),
+                        help='동작 생성을 opus CLI 로 할지 로컬 Ollama 로 할지')
     parser.add_argument('--motion-model', default='opus',
                         help='model for the motion-generation session')
     parser.add_argument('--motion-prompt-file',
@@ -1050,9 +1094,14 @@ def main():
     if args.motion_prompt_file:
         with open(args.motion_prompt_file, encoding='utf-8') as f:
             motion_prompt = f.read().strip()
-        motion_backend = ClaudeCliBackend(model=args.motion_model,
-                                          timeout=120,
-                                          system_prompt=motion_prompt)
+        if args.motion_backend == 'ollama':
+            motion_backend = OllamaJsonBackend(model=args.motion_model,
+                                               system=motion_prompt,
+                                               host=args.ollama_host)
+        else:
+            motion_backend = ClaudeCliBackend(model=args.motion_model,
+                                              timeout=120,
+                                              system_prompt=motion_prompt)
         logger.info('Motion backend enabled (model=%s, prompt %d chars)',
                     args.motion_model, len(motion_prompt))
 
