@@ -38,7 +38,43 @@ DAILY_MAX = 800          # 하루 총 장수
 # 있어야 나중에 군집으로 동일 인물을 엮을 수 있다.
 FACELESS_INTERVAL = 12.0
 AUTO_VISIT_GAP = 90.0    # 이만큼 조용하면 다음 사진은 새 방문으로 친다
-MIN_SHARPNESS = 60.0     # 이보다 흐리면 버린다 (머리가 도는 중에 찍힌 사진)
+MIN_SHARPNESS = 60.0     # 전체 프레임 기준 (사람 상자가 없을 때의 최후 방어)
+# 사람/얼굴 영역 기준 판정 - 배경(복도)이 또렷하면 전체 프레임 선명도는
+# 높게 나와서, 사람만 흔들린 사진이 통과했다 (실측). 흐림은 걷는 사람
+# 위에서 생기므로 영역을 재야 한다. 옷처럼 매끈한 면이 있어 문턱은
+# 전체 프레임보다 낮게 잡는다.
+REGION_MIN_SHARPNESS = 45.0
+CLIP_HI_MAX = 0.30       # 영역 안 250 이상(하얗게 날아간) 픽셀 비율 한도
+CLIP_LO_MAX = 0.60       # 영역 안 5 이하(까맣게 뭉개진) 픽셀 비율 한도
+BURST_EXTRA = 2          # 저장 직전 추가로 찍어 볼 장수 (최상 프레임 선택)
+
+
+def _region_score(frame, face=None, person=None):
+    """사람(없으면 얼굴, 그것도 없으면 전체) 영역의 (선명도, 과노출, 저노출).
+
+    반환: (sharp, clip_hi, clip_lo) - 실패하면 (None, 0.0, 0.0).
+    """
+    import cv2
+    try:
+        h, w = frame.shape[:2]
+        box = person or face
+        if box is not None:
+            x, y, bw, bh = [int(v) for v in box]
+            x0, y0 = max(0, x), max(0, y)
+            x1, y1 = min(w, x + bw), min(h, y + bh)
+            if x1 - x0 < 8 or y1 - y0 < 8:
+                box = None
+            else:
+                crop = frame[y0:y1, x0:x1]
+        if box is None:
+            crop = frame
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        clip_hi = float((gray >= 250).mean())
+        clip_lo = float((gray <= 5).mean())
+        return sharp, clip_hi, clip_lo
+    except Exception:
+        return None, 0.0, 0.0
 
 
 class PersonDB(object):
@@ -46,7 +82,9 @@ class PersonDB(object):
 
     def __init__(self, root=DEFAULT_ROOT, retention_days=RETENTION_DAYS,
                  per_visit_max=PER_VISIT_MAX, visit_interval=VISIT_INTERVAL,
-                 daily_max=DAILY_MAX, min_free_mb=MIN_FREE_MB):
+                 daily_max=DAILY_MAX, min_free_mb=MIN_FREE_MB, grab=None):
+        # grab: 추가 프레임을 얻는 콜백 (버스트 최상 선택용, 없으면 단발)
+        self.grab = grab
         self.root = os.path.expanduser(root)
         self.retention_days = retention_days
         self.per_visit_max = per_visit_max
@@ -237,6 +275,38 @@ class PersonDB(object):
         day_dir = os.path.join(self.root, day)
         os.makedirs(day_dir, exist_ok=True)
 
+        # 버스트: 지금 프레임에 더해 몇 장을 바로 이어 찍고, 사람 영역이
+        # 가장 선명한 것을 고른다. 걷는 사람은 걸음 위상에 따라 흐림이
+        # 프레임마다 크게 다르다 - 한 장 승부보다 훨씬 잘 나온다.
+        cands = [frame]
+        if self.grab is not None:
+            for _ in range(BURST_EXTRA):
+                try:
+                    extra = self.grab()
+                    if extra is not None:
+                        cands.append(extra)
+                except Exception:
+                    break
+        best, best_sharp = None, -1.0
+        for f in cands:
+            sharp, clip_hi, clip_lo = _region_score(f, face=face, person=person)
+            if sharp is None:
+                continue
+            # 너무 밝거나(역광 클리핑) 너무 어두운 영역은 후보에서 제외
+            if clip_hi > CLIP_HI_MAX or clip_lo > CLIP_LO_MAX:
+                continue
+            if sharp > best_sharp:
+                best, best_sharp = f, sharp
+        if best is None:
+            _, ch, cl = _region_score(frame, face=face, person=person)
+            logger.debug('버림: 노출 불량 (밝음 %.0f%% 어두움 %.0f%%)',
+                         ch * 100, cl * 100)
+            return None
+        if best_sharp < REGION_MIN_SHARPNESS:
+            logger.debug('버림: 사람 영역 흐림 (영역 선명도 %.0f)', best_sharp)
+            return None
+        frame = best
+
         if sharpness is None:
             try:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -244,9 +314,7 @@ class PersonDB(object):
             except Exception:
                 sharpness = None
 
-        # 흔들려서 흐린 사진은 분류 학습에 쓸 수 없다. 저장 자리와 SD 만 먹으므로
-        # 여기서 버린다. 버린 것은 촬영 간격에도 반영하지 않아, 곧바로 다음
-        # (선명한) 프레임을 다시 노릴 수 있다.
+        # 전체 프레임 선명도는 최후 방어로 남긴다 (영역 상자가 없던 경우).
         if sharpness is not None and sharpness < MIN_SHARPNESS:
             logger.debug('흐린 사진 버림 (선명도 %.0f)', sharpness)
             return None

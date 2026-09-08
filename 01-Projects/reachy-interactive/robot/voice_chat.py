@@ -2028,7 +2028,12 @@ def main():
                 if args.collect_people:
                     try:
                         from person_db import PersonDB
-                        person_db = PersonDB(retention_days=args.collect_days)
+                        person_db = PersonDB(
+                            retention_days=args.collect_days,
+                            # 버스트 최상 선택용 추가 프레임 (감시 스레드에서만
+                            # 불린다 - 카메라 락이 겹침을 막는다)
+                            grab=lambda: grab_frame(reachy, side=args.camera_side,
+                                                    camera_index=args.camera_index))
                         # 대화 기록에 '지금 앞에 있는 방문'을 붙인다. 사진과
                         # 대화가 이어져야, 나중에 사람을 알아봤을 때 그 사람이
                         # 전에 무슨 말을 했는지도 알 수 있다.
