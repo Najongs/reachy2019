@@ -1428,7 +1428,10 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             if looks_like_noise(text, getattr(listener, 'last_engine', None)):
                 logger.info('자는 중 잡음은 지나칩니다: %r', text)
                 continue
-            sleeper.wake('말을 걸었습니다')
+            if not sleeper.wake('말을 걸었습니다'):
+                # 근무시간 밖 무조건 절전 - 말을 걸어도 자는 채로 둔다
+                logger.info('근무시간 밖이라 계속 잡니다: %r', text[:30])
+                continue
             asleep = False
 
         if hallway is not None:

@@ -79,7 +79,12 @@ class SleepWatcher(object):
         return getattr(self.watcher, 'brightness', None) if self.watcher else None
 
     def wake(self, why):
-        """밖에서 깨운다 (사람이 말을 걸었을 때)."""
+        """밖에서 깨운다 (사람이 말을 걸었을 때).
+
+        근무시간 밖에는 깨우지 못한다 - 무조건 절전 (사용자 지정).
+        """
+        if self.in_quiet_hours():
+            return False
         self._dark_since = None
         if not self._asleep:
             return False
@@ -109,6 +114,17 @@ class SleepWatcher(object):
         level = self.brightness()
         person = bool(getattr(self.watcher, 'person', False)) if self.watcher else False
         night = self.in_quiet_hours(now)
+
+        # 근무시간(9~18시) 밖은 무조건 절전 (사용자 지정 2026-09-08).
+        # 사람이 보여도, 불이 켜져도, 말을 걸어도 자는 상태를 유지한다 -
+        # 터널·로그 같은 통신만 살아 있다. wake() 도 이 시간대엔 거부한다.
+        if night:
+            if not self._asleep:
+                self._asleep = True
+                self._changed_at = now
+                logger.info('잠듭니다 (근무시간 밖 - 무조건 절전). '
+                            '통신은 그대로 열어 둡니다.')
+            return True
 
         # 어둡다고 볼 근거: 실제로 어둡거나, 조용한 시간대이거나.
         # 밝기를 못 재는데 낮이면(카메라 고장) 자지 않는다 - 못 보는 것을
