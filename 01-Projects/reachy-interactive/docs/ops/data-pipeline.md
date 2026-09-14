@@ -1,5 +1,11 @@
 # 데이터 파이프라인 (사람 데이터셋·로그 개선 루프)
 
+> **3층 지식 구조**: 여기 적힌 원시 데이터는 이제 `04-Archives/raw/` 한
+> 곳에 모이고, 일별 요약(`knowledge/digests/`)을 거쳐 메인 지식
+> (`knowledge/KNOWLEDGE.md`)으로 접힌다. 구조와 운영은
+> [`../architecture/knowledge.md`](../architecture/knowledge.md) 참조.
+
+
 ## 사람 데이터셋 (수집 → 중앙 DB → 학습용 추출)
 
 복도를 지나가는 사람을 계속 찍어 모은다. 나중에 분류 학습에 쓰는 것이 목적이라,
@@ -15,10 +21,10 @@ Pi: presence.py --collect-people        DGX: sync_persons.py        persons_expo
 
 | 위치 | 무엇 | 성격 |
 |---|---|---|
-| `04-Archives/person-dataset/persons/` | `persons.db` + `reachy/YYYY-MM-DD/*.jpg` | **모으는 곳.** 원본, 지우지 않는다 |
-| `04-Archives/person-dataset/dataset/` | `images/` `faces/` `persons/` `index.csv` | **뽑아 낸 것.** 조건으로 거른 사본, 언제든 다시 만들 수 있다 |
+| `04-Archives/raw/person-dataset/persons/` | `persons.db` + `reachy/YYYY-MM-DD/*.jpg` | **모으는 곳.** 원본, 지우지 않는다 |
+| `04-Archives/raw/person-dataset/dataset/` | `images/` `faces/` `persons/` `index.csv` | **뽑아 낸 것.** 조건으로 거른 사본, 언제든 다시 만들 수 있다 |
 
-대화 로그(`04-Archives/conversation-logs/`)와 같은 성격(개인정보·계속 쌓임)이라
+대화 로그(`04-Archives/raw/conversation-logs/`)와 같은 성격(개인정보·계속 쌓임)이라
 같은 자리에 둔다.
 
 `persons/` 에는 사람 상자대로 자른 이미지가 들어간다(학습에 바로 쓰는 용도).

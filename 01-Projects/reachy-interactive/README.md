@@ -59,7 +59,7 @@ bash ~/Documents/brightness_report.sh    # 시간대별 화면 밝기(수면 문
  │    ├─ presence   사람 검출(SSD)  │        │                                  │
  │    ├─ hallway    인사·데이터수집 │        │  ollama :11434 (GPU 0)           │
  │    ├─ motion_exec 팔 동작 안전층 │        │                                  │
- │    └─ person_db  사진+메타 저장  │───────▶│  04-Archives/person-dataset/     │
+ │    └─ person_db  사진+메타 저장  │───────▶│  04-Archives/raw/person-dataset/     │
  │                                  │ 하루1회│    persons/  원본 + DB           │
  │  목: NeckHold 가 계속 붙잡음     │        │    dataset/  사람 크롭 등        │
  └──────────────────────────────────┘        └──────────────────────────────────┘

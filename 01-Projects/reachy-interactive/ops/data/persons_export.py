@@ -83,7 +83,7 @@ def main():
     ap.add_argument('--db', default=DEFAULT_DB)
     ap.add_argument('--root', default=DEFAULT_ROOT, help='사진이 있는 폴더')
     ap.add_argument('--out', nargs='?', const=DEFAULT_OUT,
-                    help='내보낼 폴더 (기본: 04-Archives/person-dataset/dataset)')
+                    help='내보낼 폴더 (기본: 04-Archives/raw/person-dataset/dataset)')
     ap.add_argument('--list', action='store_true', help='목록만 출력')
     ap.add_argument('--faces-only', action='store_true',
                     help='얼굴이 잡힌 사진만 (움직임만으로 찍힌 것 제외)')

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -30,8 +31,11 @@ SIM_RUNS = Path(para.SIM_RUNS)
 SIM_DATA = PROJECT_ROOT / "sim_data"
 REAL_COMMANDS = PROJECT_ROOT / "config" / "real_commands.json"
 KNOWLEDGE_DIR = Path(para.KNOWLEDGE)
+DIGESTS_DIR = Path(para.DIGESTS)
+OPS_LOGS = Path(para.OPS_LOGS)
 DB_PATH = KNOWLEDGE_DIR / "knowledge.db"
 SUMMARY_PATH = KNOWLEDGE_DIR / "knowledge_summary.json"
+MAIN_PATH = KNOWLEDGE_DIR / "KNOWLEDGE.md"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -53,6 +57,25 @@ CREATE TABLE IF NOT EXISTS facts (
 );
 CREATE INDEX IF NOT EXISTS idx_facts_source_kind ON facts(source, kind);
 CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
+
+-- 증분 커서: 어디까지 읽었는지. 이게 있어야 매번 모든 로그를 열지
+-- 않는다 (실측 174 세션 113MB 를 사이클마다 전부 읽고 있었다).
+CREATE TABLE IF NOT EXISTS cursors (
+    path TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    mtime REAL NOT NULL,
+    offset INTEGER NOT NULL DEFAULT 0,
+    scanned_at TEXT NOT NULL
+);
+
+-- 주기 요약(중간층) 색인: 원시 구간 하나를 접은 결과 한 줄.
+CREATE TABLE IF NOT EXISTS digests (
+    period TEXT PRIMARY KEY,          -- 'YYYY-MM-DD' (일 단위)
+    source TEXT NOT NULL,             -- real | sim | ops
+    path TEXT NOT NULL,               -- digests/<period>/<source>.json
+    covered INTEGER NOT NULL,         -- 접어 넣은 원시 단위 수
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -135,22 +158,103 @@ def add_fact(
                  (ts, fingerprint))
 
 
+def upsert_fact(conn: sqlite3.Connection, *, source: str, kind: str,
+                fact_key: str, value: Any, confidence: float = 0.8,
+                status: str = "observed", evidence: str = "") -> None:
+    """롤업 결과를 넣는다 - 같은 사실이면 값을 갱신(누적값이 자란다).
+
+    add_fact 는 '이 값을 이때 봤다'는 관측 기록(값이 다르면 새 행)이고,
+    이쪽은 '현재 종합값'이다. 메인 지식에는 종합값만 둔다 - 안 그러면
+    사이클마다 행이 쌓여 원장이 로그가 된다 (실측: policy_candidate
+    899행).
+    """
+    global PROV
+    if PROV is None:
+        PROV = _provenance()
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    fingerprint = hashlib.sha256(
+        f"rollup|{source}|{kind}|{fact_key}".encode("utf-8")).hexdigest()
+    ts = now()
+    cur = conn.execute(
+        "UPDATE facts SET value_json=?, confidence=?, evidence=?, "
+        "last_seen=?, generation=?, git_rev=? WHERE fingerprint=?",
+        (payload, max(0.0, min(1.0, confidence)), evidence, ts,
+         PROV['generation'], PROV['git_rev'], fingerprint))
+    if cur.rowcount == 0:
+        conn.execute(
+            """INSERT INTO facts
+            (source, kind, fact_key, value_json, confidence, status, evidence,
+             observed_at, last_seen, generation, git_rev, fingerprint)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (source, kind, fact_key, payload, confidence, status, evidence,
+             ts, ts, PROV['generation'], PROV['git_rev'], fingerprint))
+
+
 def jsonl_files() -> Iterable[Path]:
     if not PI_LOGS.exists():
         return ()
     return PI_LOGS.rglob("events.jsonl")
 
 
-def collect_real(conn: sqlite3.Connection) -> dict[str, Any]:
+# --------------------------------------------------------------- 증분 커서
+def read_new_lines(conn: sqlite3.Connection, path: Path,
+                   full: bool = False) -> list[str]:
+    """이 파일에서 '아직 안 읽은' 줄만 돌려준다.
+
+    로그는 append-only 라 크기만 커진다 - 지난번 오프셋부터 읽으면
+    같은 줄을 다시 파싱하지 않는다. 파일이 줄었거나(truncate/교체)
+    full=True 면 처음부터 다시 읽는다.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    row = conn.execute("SELECT size, offset FROM cursors WHERE path=?",
+                       (str(path),)).fetchone()
+    start = 0
+    if row and not full and stat.st_size >= row["size"]:
+        start = int(row["offset"])
+    lines: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(start)
+            lines = fh.read().splitlines()
+            end = fh.tell()
+    except OSError:
+        return []
+    conn.execute(
+        "INSERT INTO cursors (path, size, mtime, offset, scanned_at) "
+        "VALUES (?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
+        "size=excluded.size, mtime=excluded.mtime, offset=excluded.offset, "
+        "scanned_at=excluded.scanned_at",
+        (str(path), stat.st_size, stat.st_mtime, end, now()))
+    return lines
+
+
+def pending_sources(conn: sqlite3.Connection) -> dict:
+    """아직 안 읽은 원시가 얼마나 남았는지 (운영 가시성용)."""
+    total = new = 0
+    for path in list(jsonl_files()):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        total += 1
+        row = conn.execute("SELECT offset FROM cursors WHERE path=?",
+                           (str(path),)).fetchone()
+        if not row or row["offset"] < size:
+            new += 1
+    return {"files": total, "with_new_data": new}
+
+
+def collect_real(conn: sqlite3.Connection, full: bool = False) -> dict[str, Any]:
     event_counts: collections.Counter[str] = collections.Counter()
     outcome_counts: collections.Counter[str] = collections.Counter()
     command_counts: collections.Counter[str] = collections.Counter()
     total = 0
+    grasp_labels: collections.Counter[str] = collections.Counter()
     for path in jsonl_files():
-        try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
+        lines = read_new_lines(conn, path, full=full)
         for line in lines:
             try:
                 event = json.loads(line)
@@ -167,6 +271,8 @@ def collect_real(conn: sqlite3.Connection) -> dict[str, Any]:
             outcome = event.get("outcome") or event.get("status")
             if outcome:
                 outcome_counts[str(outcome)[:80]] += 1
+            if kind == "grasp_label":
+                grasp_labels[str(event.get("label") or "unknown")[:20]] += 1
             command = event.get("command") or event.get("text")
             # Keep only a digest.  Raw conversation and names stay in the existing archive.
             if isinstance(command, str) and command.strip():
@@ -174,21 +280,11 @@ def collect_real(conn: sqlite3.Connection) -> dict[str, Any]:
                 digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
                 command_counts[digest] += 1
 
-    for kind, count in event_counts.items():
-        add_fact(conn, source="real", kind="event_count", fact_key=kind,
-                 value={"count": count}, confidence=min(0.99, 0.5 + count / 100.0),
-                 evidence=str(PI_LOGS))
-    for outcome, count in outcome_counts.items():
-        add_fact(conn, source="real", kind="outcome_count", fact_key=outcome,
-                 value={"count": count}, confidence=min(0.99, 0.5 + count / 100.0),
-                 evidence=str(PI_LOGS))
-    for digest, count in command_counts.items():
-        add_fact(conn, source="real", kind="command_digest", fact_key=digest,
-                 value={"count": count}, confidence=min(0.95, 0.5 + count / 50.0),
-                 evidence=str(REAL_COMMANDS))
-
+    # 여기서는 사실을 넣지 않는다 - 이번 구간의 '델타'만 만든다.
+    # 델타는 digest(중간층)로 저장되고, 메인 지식은 rollup 이 만든다.
     persons = {}
-    db_path = ARCHIVES / "person-dataset" / "persons" / "persons.db"
+    # 3층 재편으로 원시는 raw/ 밑이다 - para 가 단일 출처 (하드코딩 금지)
+    db_path = Path(para.PERSONS) / "persons.db"
     if db_path.exists():
         try:
             db = sqlite3.connect(db_path)
@@ -197,12 +293,9 @@ def collect_real(conn: sqlite3.Connection) -> dict[str, Any]:
             db.close()
         except sqlite3.Error:
             persons = {}
-    if persons:
-        add_fact(conn, source="real", kind="person_dataset", fact_key="aggregate",
-                 value=persons, confidence=0.8, evidence=str(db_path))
     return {"events": total, "event_kinds": dict(event_counts),
             "outcomes": dict(outcome_counts), "command_digests": len(command_counts),
-            "person_dataset": persons}
+            "grasp_labels": dict(grasp_labels), "person_dataset": persons}
 
 
 def improve_files() -> list[Path]:
@@ -212,11 +305,32 @@ def improve_files() -> list[Path]:
     return sorted(files, key=lambda p: p.stat().st_mtime if p.exists() else 0)
 
 
-def collect_sim(conn: sqlite3.Connection) -> dict[str, Any]:
+def collect_sim(conn: sqlite3.Connection, full: bool = False) -> dict[str, Any]:
+    """이번 구간의 시뮬 델타. 이미 접은 run 파일은 다시 열지 않는다."""
     runs = 0
+    skipped = 0
     latest: dict[str, Any] | None = None
     causes: collections.Counter[str] = collections.Counter()
+    best_cand: dict[str, Any] | None = None
     for path in improve_files():
+        # 커서: 이미 읽은 run 은 건너뛴다 (899개를 매번 파싱하던 것).
+        # full 재구축이어도 커서는 남긴다 - 다음 동기화가 증분이 되게.
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if True:
+            row = conn.execute("SELECT size FROM cursors WHERE path=?",
+                               (str(path),)).fetchone()
+            if row and int(row["size"]) == stat.st_size and not full:
+                skipped += 1
+                continue
+            conn.execute(
+                "INSERT INTO cursors (path, size, mtime, offset, scanned_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
+                "size=excluded.size, mtime=excluded.mtime, "
+                "scanned_at=excluded.scanned_at",
+                (str(path), stat.st_size, stat.st_mtime, stat.st_size, now()))
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -233,10 +347,14 @@ def collect_sim(conn: sqlite3.Connection) -> dict[str, Any]:
             "total": metrics.get("total"), "collision": metrics.get("collision"),
             "params": best.get("params", data.get("params")),
         }
-        status = "proposed" if value.get("params") else "observed"
-        add_fact(conn, source="sim", kind="policy_candidate", fact_key=str(path),
-                 value=value, confidence=0.9 if value.get("collision", 1) == 0 else 0.5,
-                 status=status, evidence=str(path))
+        # 후보는 전부 저장하지 않는다 - 이 구간의 '최고' 하나만 남긴다
+        # (전부 넣던 초판이 원장을 899행짜리 로그로 만들었다).
+        def _score(v):
+            return (v.get("success") or 0, v.get("quality") or 0,
+                    -(v.get("collision") or 0))
+        if value.get("params") and (best_cand is None
+                                    or _score(value) > _score(best_cand)):
+            best_cand = dict(value, path=str(path))
         history = data.get("history") or []
         if isinstance(history, list):
             for row in history:
@@ -253,36 +371,203 @@ def collect_sim(conn: sqlite3.Connection) -> dict[str, Any]:
                         causes[str(cause)[:100]] += 1
         if path.exists() and (latest is None or path.stat().st_mtime > latest.get("mtime", 0)):
             latest = {"path": str(path), "mtime": path.stat().st_mtime, **value}
-    for cause, count in causes.items():
-        add_fact(conn, source="sim", kind="failure_cause", fact_key=cause,
-                 value={"count": count}, confidence=min(0.95, 0.5 + count / 20.0),
-                 evidence=str(SIM_DATA))
     if latest:
         latest = {k: v for k, v in latest.items() if k != "mtime"}
-        add_fact(conn, source="sim", kind="latest_metrics", fact_key="latest",
-                 value=latest, confidence=0.85, evidence=latest["path"])
-    return {"runs": runs, "latest": latest, "failure_causes": dict(causes)}
+    return {"runs": runs, "skipped_runs": skipped, "latest": latest,
+            "failure_causes": dict(causes), "best_candidate": best_cand}
 
 
-def sync() -> dict[str, Any]:
-    conn = connect()
-    real = collect_real(conn)
-    sim = collect_sim(conn)
+# ------------------------------------------------- 2층: 주기 요약(지식화)
+def write_digest(conn: sqlite3.Connection, source: str, delta: dict,
+                 period: str | None = None, replace: bool = False) -> Path | None:
+    """이번 구간의 델타를 하루치 요약 파일로 접는다.
+
+    같은 날 여러 번 돌면 그날 요약에 합산된다 - 하루가 한 장이 되고,
+    메인 지식은 이 장들만 본다 (원시 로그를 다시 열지 않는 이유).
+    """
+    period = period or time.strftime("%Y-%m-%d")
+    out_dir = DIGESTS_DIR / period
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{source}.json"
+    base: dict = {}
+    if path.exists() and not replace:
+        try:
+            base = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            base = {}
+    merged = _merge_delta(base, delta)
+    merged["period"] = period
+    merged["source"] = source
+    merged["updated_at"] = now()
+    merged.setdefault("generation", (PROV or _provenance())["generation"])
+    path.write_text(json.dumps(merged, ensure_ascii=False, indent=1) + "\n",
+                    encoding="utf-8")
+    covered = int(merged.get("events") or merged.get("runs") or 0)
+    conn.execute(
+        "INSERT INTO digests (period, source, path, covered, created_at) "
+        "VALUES (?,?,?,?,?) ON CONFLICT(period) DO UPDATE SET "
+        "path=excluded.path, covered=excluded.covered",
+        (f"{period}|{source}", source, str(path), covered, now()))
+    return path
+
+
+def _merge_delta(base: dict, delta: dict) -> dict:
+    """숫자는 더하고, 카운터 dict 는 키별로 더하고, 나머지는 최신으로."""
+    out = dict(base)
+    for k, v in delta.items():
+        if isinstance(v, (int, float)) and isinstance(out.get(k), (int, float)):
+            out[k] = out[k] + v
+        elif k == "person_dataset":
+            out[k] = v or out.get(k)      # 현재 상태 - 합산하지 않는다
+        elif isinstance(v, dict) and all(
+                isinstance(x, (int, float)) for x in v.values()):
+            merged = dict(out.get(k) or {})
+            for kk, vv in v.items():
+                merged[kk] = merged.get(kk, 0) + vv
+            out[k] = merged
+        elif v not in (None, {}, [], 0):
+            out[k] = v
+        else:
+            out.setdefault(k, v)
+    return out
+
+
+# ------------------------------------------------------- 3층: 메인 지식
+def rollup(conn: sqlite3.Connection) -> dict:
+    """모든 일별 요약을 합쳐 메인 지식을 만든다.
+
+    여기서만 facts 에 쓴다 (upsert - 종합값 갱신). 원시 로그는 건드리지
+    않는다 - 요약 파일 수십 장만 읽으면 된다.
+    """
+    totals: dict[str, dict] = {"real": {}, "sim": {}}
+    periods: list[str] = []
+    if DIGESTS_DIR.exists():
+        for day_dir in sorted(DIGESTS_DIR.iterdir()):
+            if not day_dir.is_dir():
+                continue
+            periods.append(day_dir.name)
+            for src in ("real", "sim"):
+                f = day_dir / f"{src}.json"
+                if not f.exists():
+                    continue
+                try:
+                    d = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                d.pop("period", None); d.pop("source", None)
+                d.pop("updated_at", None); d.pop("generation", None)
+                totals[src] = _merge_delta(totals[src], d)
+
+    for kind, count in (totals["real"].get("event_kinds") or {}).items():
+        upsert_fact(conn, source="real", kind="event_count", fact_key=kind,
+                    value={"count": count}, confidence=min(0.99, 0.5 + count / 100.0),
+                    evidence="digests")
+    for outcome, count in (totals["real"].get("outcomes") or {}).items():
+        upsert_fact(conn, source="real", kind="outcome_count", fact_key=outcome,
+                    value={"count": count}, confidence=min(0.99, 0.5 + count / 100.0),
+                    evidence="digests")
+    for label, count in (totals["real"].get("grasp_labels") or {}).items():
+        upsert_fact(conn, source="real", kind="grasp_label", fact_key=label,
+                    value={"count": count}, confidence=0.7, evidence="digests")
+    if totals["real"].get("person_dataset"):
+        upsert_fact(conn, source="real", kind="person_dataset",
+                    fact_key="aggregate", value=totals["real"]["person_dataset"],
+                    confidence=0.8, evidence="digests")
+    for cause, count in (totals["sim"].get("failure_causes") or {}).items():
+        upsert_fact(conn, source="sim", kind="failure_cause", fact_key=cause,
+                    value={"count": count},
+                    confidence=min(0.95, 0.5 + count / 20.0), evidence="digests")
+    if totals["sim"].get("latest"):
+        upsert_fact(conn, source="sim", kind="latest_metrics", fact_key="latest",
+                    value=totals["sim"]["latest"], confidence=0.85,
+                    evidence="digests")
+    if totals["sim"].get("best_candidate"):
+        upsert_fact(conn, source="sim", kind="policy_candidate",
+                    fact_key="best", value=totals["sim"]["best_candidate"],
+                    confidence=0.9, status="proposed", evidence="digests")
     conn.commit()
+    return {"periods": len(periods), "range": [periods[0], periods[-1]]
+            if periods else [], "real": totals["real"], "sim": totals["sim"]}
+
+
+def _brief(latest: dict | None) -> str:
+    """메인 한 장에는 지표만 - 파라미터 전문은 knowledge.db 에 있다."""
+    if not isinstance(latest, dict):
+        return ""
+    keep = {k: latest.get(k) for k in ("quality", "success", "collision")
+            if latest.get(k) is not None}
+    src = Path(latest.get("path", "")).name
+    return "%s (%s)" % (keep, src) if src else str(keep)
+
+
+def write_main(rolled: dict, conn: sqlite3.Connection) -> Path:
+    """사람과 모델이 '이것만 읽으면 되는' 한 장 (04-Archives/knowledge)."""
+    real, sim = rolled.get("real", {}), rolled.get("sim", {})
+    rows = conn.execute(
+        "SELECT source, kind, fact_key, value_json FROM facts "
+        "WHERE status='proposed' ORDER BY id DESC LIMIT 8").fetchall()
+    causes = sorted((sim.get("failure_causes") or {}).items(),
+                    key=lambda kv: -kv[1])[:5]
+    lines = [
+        "# 메인 지식 (Reachy)", "",
+        "실전·시뮬 원시 데이터를 일별 요약으로 접고, 그 요약들을 합친 종합본.",
+        "**원시 로그를 열 필요 없이 이 장과 knowledge.db 만 보면 된다.**", "",
+        "- 갱신: %s" % now(),
+        "- 요약 구간: %s (%d일치)" % (" ~ ".join(rolled.get("range") or ["-"]),
+                                     rolled.get("periods", 0)),
+        "", "## 실전 (로봇)", "",
+        "- 이벤트 %s건, 종류: %s" % (
+            real.get("events", 0),
+            ", ".join("%s %s" % kv for kv in sorted(
+                (real.get("event_kinds") or {}).items(),
+                key=lambda kv: -kv[1])[:6]) or "-"),
+        "- 동작 결과: %s" % (real.get("outcomes") or "-"),
+        "- 파지 라벨(사람이 말해 준 성패): %s" % (real.get("grasp_labels") or "아직 없음"),
+        "- 사람 데이터셋: %s" % (real.get("person_dataset") or "-"),
+        "", "## 시뮬", "",
+        "- 학습 run %s건 접힘" % sim.get("runs", 0),
+        "- 최신 지표: %s" % (_brief(sim.get("latest")) or "-"),
+        "- 실패 원인 상위: %s" % (", ".join("%s %d" % c for c in causes) or "-"),
+        "", "## 검토 대기 (proposed)", ""]
+    for r in rows:
+        lines.append("- [%s/%s] %s" % (r["source"], r["kind"],
+                                       r["fact_key"][:70]))
+    lines += ["", "---", "",
+              "구조·운영법: `01-Projects/reachy-interactive/docs/architecture/"
+              "knowledge.md`"]
+    MAIN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MAIN_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return MAIN_PATH
+
+
+def sync(full: bool = False) -> dict[str, Any]:
+    """1층(원시) -> 2층(일별 요약) -> 3층(메인 지식) 한 바퀴."""
+    conn = connect()
+    real = collect_real(conn, full=full)      # 델타
+    sim = collect_sim(conn, full=full)        # 델타
+    # full 재구축이면 그날 요약을 '덮어쓴다' - 합산하면 같은 원시를 두 번
+    # 센다 (실측: 재구축 두 번에 runs 899 -> 1798).
+    write_digest(conn, "real", real, replace=full)     # 2층에 접기
+    write_digest(conn, "sim", sim, replace=full)
+    conn.commit()
+    rolled = rollup(conn)                     # 3층 종합
+    write_main(rolled, conn)
     row = conn.execute("SELECT COUNT(*) AS n FROM facts").fetchone()
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": now(),
         "facts": row["n"],
-        "real": real,
-        "sim": sim,
+        "delta": {"real": real, "sim": sim},
+        "rolled": rolled,
+        "pending_raw": pending_sources(conn),
         "policy": {
             "automatic_promotion": False,
-            "note": "sim 후보는 검토 후에만 config/behavior_real.json으로 승격; 원본 개인정보는 원장에 복사하지 않음",
+            "note": "sim 후보는 검토 후에만 승격; 원문 음성·얼굴은 원장에 복사하지 않음",
         },
     }
     SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
     SUMMARY_PATH.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    conn.commit()
     conn.close()
     return summary
 
@@ -294,7 +579,11 @@ def sync() -> dict[str, Any]:
 #   3) 주간 다이제스트 (weekly_digest) - 사람 검토용 마크다운
 
 def digest_for_director(top: int = 5) -> dict:
-    """감독의 방향 결정에 넣을 압축 요약. LLM 호출 없음 - offline 안전."""
+    """감독의 방향 결정에 넣을 압축 요약.
+
+    메인 지식(facts)과 실수요 파일만 읽는다 - 원시 로그·run 을 열지
+    않으므로 사이클마다 불러도 싸다. LLM 호출도 없어 offline 안전.
+    """
     out: dict = {}
     try:
         rc = json.loads(REAL_COMMANDS.read_text(encoding="utf-8"))
@@ -318,6 +607,17 @@ def digest_for_director(top: int = 5) -> dict:
             "SELECT COUNT(*) AS n FROM facts WHERE status='proposed'"
         ).fetchone()["n"]
         out["승격_대기_사실"] = n_prop
+        lab = conn.execute(
+            "SELECT fact_key, value_json FROM facts "
+            "WHERE source='real' AND kind='grasp_label'").fetchall()
+        if lab:
+            out["실전_파지_라벨"] = {
+                r["fact_key"]: json.loads(r["value_json"]).get("count")
+                for r in lab}
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, MIN(period) AS a, MAX(period) AS b "
+            "FROM digests").fetchone()
+        out["요약_구간"] = {"장수": row["n"], "처음": row["a"], "끝": row["b"]}
         conn.close()
     except Exception:
         pass
@@ -444,6 +744,8 @@ def set_status(fact_id: int, status: str, note: str = "") -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sync", action="store_true", help="collect current real/sim evidence")
+    parser.add_argument("--full", action="store_true",
+                        help="커서를 무시하고 원시 전체 재구축 (그날 요약 덮어씀)")
     parser.add_argument("--stats", action="store_true", help="print the generated summary")
     parser.add_argument("--digest-director", action="store_true",
                         help="감독 증거용 압축 요약 JSON 출력")
@@ -469,7 +771,8 @@ def main() -> int:
         set_status(args.promote, "promoted", args.note); return 0
     if args.reject is not None:
         set_status(args.reject, "rejected", args.note); return 0
-    summary = sync() if args.sync or not args.stats else json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
+    summary = (sync(full=args.full) if args.sync or args.full or not args.stats
+               else json.loads(SUMMARY_PATH.read_text(encoding="utf-8")))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 

@@ -1,0 +1,216 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-09-14T02:00:27+00:00",
+  "facts": 22,
+  "delta": {
+    "real": {
+      "events": 1279,
+      "event_kinds": {
+        "chat": 241,
+        "motion": 54,
+        "hallway": 903,
+        "note": 4,
+        "music": 1,
+        "vision_chat": 2,
+        "noise": 70,
+        "object_look": 4
+      },
+      "outcomes": {
+        "executed": 45,
+        "null_moves": 6,
+        "broker_failed": 2,
+        "failed": 1
+      },
+      "command_digests": 321,
+      "grasp_labels": {},
+      "person_dataset": {
+        "people": 416,
+        "boxes": 487
+      }
+    },
+    "sim": {
+      "runs": 899,
+      "skipped_runs": 0,
+      "latest": {
+        "path": "/home/kiro-ai/NAJY/reachy-2019/01-Projects/reachy-interactive/sim_data/improve-20260913-232046.json",
+        "quality": 46.0,
+        "success": 4,
+        "total": null,
+        "collision": null,
+        "params": {
+          "step_deg": 4.0,
+          "gain": 0.8,
+          "damping": 4.0,
+          "table_min": 0.5,
+          "lift_steps": 6,
+          "approach_scale": 0.9,
+          "descend_scale": 0.55,
+          "lift_scale": 0.7,
+          "carry_scale": 0.85,
+          "grasp_bias_cm": 0.8,
+          "via1_pitch": 0.0,
+          "via1_roll": -66.0,
+          "via1_yaw": 0.0,
+          "via1_elbow": 0.0,
+          "via2_pitch": -8.0,
+          "via2_roll": -66.0,
+          "via2_yaw": 0.0,
+          "via2_elbow": -124.0,
+          "via3_pitch": -8.0,
+          "via3_roll": -66.0,
+          "via3_yaw": 32.0,
+          "via3_elbow": -124.0,
+          "gaze_step_deg": 6.0
+        }
+      },
+      "failure_causes": {
+        "정렬 미달(닫힘 미발행)": 7478,
+        "경로 충돌": 623,
+        "파지 시도 없음": 1,
+        "맞물림 실패": 3011,
+        "들기/운반 중 놓침": 10788,
+        "품질 미달": 323,
+        "시험 리프트 실패": 10
+      },
+      "best_candidate": {
+        "quality": 85.0,
+        "success": 4,
+        "total": null,
+        "collision": null,
+        "params": {
+          "step_deg": 1.5,
+          "gain": 0.87,
+          "damping": 8.71,
+          "table_min": 0.33,
+          "lift_steps": 14,
+          "via1_pitch": -3.33,
+          "via1_roll": -67.01,
+          "via1_yaw": 19.88,
+          "via1_elbow": -81.8,
+          "via2_pitch": -17.51,
+          "via2_roll": -63.38,
+          "via2_yaw": 32.2,
+          "via2_elbow": -107.55,
+          "via3_pitch": -15.62,
+          "via3_roll": -50.9,
+          "via3_yaw": 28.85,
+          "via3_elbow": -110.24,
+          "gaze_step_deg": 3.08
+        },
+        "path": "/home/kiro-ai/NAJY/reachy-2019/04-Archives/raw/sim-runs/legacy-before-codex/20260906-20260913/run-20260906-07/improve-20260906-104349.json"
+      }
+    }
+  },
+  "rolled": {
+    "periods": 1,
+    "range": [
+      "2026-09-14",
+      "2026-09-14"
+    ],
+    "real": {
+      "events": 1279,
+      "event_kinds": {
+        "chat": 241,
+        "motion": 54,
+        "hallway": 903,
+        "note": 4,
+        "music": 1,
+        "vision_chat": 2,
+        "noise": 70,
+        "object_look": 4
+      },
+      "outcomes": {
+        "executed": 45,
+        "null_moves": 6,
+        "broker_failed": 2,
+        "failed": 1
+      },
+      "command_digests": 321,
+      "grasp_labels": {},
+      "person_dataset": {
+        "people": 416,
+        "boxes": 487
+      }
+    },
+    "sim": {
+      "runs": 899,
+      "skipped_runs": 0,
+      "latest": {
+        "path": "/home/kiro-ai/NAJY/reachy-2019/01-Projects/reachy-interactive/sim_data/improve-20260913-232046.json",
+        "quality": 46.0,
+        "success": 4,
+        "total": null,
+        "collision": null,
+        "params": {
+          "step_deg": 4.0,
+          "gain": 0.8,
+          "damping": 4.0,
+          "table_min": 0.5,
+          "lift_steps": 6,
+          "approach_scale": 0.9,
+          "descend_scale": 0.55,
+          "lift_scale": 0.7,
+          "carry_scale": 0.85,
+          "grasp_bias_cm": 0.8,
+          "via1_pitch": 0.0,
+          "via1_roll": -66.0,
+          "via1_yaw": 0.0,
+          "via1_elbow": 0.0,
+          "via2_pitch": -8.0,
+          "via2_roll": -66.0,
+          "via2_yaw": 0.0,
+          "via2_elbow": -124.0,
+          "via3_pitch": -8.0,
+          "via3_roll": -66.0,
+          "via3_yaw": 32.0,
+          "via3_elbow": -124.0,
+          "gaze_step_deg": 6.0
+        }
+      },
+      "failure_causes": {
+        "정렬 미달(닫힘 미발행)": 7478,
+        "경로 충돌": 623,
+        "파지 시도 없음": 1,
+        "맞물림 실패": 3011,
+        "들기/운반 중 놓침": 10788,
+        "품질 미달": 323,
+        "시험 리프트 실패": 10
+      },
+      "best_candidate": {
+        "quality": 85.0,
+        "success": 4,
+        "total": null,
+        "collision": null,
+        "params": {
+          "step_deg": 1.5,
+          "gain": 0.87,
+          "damping": 8.71,
+          "table_min": 0.33,
+          "lift_steps": 14,
+          "via1_pitch": -3.33,
+          "via1_roll": -67.01,
+          "via1_yaw": 19.88,
+          "via1_elbow": -81.8,
+          "via2_pitch": -17.51,
+          "via2_roll": -63.38,
+          "via2_yaw": 32.2,
+          "via2_elbow": -107.55,
+          "via3_pitch": -15.62,
+          "via3_roll": -50.9,
+          "via3_yaw": 28.85,
+          "via3_elbow": -110.24,
+          "gaze_step_deg": 3.08
+        },
+        "path": "/home/kiro-ai/NAJY/reachy-2019/04-Archives/raw/sim-runs/legacy-before-codex/20260906-20260913/run-20260906-07/improve-20260906-104349.json"
+      }
+    }
+  },
+  "pending_raw": {
+    "files": 69,
+    "with_new_data": 0
+  },
+  "policy": {
+    "automatic_promotion": false,
+    "note": "sim 후보는 검토 후에만 승격; 원문 음성·얼굴은 원장에 복사하지 않음"
+  }
+}

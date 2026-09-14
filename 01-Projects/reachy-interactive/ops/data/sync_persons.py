@@ -4,7 +4,7 @@
 오래 그리고 많이 모을수록 좋다. 그래서 사진은 Pi 에서 찍고, 이 스크립트가
 주기적으로 DGX 로 옮겨 중앙 DB에 합친다.
 
-중앙 저장소 (기본): 04-Archives/person-dataset/persons/
+중앙 저장소 (기본): 04-Archives/raw/person-dataset/persons/
     persons.db                 합쳐진 메타데이터
     <robot>/YYYY-MM-DD/*.jpg   원본 사진 (로봇별로 분리)
 
@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 
-# 저장소 안(04-Archives/person-dataset)에 둔다. 대화 로그와 같은 성격이라
+# 저장소 안(04-Archives/raw/person-dataset)에 둔다. 대화 로그와 같은 성격이라
 # 같은 자리에 모이는 편이 찾기 쉽다. .gitignore 에 들어 있어 커밋에는 안 섞인다.
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(

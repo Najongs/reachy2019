@@ -8,16 +8,18 @@
 #   bash ops/daily_update.sh --no-persons # 사람 사진 가져오기 생략
 #   bash ops/daily_update.sh --purge-persons  # 사진을 옮긴 뒤 Pi 쪽 원본 삭제(SD 확보)
 #
-# 사람 데이터가 쌓이는 곳 (DGX):
-#   04-Archives/person-dataset/persons/   원본 + persons.db (모으는 곳)
-#   04-Archives/person-dataset/dataset/   걸러서 뽑아 낸 것 (images/ faces/ persons/)
+# 데이터가 쌓이는 곳 (DGX, 3층 - docs/architecture/knowledge.md):
+#   04-Archives/raw/            1층 원시: 대화 로그·사람 사진·시뮬 런·운영 로그
+#   04-Archives/knowledge/digests/  2층 일별 요약(지식화)
+#   04-Archives/knowledge/KNOWLEDGE.md + knowledge.db  3층 메인 지식
 #
 # 로봇은 계속 켜져 있으니 logrotate 대신, 여기서 로그를 안전히 당겨온 뒤(=DGX 보관본
 # 갱신) Pi 의 커지는 voice_chat.log 만 비운다. 세션 events.jsonl 은 건드리지 않는다.
 # 노트는 기본 '제안'만 만든다 (config/quick_notes.proposed.json). 검토 후 --merge 로 반영.
 set -e
 cd "$(dirname "$0")/.."                                  # reachy-interactive/
-PI_LOGS=../../04-Archives/conversation-logs/pi           # 저장소 로그 보관 위치
+# 경로는 para.py 단일 출처에서 - 하드코딩하면 보관고 재편 때 조용히 깨진다
+PI_LOGS=$(python3 -c 'import sys; sys.path.insert(0, "."); import para; print(para.PI_LOGS)')
 SINCE=""; MERGE=""; CLEAN=1; PERSONS=1; PURGE=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -63,7 +65,7 @@ turns=$(cat "$PI_LOGS"/*/events.jsonl 2>/dev/null | wc -l)
 echo "   현재 총 턴 수: $turns"
 
 echo
-echo "── [2/4] 사람 사진 → 04-Archives/person-dataset/persons"
+echo "── [2/4] 사람 사진 → 04-Archives/raw/person-dataset/persons"
 if [ "$PERSONS" = 1 ]; then
   python3 ops/data/sync_persons.py $PURGE || echo "   ! 사진 동기화 실패 (계속 진행)"
 else
@@ -94,7 +96,7 @@ else
 fi
 
 echo
-echo "── 사람 이미지 폴더 갱신 (04-Archives/person-dataset/dataset)"
+echo "── 사람 이미지 폴더 갱신 (04-Archives/raw/person-dataset/dataset)"
 if [ "$PERSONS" = 1 ]; then
   python3 ops/data/persons_export.py --out --crop-persons 2>&1 \
     | tail -4 || echo "   ! 추출 실패 (계속 진행)"
@@ -119,13 +121,19 @@ else
 fi
 
 echo
-echo "── 지식 원장 갱신 (실제/시뮬 aggregate, 원본 개인정보 미복사)"
-python3 ops/data/knowledge_ledger.py --sync 2>&1 | tail -12 \
-  || echo "   ! 지식 원장 갱신 실패 (기존 데이터로 계속)"
+echo "── 지식 갱신: 원시 -> 일별 요약 -> 메인 지식 (증분, 원본 개인정보 미복사)"
+# 일요일에는 전체 재구축(--full): 커서가 놓친 것이 있어도 주 1회 바로잡힌다.
+KFULL=""; [ "$(date +%u)" = "7" ] && KFULL="--full"
+python3 ops/data/knowledge_ledger.py --sync $KFULL 2>&1 | tail -6 \
+  || echo "   ! 지식 갱신 실패 (기존 데이터로 계속)"
+python3 ops/data/knowledge_ledger.py --propose-gates 2>&1 | tail -3 \
+  || echo "   ! 게이트 후보 발굴 실패 (계속 진행)"
+python3 ops/data/knowledge_ledger.py --weekly >/dev/null 2>&1 \
+  && echo "   주간 다이제스트: docs/eval/knowledge-weekly.md"
 
 echo
 echo "── 완료. 다음 단계:"
 echo "   • 제안 검토: config/quick_notes.proposed.json"
 echo "   • 반영: build_notes.py --merge  또는  quick_notes.json 직접 편집"
-echo "   • 지식 원장: ../../04-Archives/knowledge/knowledge_summary.json"
+echo "   • 메인 지식 한 장: ../../04-Archives/knowledge/KNOWLEDGE.md"
 echo "   • 배포: bash ops/deploy.sh   (반영했을 때만)"

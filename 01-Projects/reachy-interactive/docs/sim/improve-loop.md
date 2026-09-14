@@ -77,7 +77,7 @@ sim_data/best_behavior.json         전원 성공한 영속 기준선
 sim_data/<시각>-improve-checkN/     60회마다 실전 배치 (mp4 포함)
 ```
 
-세대별 보관은 `04-Archives/sim-runs/` 아래에서 나눈다. 기존 Opus 기반
+세대별 보관은 `04-Archives/raw/sim-runs/` 아래에서 나눈다. 기존 Opus 기반
 실험은 `legacy-before-codex/`, 전환 검증은 `codex-preflight/`, 이후 자동
 보관되는 본 학습은 `codex-v1/run-YYYYMMDD/`에 들어간다.
 
