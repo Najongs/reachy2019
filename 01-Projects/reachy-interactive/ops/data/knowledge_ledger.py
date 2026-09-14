@@ -377,6 +377,150 @@ def collect_sim(conn: sqlite3.Connection, full: bool = False) -> dict[str, Any]:
             "failure_causes": dict(causes), "best_candidate": best_cand}
 
 
+# --------------------------------------- 1층 수집: 말·프롬프트·페르소나
+# 계측만 지식이 아니다 (사용자). 로봇이 '무엇을 말하도록 되어 있는가'
+# (페르소나·프롬프트)와 '대화에서 무엇을 배웠는가'(즉답 노트, STT 교정,
+# 지적 원장, 방향 결정)도 같은 원장에 모은다. 프롬프트는 내용 전문이
+# 아니라 지문(해시)·크기·규칙 수를 남긴다 - 원문은 git 과 config 에
+# 있고, 원장은 '어느 판이 언제 쓰였나'를 잇는 역할이다.
+
+PROMPT_FILES = ("persona.txt", "motion_prompt.txt", "vision_prompt.txt")
+CODE_PROMPTS = (("sim/sim_director.py", "DIRECTOR_PROMPT"),
+                ("sim/sim_critic.py", "CRITIQUE_PROMPT"),
+                ("sim/sim_critic.py", "ORCHESTRA_PROMPT"),
+                ("sim/sim_critic.py", "DUEL_PROMPT"),
+                ("sim/sim_pilot.py", "PILOT_PROMPT"))
+
+
+def _digest_text(text: str) -> dict:
+    body = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    rules = [ln for ln in body if ln.startswith(("-", "*", "•"))]
+    return {"sha": hashlib.sha256(text.encode("utf-8")).hexdigest()[:12],
+            "chars": len(text), "lines": len(body), "rules": len(rules)}
+
+
+def collect_assets(conn: sqlite3.Connection) -> dict[str, Any]:
+    """프롬프트·페르소나 자산의 현재 판을 사실로. 바뀌면 이력이 남는다."""
+    out: dict[str, Any] = {"prompts": {}, "persona_sections": 0}
+    for name in PROMPT_FILES:
+        path = PROJECT_ROOT / "config" / name
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        d = _digest_text(text)
+        out["prompts"][name] = d
+        # upsert = 현재 판, add_fact = '이 판을 이때 봤다'는 이력 한 줄
+        upsert_fact(conn, source="real", kind="prompt_asset", fact_key=name,
+                    value=d, confidence=0.95, evidence=str(path))
+        add_fact(conn, source="real", kind="prompt_version", fact_key=name,
+                 value=d, confidence=0.9, evidence=str(path))
+        if name == "persona.txt":
+            out["persona_sections"] = sum(
+                1 for ln in text.splitlines() if ln.strip().endswith(":"))
+    for rel, const in CODE_PROMPTS:
+        path = PROJECT_ROOT / rel
+        if not path.exists():
+            continue
+        m = re.search(const + r'\s*=\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')',
+                      path.read_text(encoding="utf-8", errors="replace"), re.S)
+        if not m:
+            continue
+        d = _digest_text(m.group(1))
+        out["prompts"][const] = d
+        upsert_fact(conn, source="sim", kind="prompt_asset", fact_key=const,
+                    value=d, confidence=0.95, evidence=rel)
+        add_fact(conn, source="sim", kind="prompt_version", fact_key=const,
+                 value=d, confidence=0.9, evidence=rel)
+    return out
+
+
+def collect_conversation(conn: sqlite3.Connection) -> dict[str, Any]:
+    """대화에서 얻은 지식: 즉답 노트, STT 교정, 지적 원장, 방향 결정.
+
+    원문 대화는 넣지 않는다 - 여기 담기는 것은 이미 '규칙으로 승격된'
+    것들(패턴->답변, 오인식->교정어)과 집계뿐이다.
+    """
+    out: dict[str, Any] = {}
+    cfg = PROJECT_ROOT / "config"
+
+    notes = _load_json(cfg / "quick_notes.json") or {}
+    rows = notes.get("notes") if isinstance(notes, dict) else notes
+    if isinstance(rows, list):
+        out["quick_notes"] = len(rows)
+        by_kind: collections.Counter = collections.Counter()
+        for n in rows:
+            if not isinstance(n, dict):
+                continue
+            kind = str(n.get("kind") or "misc")[:40]
+            by_kind[kind] += 1
+            upsert_fact(conn, source="real", kind="dialog_rule",
+                        fact_key="%s/%s" % (kind, (n.get("patterns") or [""])[0][:30]),
+                        value={"kind": kind,
+                               "patterns": (n.get("patterns") or [])[:6],
+                               "reply": (n.get("reply") or "")[:200]},
+                        confidence=0.85, status="promoted",
+                        evidence="config/quick_notes.json")
+        out["quick_notes_by_kind"] = dict(by_kind)
+
+    prop = _load_json(cfg / "quick_notes.proposed.json")
+    cand = ((prop.get("proposals") or prop.get("notes"))
+            if isinstance(prop, dict) else prop)
+    if isinstance(cand, list):
+        out["dialog_candidates"] = len(cand)
+        for n in cand[:15]:
+            if not isinstance(n, dict):
+                continue
+            pat = (n.get("patterns") or [n.get("example")
+                                         or n.get("norm")
+                                         or n.get("text") or ""])[0]
+            upsert_fact(conn, source="real", kind="dialog_candidate",
+                        fact_key=str(pat)[:60],
+                        value={"patterns": (n.get("patterns")
+                                            or [n.get("example")])[:4],
+                               "reply": (n.get("reply") or "")[:200],
+                               "count": n.get("count")},
+                        confidence=0.5, status="proposed",
+                        evidence="config/quick_notes.proposed.json")
+
+    stt = _load_json(cfg / "stt_corrections.json") or {}
+    fixes = {k: v for k, v in stt.items() if k != "_comment"}
+    counts = {k: len(v) for k, v in fixes.items() if isinstance(v, (dict, list))}
+    if counts:
+        out["stt_corrections"] = counts
+        upsert_fact(conn, source="real", kind="stt_correction",
+                    fact_key="aggregate", value=counts, confidence=0.9,
+                    status="promoted", evidence="config/stt_corrections.json")
+
+    fb = _load_json(cfg / "sim_feedback.json")
+    if isinstance(fb, list):
+        open_notes = [f for f in fb if isinstance(f, dict) and not f.get("done")]
+        out["feedback"] = {"total": len(fb), "open": len(open_notes)}
+        for f in open_notes[:20]:
+            upsert_fact(conn, source="sim", kind="feedback_note",
+                        fact_key=str(f.get("note"))[:80],
+                        value={"note": f.get("note")}, confidence=0.6,
+                        status="proposed", evidence="config/sim_feedback.json")
+
+    log_md = PROJECT_ROOT / "docs" / "eval" / "direction-log.md"
+    if log_md.exists():
+        text = log_md.read_text(encoding="utf-8", errors="replace")
+        decisions = re.findall(r"^- \*\*방향\*\*: (.+)$", text, re.M)
+        out["directions"] = len(decisions)
+        for d in decisions[-5:]:
+            upsert_fact(conn, source="sim", kind="direction_decision",
+                        fact_key=hashlib.sha256(d.encode()).hexdigest()[:12],
+                        value={"why": d[:300]}, confidence=0.7,
+                        evidence="docs/eval/direction-log.md")
+    return out
+
+
+def _load_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 # ------------------------------------------------- 2층: 주기 요약(지식화)
 def write_digest(conn: sqlite3.Connection, source: str, delta: dict,
                  period: str | None = None, replace: bool = False) -> Path | None:
@@ -417,7 +561,7 @@ def _merge_delta(base: dict, delta: dict) -> dict:
     for k, v in delta.items():
         if isinstance(v, (int, float)) and isinstance(out.get(k), (int, float)):
             out[k] = out[k] + v
-        elif k == "person_dataset":
+        elif k in ("person_dataset", "assets", "conversation"):
             out[k] = v or out.get(k)      # 현재 상태 - 합산하지 않는다
         elif isinstance(v, dict) and all(
                 isinstance(x, (int, float)) for x in v.values()):
@@ -503,6 +647,8 @@ def _brief(latest: dict | None) -> str:
 def write_main(rolled: dict, conn: sqlite3.Connection) -> Path:
     """사람과 모델이 '이것만 읽으면 되는' 한 장 (04-Archives/knowledge)."""
     real, sim = rolled.get("real", {}), rolled.get("sim", {})
+    prompts = (real.get("assets") or {}).get("prompts") or {}
+    talk = real.get("conversation") or {}
     rows = conn.execute(
         "SELECT source, kind, fact_key, value_json FROM facts "
         "WHERE status='proposed' ORDER BY id DESC LIMIT 8").fetchall()
@@ -528,6 +674,19 @@ def write_main(rolled: dict, conn: sqlite3.Connection) -> Path:
         "- 학습 run %s건 접힘" % sim.get("runs", 0),
         "- 최신 지표: %s" % (_brief(sim.get("latest")) or "-"),
         "- 실패 원인 상위: %s" % (", ".join("%s %d" % c for c in causes) or "-"),
+        "", "## 말과 규칙 (로봇이 무엇을 말하도록 되어 있나)", "",
+        "- 페르소나: %s (%s자, 규칙 %s줄)" % (
+            (prompts.get("persona.txt") or {}).get("sha", "-"),
+            (prompts.get("persona.txt") or {}).get("chars", 0),
+            (prompts.get("persona.txt") or {}).get("rules", 0)),
+        "- 프롬프트 판본 %d종: %s" % (
+            len(prompts), ", ".join("%s=%s" % (k, v.get("sha"))
+                                    for k, v in sorted(prompts.items()))),
+        "- 즉답 규칙(대화에서 승격): %s건, 검토 대기 후보 %s건" % (
+            talk.get("quick_notes", 0), talk.get("dialog_candidates", 0)),
+        "- STT 오인식 교정: %s" % (talk.get("stt_corrections") or "-"),
+        "- 동작 지적 원장: %s" % (talk.get("feedback") or "-"),
+        "- 기록된 방향 결정: %s건" % talk.get("directions", 0),
         "", "## 검토 대기 (proposed)", ""]
     for r in rows:
         lines.append("- [%s/%s] %s" % (r["source"], r["kind"],
@@ -545,6 +704,10 @@ def sync(full: bool = False) -> dict[str, Any]:
     conn = connect()
     real = collect_real(conn, full=full)      # 델타
     sim = collect_sim(conn, full=full)        # 델타
+    assets = collect_assets(conn)             # 프롬프트·페르소나 현재 판
+    talk = collect_conversation(conn)         # 대화에서 얻은 규칙·지적
+    real["assets"] = assets
+    real["conversation"] = talk
     # full 재구축이면 그날 요약을 '덮어쓴다' - 합산하면 같은 원시를 두 번
     # 센다 (실측: 재구축 두 번에 runs 899 -> 1798).
     write_digest(conn, "real", real, replace=full)     # 2층에 접기
@@ -618,6 +781,20 @@ def digest_for_director(top: int = 5) -> dict:
             "SELECT COUNT(*) AS n, MIN(period) AS a, MAX(period) AS b "
             "FROM digests").fetchone()
         out["요약_구간"] = {"장수": row["n"], "처음": row["a"], "끝": row["b"]}
+        # 지금 어떤 프롬프트 판으로 돌고 있는지 - 성과를 프롬프트 판에
+        # 귀속시키려면 감독도 이걸 알아야 한다
+        pr = conn.execute(
+            "SELECT fact_key, value_json FROM facts WHERE kind='prompt_asset'"
+        ).fetchall()
+        if pr:
+            out["프롬프트_판본"] = {
+                r["fact_key"]: json.loads(r["value_json"]).get("sha")
+                for r in pr}
+        fbrow = conn.execute(
+            "SELECT fact_key FROM facts WHERE kind='feedback_note' "
+            "AND status='proposed' LIMIT 5").fetchall()
+        if fbrow:
+            out["미결_동작지적"] = [r["fact_key"] for r in fbrow]
         conn.close()
     except Exception:
         pass

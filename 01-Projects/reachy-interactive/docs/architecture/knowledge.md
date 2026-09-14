@@ -59,6 +59,27 @@ observed ──> proposed ──> promoted      (정책에 반영됨)
   불어 있었고, 지금은 구간 최고 후보 1건으로 접힌다.
 - `--promote/--reject <id> --note 사유` 로 사람이 결정하고 이력을 남긴다.
 
+## 무엇이 지식인가 (계측만이 아니다)
+
+원장은 네 축을 모은다 — 어느 하나만 있으면 "왜 그렇게 됐는지"를 못 잇는다.
+
+| 축 | 사실 종류 | 어디서 | 무엇을 남기나 |
+|---|---|---|---|
+| **계측** | `event_count` `outcome_count` `failure_cause` `latest_metrics` `policy_candidate` `grasp_label` `person_dataset` | 실전 이벤트, 시뮬 run | 무슨 일이 얼마나 일어났나 |
+| **말·규칙** | `dialog_rule` `dialog_candidate` `stt_correction` | quick_notes(승격된 즉답), 제안 후보, STT 교정 | 대화에서 배워 규칙이 된 것 |
+| **프롬프트·페르소나** | `prompt_asset`(현재 판) `prompt_version`(이력) | `config/*.txt`, 코드 내 `*_PROMPT` 상수 | 로봇·평가자가 무엇을 말하도록 되어 있나, 언제 바뀌었나 |
+| **판단** | `feedback_note` `direction_decision` | 지적 원장, direction-log | 사람·감독이 무엇을 고치라 했나 |
+
+프롬프트는 **전문이 아니라 지문(sha)·크기·규칙 수**만 남긴다. 원문은 git과
+`config/` 에 있고, 원장의 역할은 *"어느 판으로 돌 때 이 성과가 나왔나"* 를
+잇는 것이다. 그래서 `prompt_asset` 은 현재 판(upsert), `prompt_version` 은
+판이 바뀔 때마다 한 줄씩 쌓이는 이력이다. 감독 증거에도 프롬프트 지문이
+들어가므로, 성과 변화를 파라미터뿐 아니라 프롬프트 개정에도 귀속시킬 수
+있다.
+
+대화 원문은 여전히 원장에 들어가지 않는다 — 담기는 것은 이미 규칙으로
+승격된 패턴→답변과, 사람 검토를 기다리는 후보뿐이다.
+
 ## 원칙
 
 1. **집계만 저장** — 원문 음성·대화·얼굴·프레임은 원장에 안 들어간다.
