@@ -187,6 +187,16 @@ def generate(n=8, seed=0, env=None):
                  round(rng.uniform(1.0, 2.2), 2)]
         scene = _place_objects(rng, chosen, min_gap=e['min_gap'],
                                table_top=tt)
+        # 파지 포켓 정합 (감독 지적: 시험 시드 40개 전부 포켓 밖이라
+        # 성공이 구조적으로 0). 잡기류 표적의 6할은 실측 스위트 창에
+        # 두어 '가능한' 과제가 늘 섞이게 한다 - 나머지 4할은 전 범위로
+        # 다양성을 지킨다.
+        if kind in ('pick', 'lift') and rng.random() < 0.6:
+            sxy = (round(rng.uniform(*SWEET_X), 3),
+                   round(rng.uniform(*SWEET_Y), 3))
+            first = scene[0]
+            scene[0] = world.make_object(first['name'], first['kind'], sxy,
+                                         table_top=tt)
         dest = None
         if kind == 'pick':
             # 목적지는 쟁반(위에 올리기) 또는 바구니(테두리 넘겨 넣기).

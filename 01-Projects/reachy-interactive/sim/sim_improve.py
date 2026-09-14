@@ -124,7 +124,7 @@ def evaluate(params, tasks, natural_min=55):
     """태스크 묶음 -> {'collision','unnatural','missed','success', 'quality'}."""
     A.BEHAVIOR.update(_clamp(params))
     counts = {k: 0 for k in C.STAGES}
-    scores, dists, aligns = [], [], []
+    scores, dists, aligns, ladders = [], [], [], []
     by_object = {}
     for t in tasks:
         stage, q, _ = episode(t, natural_min=natural_min)
@@ -146,6 +146,21 @@ def evaluate(params, tasks, natural_min=55):
             (1 if g.get('grabbed') else 0)
         # 파지 시도조차 없으면(정렬 리포트 없음) 최악값으로 - 시도가 보상
         aligns.append(g.get('align_cm', 30.0) if g else 30.0)
+        # 단계 사다리: 이진 성공(24사이클째 0)만으로는 기울기가 없다.
+        # 접근(1)->정렬(2)->닫힘(3)->맞물림(4)->성공(5) 계단을 실수로
+        # 평균해, CEM 이 한 칸이라도 오르는 파라미터를 고른다.
+        lad = 0.0
+        if q.get('reached') or q.get('final_cm', 99.0) < 20.0:
+            lad = 1.0
+        if g.get('align_cm') is not None and g['align_cm'] <= 1.4:
+            lad = 2.0
+        if g.get('closed'):
+            lad = 3.0
+        if g.get('grabbed'):
+            lad = 4.0
+        if stage == 'success':
+            lad = 5.0
+        ladders.append(lad)
         # 거리는 '부족분' 만 센다. 도달했으면 0 - 도달한 것끼리 0.1cm 를
         # 다투게 두면 거리가 품질(자연스러움)을 영원히 눌러, 비평이
         # 짚어준 과신전·우회가 순위에 반영될 기회를 잃는다 (실제로 그랬다).
@@ -156,6 +171,7 @@ def evaluate(params, tasks, natural_min=55):
     counts['quality'] = sum(scores) / max(len(scores), 1)
     counts['miss_cm'] = sum(dists) / max(len(dists), 1)
     counts['grasp_cm'] = sum(aligns) / max(len(aligns), 1)
+    counts['ladder'] = sum(ladders) / max(len(ladders), 1)
     counts['by_object'] = by_object
     counts['object_floor'] = min(
         (v['success'] / float(v['n']) for v in by_object.values()),
@@ -336,7 +352,9 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         """
         return (-counts['collision'], counts['success'],
                 round(counts.get('object_floor', 0.0), 3),
-                counts.get('grabbed', 0),
+                # 사다리(접근~맞물림 계단 평균)가 이진 grabbed 를 대체 -
+                # 성공 0 인 구간에서도 CEM 이 계단을 오른다
+                round(counts.get('ladder', 0.0), 2),
                 -round(counts.get('miss_cm', 99.0), 1),
                 -round(counts.get('grasp_cm', 30.0), 1),
                 counts['quality'])

@@ -159,7 +159,10 @@ def collect_real(conn: sqlite3.Connection) -> dict[str, Any]:
             if not isinstance(event, dict):
                 continue
             total += 1
-            kind = str(event.get("type") or event.get("event") or "unknown")[:80]
+            # TurnLogger 는 'kind' 로 쓴다 - type/event 만 보던 초판은
+            # 실전 이벤트 376건을 전부 unknown 으로 뭉갰다.
+            kind = str(event.get("kind") or event.get("type")
+                       or event.get("event") or "unknown")[:80]
             event_counts[kind] += 1
             outcome = event.get("outcome") or event.get("status")
             if outcome:

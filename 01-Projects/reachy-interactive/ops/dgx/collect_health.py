@@ -131,6 +131,23 @@ def main():
         problems.append('마지막 촬영이 %.1f시간 전입니다 - 복도가 한산한 것일 수도, '
                         '수집이 멎은 것일 수도 있습니다' % stale)
 
+    # 대화 세션 연속성: 근무시간이 지났는데 오늘 세션 폴더가 하나도
+    # 없으면 수집이 멎은 것이다 (실측: 09-12~13 공백을 아무도 몰랐다).
+    try:
+        import time as _t
+        sys.path.insert(0, os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..')))
+        import para
+        today = _t.strftime('%Y%m%d')
+        hour = int(_t.strftime('%H'))
+        sessions = [d for d in os.listdir(para.PI_LOGS)
+                    if d.startswith(today)] if os.path.isdir(para.PI_LOGS) else []
+        if hour >= 12 and not sessions:
+            problems.append('오늘(%s) 대화 세션 폴더가 하나도 안 당겨졌습니다 - '
+                            '로봇 전원/터널/daily_update 를 확인하세요' % today)
+    except Exception:
+        pass
+
     if problems:
         print('\n확인이 필요합니다:')
         for p in problems:

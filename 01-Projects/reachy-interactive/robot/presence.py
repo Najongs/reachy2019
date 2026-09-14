@@ -113,6 +113,7 @@ class PresenceWatcher(object):
         # 콜백은 person_db 로 사진을 모으는 데 쓴다 (voice_chat 에서 연결).
         self.face_box_rel = None
         self.on_person = None
+        self.last_frame_at = time.time()   # 카메라 기아 감시용
         # 목 디스크의 '실측' 위치를 돌려주는 함수. 명령을 어디서 넣었는지
         # 쫓아다니는 대신, 카메라가 실제로 움직였는지를 본다. 명령 경로를
         # 계측하는 방식은 한 군데만 놓쳐도 조용히 틀린다(실제로 그랬다).
@@ -316,6 +317,7 @@ class PresenceWatcher(object):
                         self._diag_at = time.time()
                         logger.warning('presence: 카메라 프레임을 못 받고 있습니다')
                 if frame is not None:
+                    self.last_frame_at = time.time()
                     gray = self._to_gray(frame)
                     self._update_brightness(gray)
                     self._update_motion(gray)

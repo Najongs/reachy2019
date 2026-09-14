@@ -447,6 +447,20 @@ class MotionHandler(object):
         ok, reason = self.executor.execute(segments)
         snap_timer.cancel()
 
+        # 파지류 동작이면 라벨 수집 창을 연다 - 이어지는 "잡았어/놓쳤어"
+        # 한마디가 실전 파지 성패 데이터가 된다 (지식 원장의 병목은
+        # 시도 수가 아니라 결과 라벨이다).
+        def _uses_gripper(seg):
+            head_ = seg[0]
+            if head_ == 'grasp':
+                return True
+            joints = head_.keys() if isinstance(head_, dict) else (
+                head_ if isinstance(head_, (list, tuple, set)) else ())
+            return any(str(j).endswith('.gripper') for j in joints)
+        if any(_uses_gripper(seg) for seg in segments):
+            self.last_grasp_at = time.time()
+            self.last_grasp_text = text
+
         self._log(text, motion, 'executed' if ok else 'failed',
                   {'reason': reason,
                    'grasp_ok': getattr(self.executor, 'last_grasp_ok', None),
@@ -1288,6 +1302,9 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
         listener.close()
 
 
+MOTOR_RECOVERY_IO = None   # main 이 채운다 (--motions 시 io 경로)
+
+
 def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_and_move, random, speak, vision=False, camera_side='left',
          camera_index=0, motion_handler=None, turn_logger=None, notes=None,
@@ -1312,12 +1329,12 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
         # 소리만 모드에서 90초마다 모터를 조용히 찔러 보고, 응답이 오면
         # 스스로 내려간다 - systemd 가 즉시 되살리며 완전한 동작 모드로
         # 부팅된다 (사람이 전원만 켜면 2분 안에 팔이 돌아온다).
-        if (reachy is None and args.motions and not args.no_robot
+        if (reachy is None and MOTOR_RECOVERY_IO
                 and time.time() - motor_probe_at >= 90.0):
             motor_probe_at = time.time()
             try:
                 from base_pose import connect as _probe_connect
-                _r = _probe_connect(io=args.io, with_head=True)
+                _r = _probe_connect(io=MOTOR_RECOVERY_IO, with_head=True)
                 logger.info('모터 전원 감지 - 동작 모드로 재시작합니다')
                 try:
                     speak('모터가 켜졌네요. 잠깐만요, 기지개 켜고 올게요.')
@@ -1326,6 +1343,17 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                 os._exit(0)
             except Exception:
                 pass                      # 아직 꺼져 있음 - 조용히 계속
+        # 카메라 자가 복구: 장치가 뽑히거나 죽으면(VIDIOC 오류 스팸)
+        # 감시가 조용히 눈을 감은 채 며칠을 보낸다 (실측: 09-11~14,
+        # 65시간 수집 공백). 프레임이 10분 넘게 안 오면 스스로 내려가
+        # systemd 재기동으로 장치를 다시 연다 - 모터 자동복구와 같은 꼴.
+        _w = getattr(sleeper, 'watcher', None) if sleeper is not None else None
+        if (_w is not None
+                and getattr(_w, 'last_tick', 0)
+                and time.time() - getattr(_w, 'last_frame_at',
+                                          time.time()) > 600.0):
+            logger.error('카메라 프레임 10분 기아 - 재시작으로 장치를 다시 엽니다')
+            os._exit(0)
         if time.time() - heartbeat_at >= HEARTBEAT_EVERY:
             heartbeat_at = time.time()
             logger.info('심장박동: %s, 턴 %d건, 마지막 밝기 %s',
@@ -1551,6 +1579,29 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
             last_kind = 'motion'
             continue
 
+        # 실전 파지 라벨: 파지류 동작 후 90초 안의 성패 발화를 데이터로.
+        # 판정은 어휘 규칙이면 충분하다 - 오탐이 나도 라벨은 원장에서
+        # 사람이 검토한다.
+        if (motion_handler is not None and turn_logger is not None
+                and time.time() - getattr(motion_handler, 'last_grasp_at', 0)
+                < 90.0):
+            compact_lbl = text.replace(' ', '')
+            good = any(w in compact_lbl for w in
+                       ('잡았', '집었', '들었', '성공', '잘했', '옮겼'))
+            bad = any(w in compact_lbl for w in
+                      ('놓쳤', '떨어', '실패', '못잡', '못집', '안잡', '빠졌'))
+            if good != bad:                      # 둘 다면 모호 - 버린다
+                turn_logger.log('grasp_label', {
+                    'label': 'success' if good else 'fail',
+                    'said': text,
+                    'command': getattr(motion_handler, 'last_grasp_text', ''),
+                    'delay_s': round(time.time()
+                                     - motion_handler.last_grasp_at, 1)})
+                motion_handler.last_grasp_at = 0.0
+                speak('네, 기록해 둘게요!' if good else
+                      '아쉽네요, 기록해 두고 연습할게요.')
+                last_kind = 'chat'
+                continue
         if motion_handler is not None and wants_motion(text, last_kind):
             image = None
             if vision and reachy is not None and wants_vision(text):
@@ -1983,6 +2034,11 @@ def main():
         # 찼다). 이제는 소리만 내는 모드로 내려가 조용히 계속 돈다.
         try:
             if args.motions:
+                # 소리만 모드에서의 모터 자동복구가 쓸 설정 (_run 은 args
+                # 스코프 밖이라 전역으로 넘긴다)
+                global MOTOR_RECOVERY_IO
+                if not args.no_robot:
+                    MOTOR_RECOVERY_IO = args.io
                 # Arms + head, with this robot's custom hands. The arms stay
                 # compliant; the executor powers them per-gesture.
                 from base_pose import connect
