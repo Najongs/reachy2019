@@ -33,6 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 logger = logging.getLogger(__name__)
 
 
+PERSONA_FILE = None      # main 이 채운다 (프롬프트 핫 리로드)
 SYSTEM_PROMPT = (
     'You are the voice of Reachy, a friendly desk robot with two arms and a moving head. '
     'Your replies are read aloud by a speech synthesizer, so: answer in one or two short '
@@ -276,9 +277,10 @@ class OllamaJsonBackend(Backend):
     """
 
     def __init__(self, model='qwen2.5:7b', system='', host='127.0.0.1:11434',
-                 timeout=60, num_predict=600, num_ctx=8192):
+                 timeout=60, num_predict=600, num_ctx=8192, prompt_file=None):
         self.model = model
         self.system = system
+        self.prompt_file = prompt_file      # 주면 매 요청마다 최신 판을 쓴다
         self.url = 'http://{}/api/chat'.format(host)
         self.timeout = timeout
         self.num_predict = num_predict
@@ -288,7 +290,9 @@ class OllamaJsonBackend(Backend):
         import urllib.request
         body = json.dumps({
             'model': self.model,
-            'messages': [{'role': 'system', 'content': self.system},
+            'messages': [{'role': 'system',
+                          'content': (self.prompt_file.get()
+                                      if self.prompt_file else self.system)},
                          {'role': 'user', 'content': text}],
             'stream': False,
             'format': 'json',
@@ -853,7 +857,9 @@ class OllamaBackend(Backend):
     def _post(self, text, history, num_predict, stream):
         import urllib.request
 
-        messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
+        messages = [{'role': 'system',
+                     'content': (PERSONA_FILE.get() if PERSONA_FILE
+                                 else SYSTEM_PROMPT)}]
         messages += list(history)
         messages.append({'role': 'user', 'content': text})
 
@@ -1124,6 +1130,53 @@ def _validate_schema(value, schema, path='$'):
             for idx, child in enumerate(value):
                 _validate_schema(child, item_schema,
                                  '{}[{}]'.format(path, idx))
+
+
+class PromptFile(object):
+    """프롬프트 파일을 '살아 있게' 들고 있는다 - 바뀌면 다음 요청부터 적용.
+
+    페르소나·동작·시각 프롬프트는 지식이 갱신되면 함께 바뀌는데, 예전에는
+    브로커를 재시작해야 반영됐다 (모델은 상주 중이라 재시작이 곧 40초
+    적재 + 대화 끊김). mtime 만 보므로 비용이 사실상 없다.
+    """
+
+    CHECK_EVERY = 5.0
+
+    def __init__(self, path, fallback=''):
+        self.path = path
+        self.text = fallback
+        self._mtime = 0.0
+        self._checked = 0.0
+        self.reloads = 0
+        self.reload()
+
+    def reload(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return False
+        if st.st_mtime == self._mtime:
+            return False
+        try:
+            with open(self.path, encoding='utf-8') as fh:
+                self.text = fh.read().strip()
+        except OSError:
+            return False
+        first = self._mtime == 0.0
+        self._mtime = st.st_mtime
+        if not first:
+            self.reloads += 1
+            logger.info('프롬프트 갱신 반영: %s (%d자, %d번째)',
+                        os.path.basename(self.path), len(self.text),
+                        self.reloads)
+        return True
+
+    def get(self):
+        now = time.time()
+        if now - self._checked >= self.CHECK_EVERY:
+            self._checked = now
+            self.reload()
+        return self.text
 
 
 def structured_reply(provider, text, session, image, schema):
@@ -1498,11 +1551,13 @@ def main():
 
     # Both backends read the module-level SYSTEM_PROMPT, so overriding it here
     # covers the API and the CLI paths alike.
-    global SYSTEM_PROMPT
+    global SYSTEM_PROMPT, PERSONA_FILE
     if args.system_prompt_file:
-        with open(args.system_prompt_file, encoding='utf-8') as f:
-            SYSTEM_PROMPT = f.read().strip()
-        logger.info('System prompt loaded from %s (%d chars)',
+        # 파일을 '살아 있게' 들고 있는다 - 지식 싱크가 페르소나를 갱신하면
+        # 브로커 재시작(모델 재적재 40초 + 대화 끊김) 없이 다음 턴부터 적용.
+        PERSONA_FILE = PromptFile(args.system_prompt_file, SYSTEM_PROMPT)
+        SYSTEM_PROMPT = PERSONA_FILE.text
+        logger.info('System prompt loaded from %s (%d chars, 핫 리로드 켬)',
                     args.system_prompt_file, len(SYSTEM_PROMPT))
     elif args.system_prompt:
         SYSTEM_PROMPT = args.system_prompt
@@ -1522,12 +1577,13 @@ def main():
 
     motion_backend = None
     if args.motion_prompt_file:
-        with open(args.motion_prompt_file, encoding='utf-8') as f:
-            motion_prompt = f.read().strip()
+        motion_file = PromptFile(args.motion_prompt_file)
+        motion_prompt = motion_file.text
         if args.motion_backend == 'ollama':
             motion_backend = OllamaJsonBackend(model=args.motion_model,
                                                system=motion_prompt,
-                                               host=args.ollama_host)
+                                               host=args.ollama_host,
+                                               prompt_file=motion_file)
         else:
             motion_backend = ClaudeCliBackend(model=args.motion_model,
                                               timeout=120,

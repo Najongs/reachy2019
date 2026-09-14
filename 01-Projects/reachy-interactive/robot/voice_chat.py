@@ -1303,6 +1303,41 @@ def run_loop(listener, client, reachy=None, speech=None, head=None, fillers=(),
 
 
 MOTOR_RECOVERY_IO = None   # main 이 채운다 (--motions 시 io 경로)
+KNOWLEDGE_WATCH = {}       # {경로: mtime} - 지식 싱크가 보낸 새 판 감시
+
+
+def reload_knowledge(notes_holder):
+    """지식 파일(즉답 노트·STT 교정)이 바뀌었으면 다시 읽는다.
+
+    DGX 의 4시간 싱크가 새 판을 보내도 예전에는 서비스 재시작 전까지
+    옛 지식으로 답했다. 근무시간 중 재시작은 대화를 끊으므로, mtime 만
+    보고 조용히 갈아 끼운다. notes_holder 는 [QuickNotes] 한 칸 리스트.
+    """
+    changed = []
+    for path, kind in list(KNOWLEDGE_WATCH.items()):
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            continue
+        if kind.get('mtime') == mtime:
+            continue
+        first = kind.get('mtime') is None
+        kind['mtime'] = mtime
+        if first:
+            continue                       # 기동 시 등록분은 이미 읽었다
+        try:
+            if kind['type'] == 'notes':
+                from quick_notes import QuickNotes
+                notes_holder[0] = QuickNotes.load(path)
+                changed.append('즉답 %d건' % len(notes_holder[0]))
+            elif kind['type'] == 'stt':
+                load_stt_corrections(path)
+                changed.append('STT 교정')
+        except Exception:
+            logger.debug('지식 재적재 실패: %s', path, exc_info=True)
+    if changed:
+        logger.info('지식 갱신 반영(재시작 없이): %s', ', '.join(changed))
+    return bool(changed)
 
 
 def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
@@ -1312,6 +1347,8 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
          say_sentences_and_move=None, sleeper=None):
     from threading import Event, Thread
 
+    notes_holder = [notes]      # 핫 리로드가 갈아 끼울 수 있게 한 칸에
+    knowledge_check_at = 0.0
     last_kind = None   # 직전 턴 종류 (motion/chat) — 문맥 라우팅용
     offline_mute_until = 0.0   # STT 불가 안내 백오프 (한 번 말하고 점점 조용히)
     offline_backoff = 60.0
@@ -1354,6 +1391,11 @@ def _run(listener, client, reachy, speech, head, fillers, ack_delay, idle,
                                           time.time()) > 600.0):
             logger.error('카메라 프레임 10분 기아 - 재시작으로 장치를 다시 엽니다')
             os._exit(0)
+        # 지식 싱크(4시간)가 새 판을 보냈는지 - 싸다(mtime 만 본다)
+        if time.time() - knowledge_check_at >= 60.0:
+            knowledge_check_at = time.time()
+            if reload_knowledge(notes_holder):
+                notes = notes_holder[0]
         if time.time() - heartbeat_at >= HEARTBEAT_EVERY:
             heartbeat_at = time.time()
             logger.info('심장박동: %s, 턴 %d건, 마지막 밝기 %s',
@@ -1963,6 +2005,8 @@ def main():
         if os.path.exists(os.path.expanduser(notes_path)):
             from quick_notes import QuickNotes
             notes = QuickNotes.load(notes_path)
+            KNOWLEDGE_WATCH[os.path.expanduser(notes_path)] = {
+                'type': 'notes', 'mtime': None}
             logger.info('QuickNotes: %d instant-answer patterns from %s',
                         len(notes), notes_path)
         else:
@@ -1977,6 +2021,9 @@ def main():
             corr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      'stt_corrections.json')
         load_stt_corrections(corr_path)
+        if os.path.exists(os.path.expanduser(corr_path)):
+            KNOWLEDGE_WATCH[os.path.expanduser(corr_path)] = {
+                'type': 'stt', 'mtime': None}
 
     reachy = None
     head = None
