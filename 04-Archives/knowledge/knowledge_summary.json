@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-14T02:17:28+00:00",
+  "generated_at": "2026-09-14T02:23:32+00:00",
   "facts": 96,
   "delta": {
     "real": {
@@ -263,7 +263,7 @@
     },
     "sim": {
       "runs": 924,
-      "skipped_runs": 6268,
+      "skipped_runs": 7167,
       "latest": {
         "path": "/home/kiro-ai/NAJY/reachy-2019/04-Archives/raw/sim-runs/sim_data/improve-20260913-232046.json",
         "quality": 46.0,

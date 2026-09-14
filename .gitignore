@@ -24,7 +24,8 @@
 03-Resources/robot-photos/
 # 카메라 조준 확인용 스냅샷 (필요하면 camera_check.py 로 다시 찍는다)
 04-Archives/camera-views/
-
+raw/
+reference/
 # 파이썬
 __pycache__/
 *.pyc
@@ -51,3 +52,6 @@ dist/
 **/sim_data/
 **/docs/eval/
 **/behavior_params.json
+
+# 대용량 설치본 — 디스크에는 보존하되 git 에는 넣지 않는다 (GitHub 100MB 제한)
+04-Archives/reference/ollama-builds/

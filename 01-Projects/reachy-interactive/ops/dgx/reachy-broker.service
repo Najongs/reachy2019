@@ -14,8 +14,8 @@ ExecStart=/usr/bin/python3 broker/llm_broker.py --host 127.0.0.1 --port 8080 \
   --eval-backend codex
 Restart=always
 RestartSec=5
-StandardOutput=append:/home/kiro-ai/reachy-ops/broker.log
-StandardError=append:/home/kiro-ai/reachy-ops/broker.log
+StandardOutput=append:/home/kiro-ai/NAJY/reachy-2019/04-Archives/raw/ops-logs/broker.log
+StandardError=append:/home/kiro-ai/NAJY/reachy-2019/04-Archives/raw/ops-logs/broker.log
 
 [Install]
 WantedBy=default.target

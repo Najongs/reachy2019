@@ -1,4 +1,6 @@
 #!/bin/bash
+# 운영 로그는 보관고 원시층에 모였다 (2026-09-14)
+OPS_LOGS=/home/kiro-ai/NAJY/reachy-2019/04-Archives/raw/ops-logs
 # 로봇 전체 상태를 한 화면에. DGX 에서 실행한다.
 #
 #   bash ops/status.sh          # 요약
@@ -96,5 +98,5 @@ if [ "$VERBOSE" = "-v" ]; then
   $PI 'tail -n 12 ~/reachy_logs/voice_chat.log' 2>/dev/null | sed 's/^/  /'
   echo
   echo "════ 워치독 ════"
-  tail -n 5 "$HOME/reachy-ops/watchdog.log" 2>/dev/null | sed 's/^/  /' || echo "  (기록 없음 = 여태 정상)"
+  tail -n 5 "$OPS_LOGS/watchdog.log" 2>/dev/null | sed 's/^/  /' || echo "  (기록 없음 = 여태 정상)"
 fi

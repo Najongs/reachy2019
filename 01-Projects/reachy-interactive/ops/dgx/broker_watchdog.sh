@@ -13,7 +13,9 @@
 # 재시작으로 안 낫는 종류라면 2분마다 영원히 흔드는 것이 더 나쁘다.
 set -u
 HEALTH=http://127.0.0.1:8080/health
-OPS=$HOME/reachy-ops
+# 런타임 상태(재시작 타임스탬프)와 로그는 보관고 원시층에 둔다 -
+# 예전에는 홈의 ~/reachy-ops 에 흩어져 있었다 (2026-09-14 정리).
+OPS=/home/kiro-ai/NAJY/reachy-2019/04-Archives/raw/ops-logs
 LOG=$OPS/watchdog.log
 COOLDOWN=600            # 같은 대상 재시작 최소 간격(초)
 

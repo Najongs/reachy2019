@@ -12,7 +12,7 @@
 │  ├─ conversation-logs/pi/    로봇 대화·이벤트 (events.jsonl, 세션별)
 │  ├─ person-dataset/          사람 사진 + persons.db
 │  ├─ sim-runs/                시뮬 런 산출물 (세대별: legacy/codex-v1…)
-│  └─ ops-logs/                브로커·워치독·ollama 로그 (~/reachy-ops 는 링크)
+│  └─ ops-logs/                브로커·워치독·싱크 로그 + 워치독 상태파일
 ├─ knowledge/
 │  ├─ digests/YYYY-MM-DD/      2층 · 일별 요약 (real.json, sim.json)
 │  ├─ knowledge.db             3층 · 사실 원장 (종합값 + 커서 + 요약 색인)

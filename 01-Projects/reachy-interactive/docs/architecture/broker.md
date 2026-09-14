@@ -35,9 +35,24 @@ bash ops/status.sh                        # 전체 요약에 포함됨
 curl -s http://127.0.0.1:8080/stats | python3 -m json.tool
 ```
 
-- 워치독: cron 이 `~/reachy-ops/dgx/broker_watchdog.sh`(실행 심 - 실제 내용은
-  `ops/dgx/broker_watchdog.sh`) 를 돌려 `/health` 503 이면 Ollama/브로커를
-  살린다. crontab 은 긴 경로를 잘라먹은 적이 있어 심을 쓴다.
+- 워치독: cron 이 `ops/dgx/broker_watchdog.sh` 를 **직접** 돌려 `/health` 503
+  이면 Ollama/브로커를 살린다. 예전에는 `~/reachy-ops/` 에 실행 심을 두었지만,
+  홈에 로그·상태·스크립트가 흩어지는 원인이라 2026-09-14 에 없앴다 - 운영
+  로그·상태는 `04-Archives/raw/ops-logs/`, 스크립트는 저장소 한 곳이다.
+
+### Ollama 판올림 주의 (폴더 이름이 헷갈린다)
+
+| 경로 | 버전 | 상태 |
+|---|---|---|
+| `~/ollama-old/bin/ollama` | 0.3.14 | **현역** - `ollama.service` 가 이걸 실행 |
+| `~/ollama/bin/ollama` | 0.33.2 | 받아만 둠 (드라이버 550+ 필요) |
+| `~/ollama/models/` | - | 모델 11GB, 두 판이 공유(`OLLAMA_MODELS`) |
+
+이 DGX 의 드라이버는 535 다. 0.33.2 로 올리면 GPU 를 못 잡아 CPU 로 떨어진다
+(실측 1.5 tok/s vs 정상 83 tok/s). 그래서 CUDA 12.2 런너를 쓰는 0.3.14 를
+유지한다. 드라이버를 550+ 로 올린 뒤 `ollama.service` 의 `ExecStart` 와
+`LD_LIBRARY_PATH` 를 `~/ollama` 로 바꾸면 qwen3.5 계열도 받을 수 있다.
+구판 설치본 백업: `04-Archives/reference/ollama-builds/`.
 - 서비스 유닛에는 `--motion-backend ollama --motion-model qwen2.5:7b`,
   `--ground-backend codex --ground-prompt-file config/vision_prompt.txt`,
   `--eval-backend codex`가 있어야 한다. `codex login status`도 성공해야 한다.

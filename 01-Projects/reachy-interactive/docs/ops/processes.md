@@ -19,7 +19,7 @@ Pi 는 armv7l / Raspbian Buster - 파이썬·패키지 오래됨을 전제.
 |---|---|---|
 | reachy-broker | systemd --user | 브로커 :8080 (/reply /motion /ground /evaluate) |
 | ollama | 시스템 | EXAONE 3.5 (GPU0) |
-| broker_watchdog | cron (~/reachy-ops/ 심 → ops/dgx/broker_watchdog.sh) | /health 감시 |
+| broker_watchdog | cron (ops/dgx/broker_watchdog.sh 직접) | /health 감시 |
 | sim_director.py | **cron 야간 전용** (20:10~07:55 KST) | 시뮬 학습 감독 - GPU 부하와 Codex 평가 호출을 낮 시간 실물 운용과 분리 |
 | knowledge_sync.sh | **cron 4시간 (08·12·16·20시)** | Pi↔DGX 지식 왕복: 로그 당겨오기 → 지식화 → 지식 자산 돌려주기. 재시작 없이 반영(핫 리로드) |
 | daily_update.sh | cron | 로그 수집·리포트 (무거운 일: 사람 인식 백필·데이터셋 추출·주간 다이제스트) |

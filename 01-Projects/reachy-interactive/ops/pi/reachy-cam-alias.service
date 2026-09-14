@@ -1,0 +1,18 @@
+[Unit]
+Description=Alias the main Reachy camera to /dev/video0 (SDK opens index 0)
+# 배경: reachy SDK 는 카메라를 '인덱스 0' 으로 고정 접근한다. USB 재열거가
+# 일어나면 /dev/video0 자리가 비고(예: video1~4 로 밀림) SDK 는
+# CameraNotFoundError 로 죽어 로봇이 '소리만' 모드로 떨어진다 (2026-09-11
+# ~14 사흘간 그랬다). udev 가 보장하는 /dev/reachy-cam-main 을 video0 에
+# 붙여 주어 번호가 어떻게 밀리든 SDK 가 늘 같은 카메라를 열게 한다.
+After=systemd-udev-settle.service dev-reachy\x2dcam\x2dmain.device
+Wants=systemd-udev-settle.service
+Before=voice_chat.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'if [ ! -e /dev/video0 ] && [ -e /dev/reachy-cam-main ]; then ln -sfn "$(readlink -f /dev/reachy-cam-main)" /dev/video0; fi'
+
+[Install]
+WantedBy=multi-user.target
