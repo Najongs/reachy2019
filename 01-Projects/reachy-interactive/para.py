@@ -33,6 +33,7 @@ PERSON_DATASET = os.path.join(ARCHIVES, 'person-dataset')
 PERSONS = os.path.join(PERSON_DATASET, 'persons')        # 원본 + persons.db
 PERSON_EXPORT = os.path.join(PERSON_DATASET, 'dataset')  # 걸러 뽑은 것
 SIM_RUNS = os.path.join(ARCHIVES, 'sim-runs')            # 시뮬 런 보관
+KNOWLEDGE = os.path.join(ARCHIVES, 'knowledge')          # 지식 원장 (facts DB)
 
 # 어긋난 배치를 이르게 잡는 안전핀
 assert os.path.basename(ROOT) != '01-Projects', \

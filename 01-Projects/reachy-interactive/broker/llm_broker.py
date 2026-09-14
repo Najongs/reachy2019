@@ -485,6 +485,82 @@ class ClaudeCliBackend(Backend):
             self._kill(session)
 
 
+class FallbackBackend(Backend):
+    """평가기 사다리: 앞 백엔드가 죽으면 다음으로 강등한다.
+
+    2026-09-14 사고에서 나왔다: Codex 사용량 한도 하나로 야간 감독이
+    밤새 기동-즉사를 반복하며 학습을 통째로 잃었다. 단일 장애점을
+    없앤다 - 실패한 단은 COOLDOWN 동안 건너뛰어 (한도 초과를 매 호출
+    두드리지 않게) 다음 단이 곧바로 받는다.
+    """
+
+    COOLDOWN = 1800.0          # 실패한 단을 다시 시도하기까지(초)
+
+    def __init__(self, rungs):
+        self.rungs = [(name, b) for name, b in rungs if b is not None]
+        if not self.rungs:
+            raise RuntimeError('FallbackBackend: 단이 하나도 없다')
+        self._down_until = {}
+
+    def health(self):
+        detail = {}
+        any_ok = False
+        for name, b in self.rungs:
+            try:
+                h = b.health()
+            except Exception as e:
+                h = {'ok': False, 'error': str(e)}
+            detail[name] = h
+            any_ok = any_ok or bool(h.get('ok'))
+        return {'ok': any_ok, 'rungs': detail}
+
+    def _call(self, method, *args, **kw):
+        last = None
+        now = time.time()
+        for name, b in self.rungs:
+            if now < self._down_until.get(name, 0.0):
+                continue
+            try:
+                out = getattr(b, method)(*args, **kw)
+                if name != self.rungs[0][0]:
+                    logger.warning('평가기 강등 사용: %s', name)
+                return out
+            except Exception as e:
+                last = e
+                self._down_until[name] = now + self.COOLDOWN
+                logger.warning('평가 단 %s 실패(%.0f분 쉼): %s', name,
+                               self.COOLDOWN / 60, str(e)[:200])
+        raise last if last else RuntimeError('모든 평가 단이 쉼 중')
+
+    def reply(self, text, history, session='default', image=None):
+        return self._call('reply', text, history, session, image=image)
+
+    def reply_structured(self, text, session='default', image=None,
+                         schema=None):
+        # 단마다 구조화 API 유무가 다르다 - 없으면 일반 reply 로 대신한다
+        # (structured_reply 쪽에서 JSON 추출·검증을 다시 하므로 안전).
+        last = None
+        now = time.time()
+        for name, b in self.rungs:
+            if now < self._down_until.get(name, 0.0):
+                continue
+            try:
+                if hasattr(b, 'reply_structured'):
+                    out = b.reply_structured(text, session=session,
+                                             image=image, schema=schema)
+                else:
+                    out = b.reply(text, [], session=session, image=image)
+                if name != self.rungs[0][0]:
+                    logger.warning('평가기 강등 사용: %s', name)
+                return out
+            except Exception as e:
+                last = e
+                self._down_until[name] = now + self.COOLDOWN
+                logger.warning('평가 단 %s 실패(%.0f분 쉼): %s', name,
+                               self.COOLDOWN / 60, str(e)[:200])
+        raise last if last else RuntimeError('모든 평가 단이 쉼 중')
+
+
 class CodexCliBackend(Backend):
     """Codex CLI 비대화 실행기. 평가/접지마다 독립된 구조화 응답을 만든다."""
 
@@ -1477,10 +1553,17 @@ def main():
 
     evaluation_backend = None
     if args.eval_backend == 'codex':
-        evaluation_backend = CodexCliBackend(
-            model=args.eval_model, timeout=240,
-            system_prompt=('로봇 시뮬레이션 평가 전용이다. 주어진 증거만 보고 '
-                           '요청된 JSON 객체만 반환하라. 도구를 사용하지 마라.'))
+        _eval_prompt = ('로봇 시뮬레이션 평가 전용이다. 주어진 증거만 보고 '
+                        '요청된 JSON 객체만 반환하라. 도구를 사용하지 마라.')
+        _rungs = [('codex', CodexCliBackend(
+            model=args.eval_model, timeout=240, system_prompt=_eval_prompt))]
+        try:
+            _rungs.append(('opus-cli', ClaudeCliBackend(
+                model=args.vision_model, timeout=120,
+                system_prompt=_eval_prompt)))
+        except Exception:
+            logger.warning('평가 뒷단(opus CLI) 준비 실패 - codex 단독')
+        evaluation_backend = FallbackBackend(_rungs)
     elif args.eval_backend == 'claude-cli':
         evaluation_backend = ClaudeCliBackend(
             model=args.vision_model, timeout=120,

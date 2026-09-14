@@ -122,16 +122,23 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
                        if not components.get(name, {}).get('enabled')
                        or not components.get(name, {}).get('ok')]
         if unavailable:
-            print('[감독 중단] 브로커 구성 사전검사 실패: %s'
-                  % ', '.join(unavailable), flush=True)
-            return {'status': 'evaluation_unavailable',
-                    'components': components}
-        probe = client.ask_evaluation(
-            '평가기 연결 확인이다. {"ok": true}만 반환하라.', kind='health')
-        if not probe or probe.get('ok') is not True:
-            print('[감독 중단] 평가기 사전검사 실패: %s'
-                  % (client.last_error or probe), flush=True)
-            return {'status': 'evaluation_unavailable'}
+            # 중단하지 않는다 - 2026-09-14 사고: Codex 한도 하나로 밤새
+            # 기동-즉사를 반복하며 학습을 통째로 잃었다. 평가기가 없으면
+            # 계측 전용(offline) 으로 강등해 CEM 이라도 굴린다.
+            print('[감독 강등] 브로커 구성 사전검사 실패(%s) - '
+                  'offline 계측 전용으로 계속' % ', '.join(unavailable),
+                  flush=True)
+            offline = True
+            client = None
+        else:
+            probe = client.ask_evaluation(
+                '평가기 연결 확인이다. {"ok": true}만 반환하라.', kind='health')
+            if not probe or probe.get('ok') is not True:
+                print('[감독 강등] 평가기 사전검사 실패(%s) - '
+                      'offline 계측 전용으로 계속'
+                      % (client.last_error or probe), flush=True)
+                offline = True
+                client = None
     else:
         print('[감독] offline metric-only: Codex/Ollama 호출 없이 CEM 계측만 사용',
               flush=True)
@@ -210,7 +217,15 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
                 batch_line = '배치 실패: %s' % e
             # 3) 증거 -> 방향 결정
             fb = I.load_feedback()
+            try:
+                sys.path.insert(0, os.path.abspath(
+                    os.path.join(HERE, '..', 'ops', 'data')))
+                import knowledge_ledger as KL
+                knowledge = KL.digest_for_director()
+            except Exception as e:
+                knowledge = {'오류': str(e)[:80]}
             evidence = json.dumps({
+                '지식 요약(실전+누적)': knowledge,
                 '학습': {k: summary.get(k) for k in
                          ('quality_first', 'quality_last', 'exam',
                           'natural_min', 'incidents', 'duels', 'picked')},
