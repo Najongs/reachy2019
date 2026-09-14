@@ -1,6 +1,6 @@
 """행동을 반복 개선하는 루프 - 성공은 문지기, 품질은 목표.
 
-    평가(결정론 지표 + opus 비평) -> 파라미터 후보 생성 -> 같은 태스크로
+    평가(결정론 지표 + Codex 비평) -> 파라미터 후보 생성 -> 같은 태스크로
     재평가 -> 객관 성공이 안 깨진 후보 중 품질 최고를 채택 -> 반복
 
 강화학습의 실용판이다: 보상(품질 점수 + 자연스러움 비평)을 보고 정책
@@ -8,12 +8,12 @@
 언어모델이 아니라 계측이 판정하고, 그걸 깨는 후보는 품질이 아무리 좋아도
 버린다.** 언어모델은 '어떻게 움직였는가' 만 비평한다.
 
-후보 = 현재 + opus 조언 반영 + 무작위 흔들기. 같은 태스크 묶음으로 비교해야
+후보 = 현재 + Codex 조언 반영 + 무작위 흔들기. 같은 태스크 묶음으로 비교해야
 운이 아니라 파라미터 차이를 잰다.
 
 사용:
     python3 sim/sim_improve.py --iters 3 --token reachy2019
-    python3 sim/sim_improve.py --iters 2                # opus 비평 없이 지표만
+    python3 sim/sim_improve.py --iters 2                # Codex 비평 없이 지표만
 """
 
 import copy
@@ -38,6 +38,13 @@ import sim_tasks as T                              # noqa: E402
 # 파라미터 허용 범위 - 이 밖은 물리적으로 무의미하거나 위험.
 BOUNDS = {'step_deg': (1.5, 8.0), 'gain': (0.3, 1.4), 'damping': (1.0, 10.0),
           'table_min': (0.2, 3.0), 'lift_steps': (3, 14),
+          # 단계별 폐루프 정책. 전 구간 공용 step/gain만 학습하면 빠른
+          # 접근과 안정적인 파지가 서로 상쇄되므로 별도 배율을 찾는다.
+          'approach_scale': (0.55, 1.20),
+          'descend_scale': (0.35, 0.90),
+          'lift_scale': (0.40, 1.00),
+          'carry_scale': (0.55, 1.15),
+          'grasp_bias_cm': (0.3, 1.3),
           # 경로 구조 - 경유 자세 3개를 통째로 탐색. 투과는 문지기가 거른다.
           'via1_pitch': (-40.0, 15.0), 'via1_roll': (-110.0, -25.0),
           'via1_yaw': (0.0, 60.0), 'via1_elbow': (-125.0, 5.0),
@@ -98,7 +105,7 @@ def episode(task, keep_frames=False, natural_min=55):
         q = C.quality(trace) if trace else {'score': 0}
         # look 처럼 팔을 안 쓰는 태스크는 궤적이 없다 - 품질 문턱을 건너뛴다
         # (sim_pipeline._verdict 와 같은 규칙).
-        uses_arm = task['kind'] in ('reach', 'point', 'pick')
+        uses_arm = task['kind'] in ('reach', 'point', 'pick', 'lift')
         stage, why = C.stage_verdict(
             path_tab, path_obj, path_tgt, reached,
             q.get('score', 0) if uses_arm else 100, natural_min)
@@ -118,9 +125,17 @@ def evaluate(params, tasks, natural_min=55):
     A.BEHAVIOR.update(_clamp(params))
     counts = {k: 0 for k in C.STAGES}
     scores, dists, aligns = [], [], []
+    by_object = {}
     for t in tasks:
         stage, q, _ = episode(t, natural_min=natural_min)
         counts[stage] += 1
+        target_kind = next((o.get('kind') for o in t.get('scene', [])
+                            if o.get('name') == t.get('target')), 'unknown')
+        obj_counts = by_object.setdefault(
+            target_kind, {'n': 0, 'success': 0, 'collision': 0})
+        obj_counts['n'] += 1
+        obj_counts['success'] += int(stage == 'success')
+        obj_counts['collision'] += int(stage == 'collision')
         scores.append(q.get('score', 0))
         counts.setdefault('incidents', set()).update(q.get('incidents') or [])
         if q.get('cause'):
@@ -141,14 +156,18 @@ def evaluate(params, tasks, natural_min=55):
     counts['quality'] = sum(scores) / max(len(scores), 1)
     counts['miss_cm'] = sum(dists) / max(len(dists), 1)
     counts['grasp_cm'] = sum(aligns) / max(len(aligns), 1)
+    counts['by_object'] = by_object
+    counts['object_floor'] = min(
+        (v['success'] / float(v['n']) for v in by_object.values()),
+        default=0.0)
     return counts
 
 
 def hold_duel(client, task, params_a, params_b, natural_min, save_to=None):
-    """같은 태스크로 A(현재)/B(도전자) 를 돌려 opus 쌍대 심판. 'A'/'B'/None.
+    """같은 태스크로 A(현재)/B(도전자)를 돌려 Codex 쌍대 심판. 'A'/'B'/None.
 
     결정론 품질 점수가 DUEL_MARGIN 이내로 갈리는 선택은 점수 잡음 밴드
-    안이다 - 그 안에서는 사람 눈(opus 비교)이 가르게 한다.
+    안이다 - 그 안에서는 사람 눈 대리(Codex 비교)가 가르게 한다.
     """
     saved = dict(A.BEHAVIOR)
     try:
@@ -219,10 +238,11 @@ def propose(current, advice, rng, n_random=3, scale=1.0):
 
 REFRESH_EVERY = 6       # 이 횟수마다 태스크 묶음을 새로 뽑는다 (과적합 방지)
 VALIDATE_EVERY = 60     # end-to-end 검증 주기
-CRITIQUE_EVERY = 3      # opus 비평 주기 (10시간 기준 시간당 ~20콜 수준)
-DUEL_MARGIN = 4.0       # 이 품질 차 이내면 '박빙' - opus 쌍대 결투로 심판
+CRITIQUE_EVERY = 3      # Codex 비평 주기 (10시간 기준 시간당 ~20콜 수준)
+DUEL_MARGIN = 4.0       # 이 품질 차 이내면 '박빙' - Codex 쌍대 결투로 심판
 ORCHESTRA_EVERY = 30    # 오케스트라 주기 - 환경 실험 제안 + 지적 관리
 FEEDBACK_FILE = os.path.join(HERE, '..', 'config', 'sim_feedback.json')
+BEST_FILE = os.path.join(HERE, '..', 'sim_data', 'best_behavior.json')
 
 
 def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
@@ -255,30 +275,33 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         빈 목록이 그대로 흘러가면 '성공 0/0' 이 전원 성공(공허참)으로 통해
         래칫이 폭주한다 - 실제로 겪었다. 끝내 못 만들면 이전 것을 유지.
         """
+        best_tasks = []
         for tryn in range(6):
             ts = T.generate_feasible(
                 n_tasks, seed=seed * 977 + k + tryn * 131071,
                 kinds=kinds, env=env)
             if len(ts) >= n_tasks:
                 return ts
+            if len(ts) > len(best_tasks):
+                best_tasks = ts
         if fallback:
-            print('  태스크 생성 부족(%d) - 기존 유지' % len(ts), flush=True)
+            print('  태스크 생성 부족(%d/%d) - 기존 유지'
+                  % (len(best_tasks), n_tasks), flush=True)
             return fallback
-        if not ts:
-            # 포켓이 희소하면 굶어 죽지 말고 스위트스팟 커리큘럼으로 -
-            # 무작위 어려운 태스크(성공 0, 신호=거리뿐)보다 잡기 좋은
-            # 자리의 쉬운 태스크가 파지 신호(맞물림/정렬)를 흘린다.
-            sweet = T.generate_sweet(n_tasks, seed=seed * 977 + k,
-                                     kinds=kinds, env=env)
-            filt = [t for t in sweet if T.feasible(t)]
-            use = filt if len(filt) >= max(2, n_tasks // 2) else sweet
-            if use:
-                print('[주의] 실현가능 태스크 없음 - 스위트스팟 %d개'
-                      '(사전검증 %d)로 훈련' % (len(use), len(filt)),
-                      flush=True)
-                return use
-            raise RuntimeError('태스크 생성 실패')
-        return ts
+        # 포켓이 희소하면 검증된 스위트스팟으로 시작한다. 일부만 통과한
+        # 일반 태스크를 조용히 쓰거나, 검증하지 않은 태스크를 섞지 않는다.
+        sweet = T.generate_sweet(n_tasks, seed=seed * 977 + k,
+                                 kinds=kinds, env=env)
+        filt = [t for t in sweet if T.feasible(t)]
+        minimum = min(n_tasks, max(2, n_tasks // 2))
+        if len(filt) >= minimum:
+            print('[주의] 일반 태스크 부족 - 검증된 스위트스팟 %d개로 훈련'
+                  % len(filt), flush=True)
+            return filt
+        raise RuntimeError(
+            'Oracle 기준선 실패: 일반 %d/%d, 검증된 스위트스팟 %d/%d. '
+            '학습을 시작하지 않습니다.'
+            % (len(best_tasks), n_tasks, len(filt), len(sweet)))
 
     env = T.clamp_env(env0) if env0 else dict(T.ENV_DEFAULT)
     feedback = load_feedback()
@@ -300,7 +323,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
     run_incidents = set()
 
     def rank(counts):
-        """충돌 적게 > 성공 > 맞물림 > 가깝게 > 정렬 잔차 > 품질.
+        """충돌 > 성공 > 최저 물체군 > 맞물림 > 거리 > 정렬 > 품질.
 
         성공이 0 인 밤에도 기울기가 서게, 파지 계측(맞물림 수·슬롯
         정렬 잔차)을 성공과 거리 사이의 신호로 승격했다 (실패원인
@@ -312,18 +335,55 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
         품질(비평이 짚는 과신전·우회)이 영원히 발언권을 잃는다.
         """
         return (-counts['collision'], counts['success'],
+                round(counts.get('object_floor', 0.0), 3),
                 counts.get('grabbed', 0),
                 -round(counts.get('miss_cm', 99.0), 1),
                 -round(counts.get('grasp_cm', 30.0), 1),
                 counts['quality'])
 
+    candidates = []
     base = evaluate(current, tasks, natural_min)
     report = evaluate(current, exam, natural_min)
-    best_ever = {'quality': report['quality'], 'success': report['success'],
-                 'params': dict(current), 'natural_min': natural_min}
+    candidates.append((rank(report), current, base, report, 'current'))
+
+    default_params = _clamp(dict(A.DEFAULTS))
+    if default_params != current:
+        default_base = evaluate(default_params, tasks, natural_min)
+        default_report = evaluate(default_params, exam, natural_min)
+        candidates.append((rank(default_report), default_params, default_base,
+                           default_report, 'defaults'))
+
+    saved_best = None
+    try:
+        saved_best = json.load(open(BEST_FILE, encoding='utf-8'))
+        saved_params = _clamp(dict(saved_best['params']))
+        saved_base = evaluate(saved_params, tasks, natural_min)
+        saved_report = evaluate(saved_params, exam, natural_min)
+        if saved_report['collision'] == 0 and saved_report['success'] >= len(exam):
+            candidates.append((rank(saved_report), saved_params, saved_base,
+                               saved_report, 'persistent-best'))
+    except Exception:
+        saved_best = None
+
+    _, current, base, report, baseline_name = max(
+        candidates, key=lambda item: item[0])
+    current = dict(current)
+    center = dict(current)
+    A.BEHAVIOR.update(current)
+    A.save_behavior(current)
+    if baseline_name != 'current':
+        print('[기준선 복원] %s 가 현재 파라미터보다 고정 시험지에서 우수합니다.'
+              % baseline_name, flush=True)
+
+    best_ever = None
+    if report['collision'] == 0 and report['success'] >= len(exam):
+        best_ever = {'quality': report['quality'], 'success': report['success'],
+                     'params': dict(current), 'natural_min': natural_min}
+        with open(BEST_FILE, 'w', encoding='utf-8') as fh:
+            json.dump(best_ever, fh, ensure_ascii=False, indent=1)
     stagnant = 0
     perfect_streak = 0
-    duel_flips = 0      # opus 가 계측 선택을 뒤집은 횟수 (보정 감사 신호)
+    duel_flips = 0      # Codex가 계측 선택을 뒤집은 횟수 (보정 감사 신호)
     zero_streak = 0     # 성공 0 연속 - 지속되면 best_ever 로 복귀
     stamp = time.strftime('%Y%m%d-%H%M%S')
     out = os.path.join(HERE, '..', 'sim_data', 'improve-%s.json' % stamp)
@@ -365,8 +425,11 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                 base = evaluate(current, tasks, natural_min)
                 print('[%s] 반복 %d: 태스크 교체 -> %s'
                       % (time.strftime('%H:%M'), it, fmt(base)), flush=True)
+            prior_current = dict(current)
+            prior_base = base
+            prior_report = report
 
-            # opus 비평 (주기적으로; 실패해도 루프는 계속)
+            # Codex 비평 (주기적으로; 실패해도 결정론 후보 평가는 계속)
             advice, naturalness, rubric = None, None, None
             # 감시는 랜덤 표본이다 - 고정 주기는 주기에 맞춰 좋아 보이는
             # 것만 잡힌다 (사용자 지적). 평균 빈도는 이전과 같게.
@@ -388,7 +451,14 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                     if crit:
                         naturalness = crit.get('naturalness')
                         rubric = crit.get('rubric')
-                        advice = crit.get('advice') or None
+                        raw_advice = crit.get('advice') or []
+                        if isinstance(raw_advice, list):
+                            advice = {a.get('parameter'): a.get('direction')
+                                      for a in raw_advice if isinstance(a, dict)
+                                      and a.get('parameter') in BOUNDS
+                                      and a.get('direction') in ('up', 'down')}
+                        else:
+                            advice = raw_advice or None
                     if frames:
                         A._write_video(frames, os.path.join(
                             media, 'iter%04d.mp4' % it))
@@ -433,7 +503,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                 sigma[k] = min(0.25 * span[k],
                                max(0.02 * span[k], var ** 0.5 * 1.15))
 
-            # 쌍대 결투: 결정론 품질이 박빙일 때 opus 가 A/B 로 가른다.
+            # 쌍대 결투: 결정론 품질이 박빙일 때 Codex가 A/B로 가른다.
             # 계측이 근소하게 고른 승자를 사람 눈이 거부하면 채택을 물리고
             # (거부권), 근소하게 진 도전자를 사람 눈이 고르면 승격시킨다.
             duel_pick, duel_detail = None, None
@@ -465,11 +535,20 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             base = best[1]
             current = best[3]
             A.BEHAVIOR.update(current)
-            A.save_behavior(current)
 
             # 시험지 채점: 훈련셋은 선택용, 기록·래칫·최고 갱신은 전부
             # 고정 시험지로 - 추이가 태스크 교체에 흔들리지 않는다.
             report = evaluate(current, exam, natural_min)
+            # 훈련셋에서 좋아 보여도 고정 시험지 순위가 후퇴하면 채택하지
+            # 않는다. 예전에는 저장부터 한 뒤 시험해 실패 파라미터가 다음
+            # 감독 사이클의 시작점이 되었다.
+            if rank(report) < rank(prior_report):
+                current = prior_current
+                base = prior_base
+                report = prior_report
+                best = (rank(base), base, 'current-exam-guard', current)
+                A.BEHAVIOR.update(current)
+            A.save_behavior(current)
             # 관찰자: 절차가 남긴 사건을 지적 원장으로 자동 승격한다 -
             # 사람이 영상을 봐야만 잡히던 결함(허공 조임 등)의 기계화.
             run_incidents.update(report.get('incidents') or [])
@@ -480,16 +559,19 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                     save_feedback(feedback)
                     print('[관찰자] 사건 등록: %s' % inc, flush=True)
             if (report['collision'] == 0 and report['success'] >= len(exam)
-                    and report['quality'] > best_ever['quality']):
+                    and (best_ever is None
+                         or report['quality'] > best_ever['quality'])):
                 best_ever = {'quality': report['quality'],
                              'success': report['success'],
                              'params': dict(current), 'iter': it,
                              'natural_min': natural_min}
+                with open(BEST_FILE, 'w', encoding='utf-8') as fh:
+                    json.dump(best_ever, fh, ensure_ascii=False, indent=1)
 
             # 탈출구: 시험지 성공 0 이 오래가면 못 도달하는 구석에 갇힌
             # 것이다. 전원 성공이었던 best_ever 로 되돌려 다시 시작.
             zero_streak = zero_streak + 1 if report['success'] == 0 else 0
-            if zero_streak >= 10 and best_ever.get('params'):
+            if zero_streak >= 10 and best_ever and best_ever.get('params'):
                 current = _clamp(dict(best_ever['params']))
                 A.BEHAVIOR.update(current)
                 A.save_behavior(current)
@@ -521,6 +603,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
 
             history.append({'iter': it,
                             'causes': report.get('causes'),
+                            'exam_by_object': report.get('by_object'),
                             'counts': {k: base[k] for k in C.STAGES},
                             'quality': round(base['quality'], 1),
                             'exam': {k: report[k] for k in C.STAGES},
@@ -608,13 +691,14 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
                 except Exception as e:
                     print('  오케스트라 실패(계속 진행): %s' % e, flush=True)
 
-            # 주기적 end-to-end 검증: opus 접지 포함 실전 배치가 여전히 되나.
+            # 주기적 end-to-end 검증: Codex 접지 포함 실전 배치가 여전히 되나.
             if client is not None and it % VALIDATE_EVERY == 0:
                 try:
                     import sim_pipeline as PL
                     rid, summ, flags = PL.run_batch(
                         4, ('look', 'reach'), 'broker', url, token,
-                        seed=it, tag='improve-check%d' % it)
+                        seed=it, tag='improve-check%d' % it,
+                        include_speech=False)
                     print('[%s] end-to-end 검증: %d/%d, 감사 %s'
                           % (time.strftime('%H:%M'), summ['success'],
                              summ['n'], '깨끗' if not flags else flags[0][:40]),
@@ -632,8 +716,9 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
 
     checkpoint()
     qs = [h.get('exam_quality', h['quality']) for h in history]
-    print('품질 추이: %.0f -> %.0f (최고 %.0f, 최종 문턱 %d, 반복 %d회)'
-          % (qs[0], qs[-1], best_ever['quality'], natural_min,
+    best_quality = best_ever['quality'] if best_ever else 0.0
+    print('품질 추이: %.0f -> %.0f (검증 최고 %.0f, 최종 문턱 %d, 반복 %d회)'
+          % (qs[0], qs[-1], best_quality, natural_min,
              len(history) - 1))
     last = history[-1]
     cause_total = {}
@@ -647,7 +732,7 @@ def run(iters=3, n_tasks=4, seed=0, token=None, url='http://127.0.0.1:8080',
             'incidents': sorted(run_incidents),
             'duels': sum(1 for h2 in history if h2.get('duel')),
             'picked': [h2.get('picked') for h2 in history[-8:]],
-            'best_quality': best_ever['quality'],
+            'best_quality': best_quality,
             'params': dict(current)}
     print('기록: %s  |  채택 파라미터: config/behavior_params.json' % out)
     return history

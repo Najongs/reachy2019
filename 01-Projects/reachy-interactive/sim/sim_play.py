@@ -1,6 +1,6 @@
 """Drive the virtual robot from the keyboard - no mic, no TTS, no hardware.
 
-Runs the exact same motion pipeline (opus generation -> safety validation ->
+Runs the exact same motion pipeline (Qwen generation -> safety validation ->
 50 Hz executor with hand-follow) against the io='ws' virtual robot, so you
 can watch everything in sim_viewer.html before it ever touches the real arms.
 
@@ -8,7 +8,7 @@ Usage (on the Pi; stop any session using port 6171 first):
     python3 sim_play.py --list                        # show presets
     python3 sim_play.py --preset wave                 # play a preset
     python3 sim_play.py --say "왼팔 천천히 들어봐" \
-        --url http://127.0.0.1:8080 --token ...       # opus-generated motion
+        --url http://127.0.0.1:8080 --token ...       # Qwen-generated motion
     python3 sim_play.py --repl --url ... --token ...  # type commands in a loop
 """
 

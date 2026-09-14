@@ -11,12 +11,12 @@ robot/voice_chat.py                                broker/llm_broker.py
   ├─ 목 제스처 (say_and_move) ─── 로컬 ───────────  (LLM 안 씀)
   ├─ 물체 주시 (object_vision) ── 로컬 DNN ────────  (LLM 안 씀)
   ├─ 대화 ───────── HTTP /reply ──────────────────▶ Ollama + EXAONE (무료·GPU)
-  └─ 팔 동작 ────── HTTP /motion ─────────────────▶ Claude opus (동작 JSON)
+  └─ 팔 동작 ────── HTTP /motion ─────────────────▶ Ollama + Qwen (동작 JSON)
                                                      ↑ config/persona.txt, motion_prompt.txt
        경로: Pi → (SSH 터널 -L 8080) → DGX.  ops/pi_tunnel.service
 ```
 
-**설계 원칙**: 인터넷·LLM 없이도 되는 건 전부 로컬에서 (인사·FAQ·목·물체주시·오프라인 STT). LLM 은 열린 대화(무료 로컬)와 새 동작 생성(opus)에만.
+**설계 원칙**: 인터넷·LLM 없이도 되는 건 전부 로컬에서 (인사·FAQ·목·물체주시·오프라인 STT). 실물의 열린 대화와 새 동작 생성은 로컬 모델을 쓰고, Codex는 시뮬의 접지·평가에만 쓴다.
 
 ## 빠른 확인 (나중에 돌려볼 때 여기부터)
 
@@ -54,7 +54,8 @@ bash ~/Documents/brightness_report.sh    # 시간대별 화면 밝기(수면 문
  │  Reachy (Pi 4, Buster, armv7l)   │        │                                  │
  │                                  │        │  llm_broker :8080                │
  │  voice_chat.py  ─ 마이크→STT     │◀──────▶│    대화 → ollama/EXAONE (로컬)   │
- │    │              →라우팅→TTS    │  터널  │    동작 → claude CLI (opus)      │
+ │    │              →라우팅→TTS    │  터널  │    동작 → ollama/Qwen            │
+ │    │                             │        │    시뮬 접지·평가 → Codex CLI    │
  │    ├─ presence   사람 검출(SSD)  │        │                                  │
  │    ├─ hallway    인사·데이터수집 │        │  ollama :11434 (GPU 0)           │
  │    ├─ motion_exec 팔 동작 안전층 │        │                                  │
@@ -71,7 +72,7 @@ bash ~/Documents/brightness_report.sh    # 시간대별 화면 밝기(수면 문
 |---|---|---|
 | 듣기 | Google STT → 끊기면 vosk(오프라인) | — |
 | 대화 | — | ollama + EXAONE 3.5 (무료·로컬) |
-| 동작 생성 | 안전 검증·실행 | claude CLI (opus) 가 키프레임 생성 |
+| 동작 생성 | 안전 검증·실행 | ollama/Qwen 이 키프레임 생성 |
 | 사람 검출 | MobileNet-SSD (armv7l 한계) | Faster R-CNN 으로 다시 제대로 |
 | 말하기 | edge-tts, 자주 쓰는 말은 미리 합성 | — |
 
@@ -98,7 +99,7 @@ bash ~/Documents/brightness_report.sh    # 시간대별 화면 밝기(수면 문
 | 폴더 | 실행 위치 | 내용 |
 |---|---|---|
 | `robot/` | **Pi** | 로봇에서 도는 전부 → [docs/architecture/robot-runtime.md](docs/architecture/robot-runtime.md) |
-| `broker/` | **DGX** | LLM 브로커 (/reply /motion /vision) → [docs/architecture/broker.md](docs/architecture/broker.md) |
+| `broker/` | **DGX** | LLM 브로커 (/reply /motion /ground /evaluate) → [docs/architecture/broker.md](docs/architecture/broker.md) |
 | `sim/` | **DGX GPU0** | MuJoCo 시뮬 축 전부 → [docs/sim/pipeline.md](docs/sim/pipeline.md) |
 | `config/` | DGX | 페르소나·프롬프트·행동 파라미터·즉답 노트 |
 | `ops/` | Pi/DGX | 엔트리포인트(status/deploy/daily_update) + `pi/` `dgx/` `data/` → [docs/ops/processes.md](docs/ops/processes.md) |

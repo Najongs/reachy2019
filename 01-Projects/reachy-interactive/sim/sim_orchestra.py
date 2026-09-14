@@ -10,7 +10,7 @@
   audit(records)      결정론적 감사 - 거짓 성공/깨진 지표/체계적 실패 플래그.
                       LLM 아님. 여기서 걸리면 사람이 봐야 한다.
   curriculum(summary) 다음 배치 난이도 제안 (결정론적 규칙).
-  review(summary, audit, client)  opus 총평 한 번 - 감사 결과와 요약을 주고
+  review(summary, audit, client)  Codex 총평 한 번 - 감사 결과와 요약을 주고
                       사람이 읽을 소견을 받는다. 배치당 1회, 전용 세션.
 """
 
@@ -53,7 +53,7 @@ def audit(records):
     #    무관하게 참이 됐다. look 은 시선 태스크라 손 거리를 안 본다 - 첫
     #    실행에서 look 에 이 규칙을 적용해 오탐 3건을 낸 교훈이다.
     for r in records:
-        if r['task']['kind'] not in ('reach', 'point', 'pick'):
+        if r['task']['kind'] not in ('reach', 'point', 'pick', 'lift'):
             continue
         v = r['verdict']
         ex = r.get('execution') or {}
@@ -75,6 +75,12 @@ def audit(records):
     per = [bool(r.get('perception', {}).get('seen')) for r in records]
     if n >= 4 and not any(per):
         flags.append('인지 전멸 - 검출/시선 훑기가 통째로 죽었는데 배치는 돌았다.')
+
+    infra = [r['task']['id'] for r in records
+             if r.get('verdict', {}).get('stage') == 'infra_error']
+    if infra:
+        flags.append('계획 백엔드 오류 %d건(%s) - 동작 실패 통계와 분리하고 '
+                     '배치를 중단하라.' % (len(infra), ', '.join(infra)))
 
     # 5) 유형별 전멸: 특정 유형만 0이면 기구학/판정의 구조적 문제.
     by_kind = {}
@@ -103,18 +109,20 @@ def curriculum(summary):
 
 
 def review(summary, audit_flags, client=None):
-    """opus 총평 (배치당 1회, 전용 세션). client 없으면 결정론 요약만."""
+    """Codex 총평 (배치당 1회). client 없으면 결정론 요약만."""
     if client is None:
         return None
     prompt = (
         '로봇 시뮬 파이프라인 실행 리뷰어다. 아래 배치 요약과 자동 감사 결과를 '
         '보고, 사람이 읽을 총평을 한국어 5문장 이내로 써라. 감사에 걸린 항목이 '
         '있으면 그것부터, 없으면 다음에 시도할 개선 1가지를 제안하라. '
-        '점수를 매기지 말고 구체적으로.\n\n'
+        '점수를 매기지 말고 구체적으로. '
+        '반드시 {"review":"총평"} JSON 객체로 답하라.\n\n'
         '배치 요약:\n%s\n\n자동 감사:\n%s'
         % (json.dumps(summary, ensure_ascii=False, indent=1),
            '\n'.join('- ' + f for f in audit_flags) or '- 깨끗함'))
     try:
-        return client.ask_vision(prompt)     # 전용 opus CLI 세션 재사용
+        out = client.ask_evaluation(prompt, kind='review')
+        return (out or {}).get('review')
     except Exception:
         return None

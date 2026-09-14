@@ -13,6 +13,7 @@
 # 복도에서 모은 사람 사진 (개인정보 + 용량). 원본과 뽑아 낸 것 모두.
 04-Archives/person-dataset/
 04-Archives/sim-runs/
+04-Archives/knowledge/
 **/reachy_logs/
 **/motion_candidates.json
 **/adopted_presets.py

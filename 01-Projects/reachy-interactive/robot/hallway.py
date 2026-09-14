@@ -227,7 +227,7 @@ class HallwayGreeter(object):
     def begin_turn(self):
         """Main loop: a user turn started - hard-mute the greeter until end_turn.
 
-        The activity timestamp alone is not enough: a motion turn (opus wait +
+        The activity timestamp alone is not enough: a motion turn (model wait +
         gesture) can run well past the recency window, and the greeter must
         never speak over an ongoing conversation.
         """

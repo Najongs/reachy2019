@@ -1,19 +1,19 @@
 """동작을 스스로 만들고, 시뮬에서 돌려 보고, 평가받아 고치는 것을 되풀이한다.
 
-    말 만들기(ollama, 무료)  ->  동작 설계(opus)  ->  시뮬 실행 + 채점(로컬)
+    말 만들기(ollama, 무료)  ->  동작 설계(Qwen)  ->  시뮬 실행 + 채점(로컬)
                                       ^                        |
                                       +--- 지적 + 궤적 그림 ----+
 
 강화학습은 아니다. 보상으로 정책을 갱신하는 게 아니라, 채점 결과를 말로 돌려
-주고 설계자(opus)가 다시 쓰게 한다. 이 로봇에서는 그쪽이 맞다 - 관절이 15개고
+주고 설계자(Qwen)가 다시 쓰게 한다. 이 로봇에서는 그쪽이 맞다 - 관절이 15개고
 동작은 키프레임 열두 개 이하라, 수백만 번 굴릴 대상이 아니라 '몇 번 고쳐 쓰면
 되는' 대상이다. 그리고 채점기가 실물과 같은 검증기를 쓰므로, 여기서 통과한
 동작은 실물에서도 통과한다.
 
 GPU 는 ollama 가 이미 올라가 있는 한 장만 쓴다. 채점은 순기구학이라 CPU 로
-돌고, opus 는 이 기계의 GPU 를 쓰지 않는다.
+돈다.
 
-비용 주의: opus 호출은 사용자의 구독을 쓴다. 한 과제당 최대 (1 + --fix-rounds)
+호출량 주의: 한 과제당 Qwen 설계 호출은 최대 (1 + --fix-rounds)
 번이다. 기본값은 5과제 x 3번 = 15번.
 
 사용:
@@ -204,8 +204,8 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
     """한 과제를 설계하고, 탐색으로 다듬고, 남은 지적은 다시 설계시킨다.
 
     역할이 셋이다:
-      opus   무엇을 할지 (관절 선택, 키프레임 구성, 이야기)
-      CEM    각도와 시간의 미세 조정 (opus 호출 0회, 1분에 수천 번)
+      Qwen   무엇을 할지 (관절 선택, 키프레임 구성, 이야기)
+      CEM    각도와 시간의 미세 조정 (모델 호출 0회, 1분에 수천 번)
       교훈   되풀이된 지적을 다음 설계 앞에 놓는다
     """
     say = task['say']
@@ -242,7 +242,7 @@ def improve(task, url, token, session, fix_rounds, keep_images=None,
         raw = sim_eval.evaluate(moves, request=say)
         polished, info = (moves, {})
         if raw['ok']:
-            # 구조는 그대로 두고 숫자만 다듬는다. opus 호출은 늘지 않는다.
+            # 구조는 그대로 두고 숫자만 다듬는다. 모델 호출은 늘지 않는다.
             polished, info = sim_opt.optimize(
                 moves, iters=opt_iters, pop=opt_pop, workers=workers,
                 seed=attempt, request=say)
@@ -329,7 +329,7 @@ def report(path):
     """지난 학습 기록을 되짚는다. 누가 얼마나 기여했나.
 
     한 번 돌리고 끝이 아니라, 무엇이 실제로 점수를 올렸는지 봐야 다음에 뭘
-    고칠지 알 수 있다. opus 를 더 부를지, 탐색을 더 돌릴지, 교훈을 손볼지.
+    고칠지 알 수 있다. Qwen을 더 부를지, 탐색을 더 돌릴지, 교훈을 손볼지.
     """
     with open(path, encoding='utf-8') as fh:
         data = json.load(fh)
@@ -355,10 +355,10 @@ def report(path):
 
     n = len(rows)
     print('  단계별 평균 점수')
-    print('    opus 첫 설계        %5.1f' % (sum(draft) / n))
-    print('    + CEM 탐색          %5.1f   (+%.1f, opus 호출 0회)'
+    print('    Qwen 첫 설계        %5.1f' % (sum(draft) / n))
+    print('    + CEM 탐색          %5.1f   (+%.1f, 모델 호출 0회)'
           % (sum(after_opt) / n, sum(opt_gains) / n))
-    print('    + opus 재설계       %5.1f   (+%.1f)'
+    print('    + Qwen 재설계       %5.1f   (+%.1f)'
           % (sum(final) / n, sum(redesign_gains) / n))
     print()
 
@@ -396,12 +396,12 @@ def main():
     ap.add_argument('--url', default='http://127.0.0.1:8080')
     ap.add_argument('--token', default=os.environ.get('BROKER_TOKEN'))
     ap.add_argument('--rounds', type=int, default=5,
-                    help='몇 개 과제를 돌릴지 (opus 호출 = 과제수 x (1+fix))')
+                    help='몇 개 과제를 돌릴지 (Qwen 호출 = 과제수 x (1+fix))')
     ap.add_argument('--fix-rounds', type=int, default=2,
                     help='한 과제를 몇 번까지 다시 설계시킬지')
     ap.add_argument('--tasks', help='미리 만들어 둔 과제 json (없으면 즉석 생성)')
     ap.add_argument('--session', default='sim-train',
-                    help='opus 대화 세션. 같은 세션이면 앞 과제의 지적을 기억한다')
+                    help='동작 모델 세션. 같은 세션이면 앞 과제의 지적을 기억한다')
     ap.add_argument('--keep-images', help='시도마다의 궤적 그림도 남긴다')
     ap.add_argument('--video', action='store_true',
                     help='과제마다 초안/최종 비교 영상도 만든다 (MuJoCo, 편당 5~10초)')
@@ -449,7 +449,7 @@ def main():
         tasks = sim_scenarios.build(n_personas=3, per_persona=4,
                                     n_situations=3)['tasks']
     tasks = tasks[:args.rounds]
-    print('과제 %d개, 과제당 최대 %d번 설계 (opus 호출 최대 %d회)\n'
+    print('과제 %d개, 과제당 최대 %d번 설계 (Qwen 호출 최대 %d회)\n'
           % (len(tasks), args.fix_rounds + 1,
              len(tasks) * (args.fix_rounds + 1)))
 

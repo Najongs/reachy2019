@@ -10,7 +10,7 @@
                       -> score 0~100. 같은 '성공' 이라도 거칠고 위험하게
                       스치며 간 동작과 부드럽게 돌아간 동작을 가른다.
 
-  critique(client, frames, ...)   opus 가 프레임 3장(들어올림/중간/도달)과
+  critique(client, frames, ...)   Codex가 프레임 3장(들어올림/중간/도달)과
                       지표를 보고 자연스러움을 비평한다. 결과는 JSON:
                       {naturalness 1~10, issues[], advice{파라미터: 방향}}.
                       advice 는 BEHAVIOR 손잡이에 대한 제안이고, 개선 루프가
@@ -233,7 +233,8 @@ def _parse_json(raw):
 
 
 CAUSES = ('경로 충돌', '파지 시도 없음', '정렬 미달(닫힘 미발행)',
-          '맞물림 실패', '들기/운반 중 놓침', '품질 미달')
+          '맞물림 실패', '시험 리프트 실패', '들기/운반 중 놓침',
+          '품질 미달')
 
 
 def diagnose(q):
@@ -254,6 +255,8 @@ def diagnose(q):
         return '정렬 미달(닫힘 미발행)'
     if not g.get('grabbed'):
         return '맞물림 실패'
+    if g.get('test_lift') is False:
+        return '시험 리프트 실패'
     if q.get('stage') == 'missed':
         return '들기/운반 중 놓침'
     return '품질 미달'
@@ -267,7 +270,7 @@ CRITIQUE_PROMPT = """로봇 팔 동작 품질 비평가다. 이미지는 한 동
 전체 흐름을 보고 사람 눈에 자연스러운지 비평하라. 성공 여부는 판정하지 마라(그건 계측이 한다). 오직 '어떻게 움직였는가' 만.
 
 JSON 한 줄로만 답하라:
-{{"naturalness": 1~10, "rubric": {{"smooth": 1~10, "direct": 1~10, "posture": 1~10, "tempo": 1~10}}, "worst_frame": 번호, "failure_cause": "실패의 시각적 원인 한 구절 (성공이면 null)", "fix_hint": "그 원인을 고칠 구체적 힌트 한 문장", "issues": ["짧은 지적", ...], "advice": {{"파라미터": "up"|"down"}}}}
+{{"naturalness": 1~10, "rubric": {{"smooth": 1~10, "direct": 1~10, "posture": 1~10, "tempo": 1~10}}, "worst_frame": 번호, "failure_cause": "실패의 시각적 원인 한 구절 (성공이면 null)", "fix_hint": "그 원인을 고칠 구체적 힌트 한 문장", "issues": ["짧은 지적", ...], "advice": [{{"parameter":"파라미터", "direction":"up"|"down"}}]}}
 
 rubric 뜻: smooth=급격한 방향전환·떨림 없음, direct=군더더기 없는 경로, posture=중간 자세가 사람 팔처럼 자연스러운가, tempo=속도가 일정한가. worst_frame=가장 어색한 프레임 번호.
 
@@ -277,13 +280,18 @@ advice 에 쓸 수 있는 파라미터와 뜻:
 - damping: 감쇠 (up=떨림 억제)
 - table_min: 테이블 여유 (up=더 높이 돌아 안전하게)
 - lift_steps: 들어올리기 보간 수 (up=더 부드러운 들어올림)
+- approach_scale: 목표 위 접근 속도 배율
+- descend_scale: 접촉 직전 하강 속도 배율 (down=더 신중)
+- lift_scale: 파지 직후 들어올림 속도 배율 (down=충격 감소)
+- carry_scale: 목적지까지 운반 속도 배율
+- grasp_bias_cm: 고정 조 쪽 파지 편향 (맞물림 실패 시 조절)
 - via1_/via2_/via3_ 접두사 + pitch/roll/yaw/elbow: 들어올리기 경유 자세 3개 (예: via2_elbow) - 경로 모양 자체가 어색하면 이걸 지목하라
 
-문제가 없으면 issues 를 빈 배열로, advice 를 빈 객체로. JSON 밖 텍스트 금지."""
+문제가 없으면 issues 와 advice 를 빈 배열로. JSON 밖 텍스트 금지."""
 
 
 def critique(client, frames, instruction, metrics, feedback=None):
-    """opus 전과정 비평. {'naturalness','rubric','worst_frame','issues','advice'}.
+    """Codex 전과정 비평. {'naturalness','rubric','worst_frame','issues','advice'}.
 
     frames: 에피소드의 프레임 목록 전체. 내부에서 필름 스트립을 만든다.
     feedback: 운영자/오케스트라의 미결 지적 - 비평이 이걸 우선 반영한다.
@@ -299,8 +307,7 @@ def critique(client, frames, instruction, metrics, feedback=None):
     if feedback:
         prompt += ('\n\n운영자 지적(미결 - 조언에 우선 반영하라):\n- '
                    + '\n- '.join(feedback[-5:]))
-    out = _parse_json(client.ask_vision(prompt, image=_encode(strip)))
-    return out
+    return client.ask_evaluation(prompt, kind='critique', image=_encode(strip))
 
 
 ORCHESTRA_PROMPT = """로봇 학습 파이프라인의 오케스트라(총감독)다. 필름 스트립(최근 동작)과 아래 현황을 보고, 운영자가 하듯 판단하라.
@@ -329,9 +336,8 @@ def orchestrate(client, frames, state_text):
         st = strip_image(frames)
         if st is not None:
             img = _encode(st)
-    out = _parse_json(client.ask_vision(
-        ORCHESTRA_PROMPT.format(state=state_text), image=img))
-    return out
+    return client.ask_evaluation(
+        ORCHESTRA_PROMPT.format(state=state_text), kind='orchestra', image=img)
 
 
 DUEL_PROMPT = """로봇 팔 동작 비교 심판이다. 이미지 위쪽 절반이 동작 A, 아래쪽 절반이 동작 B다. 둘 다 같은 지시를 수행한 전 과정의 필름 스트립이다(각각 시간 순, 번호 순).
@@ -382,8 +388,9 @@ def duel(client, frames_a, frames_b, instruction, save_path=None):
             Image.fromarray(combo).save(save_path, quality=80)
         except Exception:
             pass
-    out = _parse_json(client.ask_vision(
-        DUEL_PROMPT.format(instruction=instruction), image=_encode(combo, 1152)))
+    out = client.ask_evaluation(
+        DUEL_PROMPT.format(instruction=instruction), kind='duel',
+        image=_encode(combo, 1152))
     if out and out.get('winner') in ('A', 'B'):
         return out
     return None

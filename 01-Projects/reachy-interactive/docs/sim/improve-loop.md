@@ -1,13 +1,15 @@
 # 개선 루프 (sim_improve.py)
 
 강화학습 흉내의 파라미터 탐색. 정책은 신경망이 아니라
-`config/behavior_params.json` 의 손잡이 10개다.
+`config/behavior_params.json` 의 손잡이 23개다.
 
 | 파라미터 | 뜻 |
 |---|---|
 | step_deg / gain / damping | 서보 스텝 크기·이득·감쇠 |
 | table_min | 테이블 여유 하한 (cm) |
 | lift_steps | 들어올리기 보간 수 |
+| approach/descend/lift/carry_scale | 구간별 서보 속도 배율 |
+| grasp_bias_cm | 움직 조가 물체를 고정 조 쪽에 안착시키는 편향 |
 | via1/2/3_{pitch,roll,yaw,elbow} | 들어올리기 경유 자세 3개 = 경로 **구조** (12개) |
 | gaze_step_deg | 목 회전 한 스텝 각도 (시선 활강 속도) |
 
@@ -23,6 +25,9 @@ python3 sim/sim_improve.py --iters 3 --token reachy2019 --seed 21
 nohup setsid python3 sim/sim_improve.py --hours 10 --token reachy2019 \
     --seed 31 > sim_data/improve_10h.log 2>&1 < /dev/null &
 
+# 사용량 제한 없는 야간 계측 모드 (실전 브로커와 분리)
+python3 sim/sim_director.py --hours 10 --offline --seed 31
+
 # 중지 (자기 셸을 죽이지 않으려면 반드시 브래킷 패턴)
 pgrep -f "sim_improve[.]py" | while read p; do kill $p; done
 ```
@@ -30,16 +35,29 @@ pgrep -f "sim_improve[.]py" | while read p; do kill $p; done
 ## 한 반복
 
 1. 후보 생성: **CEM** - 엘리트(상위 3)의 평균·분산으로 다음 세대 분포를
-   만든다 (정체 시 폭↑ 담금질). opus 조언 후보도 합류
-2. 각 후보를 **훈련셋** 4개로 평가 → 단계 계수 + 거리 + 품질
-3. 선택: `(충돌 적게, 성공 많이, 목표에 가깝게, 품질)` 사전식.
+   만든다 (정체 시 폭↑ 담금질). Codex 조언 후보도 합류
+2. 각 후보를 **훈련셋** 4개로 평가 → 단계 계수 + 거리 + 품질 + 물체별 성적
+3. 선택: `(충돌 적게, 성공 많이, 최저 물체군 성공률, 맞물림,
+   목표에 가깝게, 품질)` 사전식.
    충돌이 기준보다 늘면 즉시 탈락 (안전 후퇴 금지)
-4. 품질 박빙이면 opus 결투가 심판 (성분 상세는 보정용으로 기록)
-5. 채택 → **고정 시험지** 4개로 채점. 기록·래칫·best_ever·탈출구 판단은
+4. 품질 박빙이면 Codex 결투가 심판 (성분 상세는 보정용으로 기록)
+5. 채택 전 **고정 시험지** 4개로 다시 채점하고 기준보다 퇴보하면 폐기한다.
+   기록·래칫·best_ever·탈출구 판단은
    전부 시험지 기준 - 태스크 교체에 추이가 흔들리지 않는다
 6. `config/behavior_params.json` 저장 (시뮬 전용 - 실물 반영은 검토 후 수동)
 
-주기 작업: 훈련셋 교체 6회마다(시험지는 불변), opus 비평 3회마다,
+파지는 원통형(upright)·둥근 물체(round)·상자형(box)으로 나눠 정렬 허용치,
+고정 조 방향 편향, 탐침 깊이를 달리한다. 닫은 직후에는 3cm 시험 리프트를
+수행하고 실제 상승량과 양쪽 조 접촉이 유지될 때만 본 리프트/운반으로
+넘어간다. 맞물림 실패일 때에만 최대 2회 재파지한다.
+
+시작할 때 현재값·기본값·`sim_data/best_behavior.json`을 같은 고정 시험지로
+비교해 가장 안전한 전원 성공 기준선을 복원한다. 전원 성공 이력이 없는
+0-success 후보는 `best_ever`로 저장하지 않는다. 새 훈련 태스크가 Oracle의
+전 경로 안전성 검사를 통과하지 못하면 임의 태스크로 대체하지 않고 학습을
+중단한다.
+
+주기 작업: 훈련셋 교체 6회마다(시험지는 불변), Codex 비평 3회마다,
 end-to-end 검증 60회마다, 래칫은 시험지 전원 성공 2연속마다,
 발산 감사(품질↑·성공↓) 15회마다, 시험 성공 0 이 10회면 best_ever 복귀,
 **오케스트라 30회마다** - 성적·스트립을 보고 환경 실험(테이블 범위·
@@ -53,10 +71,15 @@ end-to-end 검증 60회마다, 래칫은 시험지 전원 성공 2연속마다,
 sim_data/improve-<시각>.json        체크포인트 (history + best_ever)
 sim_data/improve-<시각>-media/      과정 영상
   iterNNNN.mp4                      비평 반복의 에피소드 (눈|제3자)
-  iterNNNN_strip.jpg                opus 가 본 필름 스트립
+  iterNNNN_strip.jpg                Codex가 본 필름 스트립
   iterNNNN_duel.jpg                 결투 A/B 비교
+sim_data/best_behavior.json         전원 성공한 영속 기준선
 sim_data/<시각>-improve-checkN/     60회마다 실전 배치 (mp4 포함)
 ```
+
+세대별 보관은 `04-Archives/sim-runs/` 아래에서 나눈다. 기존 Opus 기반
+실험은 `legacy-before-codex/`, 전환 검증은 `codex-preflight/`, 이후 자동
+보관되는 본 학습은 `codex-v1/run-YYYYMMDD/`에 들어간다.
 
 ## 망가졌을 때
 

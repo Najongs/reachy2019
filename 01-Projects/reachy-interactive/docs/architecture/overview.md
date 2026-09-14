@@ -10,14 +10,15 @@ Reachy 2019 한 대를 사무실 복도에 무인으로 켜 두고, 지나가는
 [실물 축 - 복도]                      [시뮬 축 - DGX GPU0]
 Pi(로봇) voice_chat.py                sim/sim_improve.py (장기 루프)
   마이크→STT→분류                       태스크 생성→서보 실행→3단계 판정
-  즉답/제스처/주시 = 로컬                 opus 비평·결투→파라미터 채택
+  즉답/제스처/주시 = 로컬                 Codex 비평·결투→파라미터 채택
   대화/동작 = 브로커                     config/behavior_params.json ─┐
         │                                                            │
         ▼                                    개선된 행동 파라미터 ◀──┘
 [DGX] broker/llm_broker.py :8080          (경로 모양·서보 이득·목 속도)
   /reply   Ollama EXAONE (무료, GPU0)
-  /motion  Claude opus CLI (동작 JSON)
-  /vision  Claude opus CLI (시각 접지)
+  /motion   Ollama Qwen (동작 JSON)
+  /ground   Codex CLI (시각 접지 JSON)
+  /evaluate Codex CLI (시뮬 평가 JSON)
 ```
 
 - **Pi ↔ DGX 연결**: Pi 가 SSH 터널(`ops/pi_tunnel.service`, `-L 8080`)로
@@ -29,7 +30,7 @@ Pi(로봇) voice_chat.py                sim/sim_improve.py (장기 루프)
 
 1. **로컬 우선**: 인터넷·LLM 없이 되는 건 전부 Pi 로컬에서
    (인사·FAQ·목 제스처·물체 주시·오프라인 STT). LLM 은 열린 대화(무료
-   Ollama)와 새 동작 생성(opus)에만.
+   Ollama)와 새 동작 생성(Qwen)에만. Codex는 시뮬 접지·평가에 한정한다.
 2. **검증은 결정론**: 성공/충돌 판정은 참값·기하로만 한다. 언어모델은
    품질(자연스러움)만 말한다. 모델이 성공을 판정하면 자신 있게 틀린다 -
    [sim/lessons.md](../sim/lessons.md).

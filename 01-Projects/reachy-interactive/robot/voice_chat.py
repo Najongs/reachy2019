@@ -328,7 +328,7 @@ class TurnLogger(object):
 
 
 class MotionHandler(object):
-    """Route a motion request through the opus session and execute it safely.
+    """Route a motion request through the motion model and execute it safely.
 
     All the untrusted-JSON handling lives here: preset resolution, safety
     validation, execution, and speaking the result. Never raises.
@@ -378,7 +378,7 @@ class MotionHandler(object):
         self._last_snap = None
 
     def handle(self, text, image, head):
-        """Full motion turn: ack -> opus -> validate -> speak + move."""
+        """Full motion turn: ack -> Qwen -> validate -> speak + move."""
         import random
 
         from say_and_move import say_and_move
@@ -415,7 +415,7 @@ class MotionHandler(object):
 
         if moves is None:
             # Not actually a motion request (keyword false positive) -
-            # the opus session answered conversationally; just speak it.
+            # the motion model answered conversationally; just speak it.
             self._log(text, motion, 'null_moves')
             if say:
                 say_and_move(self.reachy, text=say, speech=self.speech, head=head)
@@ -1891,7 +1891,7 @@ def main():
         # 모델이 1.2초에 답하는데 140초를 기다릴 이유가 없다. 터널이 반쯤
         # 열린 채 멈추면 그 시간만큼 로봇이 통째로 얼어붙는다(로그 최대
         # 90.1초). 20초면 가장 긴 답도 넉넉하고, 넘어가면 곧바로 캔 답변으로
-        # 내려가 사람을 세워 두지 않는다. 동작 생성(opus)은 ask_motion 이
+        # 내려가 사람을 세워 두지 않는다. 동작 생성(Qwen)은 ask_motion 이
         # 따로 150초를 쓴다.
         client = BrokerClient(url=args.url, token=args.token, session=args.session,
                               timeout=20)

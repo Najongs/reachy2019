@@ -2,7 +2,7 @@
 
 파이프라인의 목표는 이 태스크들을 문제없이 수행하는 것이다. 한 태스크는:
   scene         테이블 위 물체 목록 (sim_world.make_object)
-  instruction   로봇에게 주는 한국어 지시 (opus 가 읽는다)
+  instruction   로봇에게 주는 한국어 지시 (접지 모델이 읽는다)
   kind          유형 (look/point/reach/pick) - 성공 판정과 계획에 쓴다
   target        관련 물체 이름
   success(world) 실행 뒤 성공했는지 (참값으로 판정)
@@ -14,7 +14,7 @@
   pick    물체를 집어 쟁반에 놓기              (팔, 어려움)
 
 성공 판정은 전부 참값 기반이다 - 실물이 아니라 '시뮬에서 태스크가 됐나' 를
-객관적으로 재기 위한 것. opus 는 이 참값을 보지 못하고 카메라만 본다.
+객관적으로 재기 위한 것. 접지 모델은 이 참값을 보지 못하고 카메라만 본다.
 
 사용:
     python3 sim/sim_tasks.py --list          # 예시 태스크를 만들어 보여준다
@@ -234,7 +234,9 @@ def generate_sweet(n, seed=0, kinds=('pick', 'lift'), env=None):
     """
     rng = _rng(seed)
     tasks = []
-    easy_kinds = ['can', 'cup', 'bottle']       # 원통 - 수평 집게에 유리
+    # 현재 그리퍼 기하에서 Oracle 8/8 기준선이 성립하는 가장 작은
+    # 커리큘럼은 컵이다. 캔/병은 파지 폭·깊이 단계에서 따로 승격한다.
+    easy_kinds = ['cup']
     kinds = list(kinds) or ['pick', 'lift']
     for i in range(n):
         kind = kinds[i % len(kinds)]
@@ -271,7 +273,7 @@ def feasible(task, quick_steps=25):
     """이 태스크에 '안전한 해가 존재하는가' 를 오라클 서보로 빠르게 확인.
 
     이 로봇은 물리적으로 못 하는 게 많다(작은 컵 위에서 집기, 정중선 왼쪽,
-    좁은 작업영역). 못 푸는 태스크를 배치에 넣으면 opus 호출만 낭비되고
+    좁은 작업영역). 못 푸는 태스크를 배치에 넣으면 모델 호출만 낭비되고
     데이터도 실패 더미가 된다. 통과한 태스크만 채택한다.
     """
     import sim_agent as A
@@ -288,9 +290,16 @@ def feasible(task, quick_steps=25):
         # 실현가능성 검사는 복귀 생략 (수백 번 돌므로 빠르게). 성공은
         # check 시점(임무 완료 순간)에 잰다 - lift 는 제자리에 되돌려
         # 놓으므로 사후 판정이면 무조건 미달로 나온다.
-        ok = A.execute(w, plan, retreat=False,
+        trace = []
+        ok = A.execute(w, plan, retreat=False, trace=trace,
                        check=lambda: success_fn(task)(w))
-        return bool(ok and _clean(w, task['target']))
+        # 최종 상태만 깨끗해도 중간에 테이블/다른 물체를 통과했으면
+        # 실현 가능한 과제가 아니다. 학습 전에 경로 전체를 문지기로 쓴다.
+        path_table = min((x['table'] for x in trace), default=99)
+        path_object = min((x['obj'] for x in trace), default=99)
+        path_target = min((x.get('tgt', 99) for x in trace), default=99)
+        return bool(ok and path_table >= -0.5 and path_object >= -0.5
+                    and path_target >= -1.0 and _clean(w, task['target']))
     except Exception:
         return False
     finally:

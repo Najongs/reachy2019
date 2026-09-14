@@ -6,7 +6,7 @@
   사이클마다
     1) 개선 루프를 '짧게' (CYCLE_ITERS 회)
     2) 실전 배치 1개 (브로커) -> docs/eval/<run>.md + 감사 플래그
-    3) 증거를 모아 opus 에게: 방향 결정 JSON
+    3) 증거를 모아 Codex에게: 방향 결정 JSON
        (환경, 태스크 유형, 문턱, 파라미터 리셋, 지적 추가/종결)
     4) 결정을 '적용' 하고 docs/eval/direction-log.md 에 기록
     5) 다음 사이클
@@ -35,8 +35,13 @@ import sim_critic as C                             # noqa: E402
 import sim_tasks as T                              # noqa: E402
 
 CYCLE_ITERS = 8
+RUN_GENERATION = 'codex-v1'
 STATE_FILE = os.path.join(HERE, '..', 'config', 'sim_direction.json')
 LOG_MD = os.path.join(HERE, '..', 'docs', 'eval', 'direction-log.md')
+
+
+class EvaluationUnavailable(RuntimeError):
+    pass
 
 DIRECTOR_PROMPT = """로봇 학습 파이프라인의 감독이다. 방금 끝난 짧은 학습 사이클의 평가와 실전 배치 결과를 보고, 다음 사이클의 방향을 정한다. 필름 스트립(위=로봇 눈, 아래=제3자)이 오면 함께 본다.
 
@@ -105,10 +110,31 @@ def _log_direction(cyc, summary, batch_line, decision):
 
 
 def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
-        seed=1):
+        seed=1, offline=False):
     from llm_client import BrokerClient
     import sim_pipeline as PL
-    client = BrokerClient(url, token=token, session='sim-director')
+    client = None
+    if not offline:
+        client = BrokerClient(url, token=token, session='sim-director')
+        health = client.health() or {}
+        components = health.get('components') or {}
+        unavailable = [name for name in ('grounding', 'evaluation')
+                       if not components.get(name, {}).get('enabled')
+                       or not components.get(name, {}).get('ok')]
+        if unavailable:
+            print('[감독 중단] 브로커 구성 사전검사 실패: %s'
+                  % ', '.join(unavailable), flush=True)
+            return {'status': 'evaluation_unavailable',
+                    'components': components}
+        probe = client.ask_evaluation(
+            '평가기 연결 확인이다. {"ok": true}만 반환하라.', kind='health')
+        if not probe or probe.get('ok') is not True:
+            print('[감독 중단] 평가기 사전검사 실패: %s'
+                  % (client.last_error or probe), flush=True)
+            return {'status': 'evaluation_unavailable'}
+    else:
+        print('[감독] offline metric-only: Codex/Ollama 호출 없이 CEM 계측만 사용',
+              flush=True)
     st = _load_state()
     # 시작할 때 지난 런의 산출물을 저장소 보관고(04-Archives)로 내린다 -
     # sim_data 가 수백 개 폴더로 부풀지 않게 (한 번 764M/431개까지 갔다).
@@ -118,7 +144,7 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
         data = os.path.join(HERE, '..', 'sim_data')
         sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
         import para  # PARA 기준 경로
-        dst = os.path.join(para.SIM_RUNS,
+        dst = os.path.join(para.SIM_RUNS, RUN_GENERATION,
                            'run-%s' % time.strftime('%Y%m%d'))
         for name in os.listdir(data):
             if name in ('archive', 'director.log', 'improve_10h.log'):
@@ -151,19 +177,35 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
                 I.save_feedback(fb0)
             # 1) 짧은 학습
             summary = I.run(iters=CYCLE_ITERS, seed=seed * 1000 + cyc,
-                            token=token, url=url,
+                            token=None if offline else token, url=url,
                             env0=st.get('env'),
                             kinds=tuple(st.get('kinds') or ('pick', 'lift')),
                             natural_min0=int(st.get('natural_min') or 55),
                             reset_params=st.pop('reset_params', None))
-            # 2) 실전 배치 (평가 리포트 생성)
+            # 2) 실전 배치 (평가 리포트 생성). offline 모드에서는
+            # 브로커/비전 모델을 건드리지 않고 계측 학습만 지속한다.
+            if offline:
+                batch_line = 'offline metric-only (실전 배치 생략)'
+                dec = {'why': 'Codex 사용량 제한 없는 결정론 CEM 모드 유지'}
+                _save_state(st)
+                _log_direction(cyc, summary, batch_line, dec)
+                print('[감독] offline 사이클 %d: %s' % (cyc, dec['why']),
+                      flush=True)
+                continue
+
+            # 실전 배치 (평가 리포트 생성)
             try:
                 rid, bsum, flags = PL.run_batch(
                     3, tuple(st.get('kinds') or ('pick', 'lift')), 'broker',
-                    url, token, seed=cyc * 37, tag='dir%d' % cyc)
+                    url, token, seed=cyc * 37, tag='dir%d' % cyc,
+                    include_speech=False)
                 batch_line = '%s | 감사 %s | docs/eval/%s.md' % (
                     bsum.get('stages'), (flags[0][:60] if flags else '깨끗'),
                     rid)
+                if any('계획 백엔드 오류' in f for f in flags):
+                    raise EvaluationUnavailable(flags[0])
+            except EvaluationUnavailable:
+                raise
             except Exception as e:
                 batch_line = '배치 실패: %s' % e
             # 3) 증거 -> 방향 결정
@@ -184,18 +226,17 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
             if strip:
                 import base64
                 img = base64.b64encode(open(strip, 'rb').read()).decode()
-            raw = client.ask_vision(
+            dec = client.ask_evaluation(
                 DIRECTOR_PROMPT.format(
                     evidence=evidence,
                     direction=json.dumps(
                         {k: st.get(k) for k in
                          ('env', 'kinds', 'natural_min')},
                         ensure_ascii=False)),
-                image=img)
-            try:
-                dec = json.loads(raw[raw.find('{'):raw.rfind('}') + 1])
-            except Exception:
-                dec = {'why': '결정 해석 불가 - 방향 유지'}
+                kind='director', image=img)
+            if dec is None:
+                raise EvaluationUnavailable(
+                    client.last_error or '감독 평가 응답 없음')
             # 4) 적용 (한계 안에서)
             if dec.get('env'):
                 st['env'] = {k: list(v) if isinstance(v, tuple) else v
@@ -228,6 +269,9 @@ def run(cycles=None, hours=None, token=None, url='http://127.0.0.1:8080',
             print('[감독] 사이클 %d: %s' % (cyc, dec.get('why')), flush=True)
         except KeyboardInterrupt:
             break
+        except EvaluationUnavailable as e:
+            print('[감독 중단] 평가기/접지기 실패: %s' % e, flush=True)
+            break
         except Exception as e:
             print('[감독] 사이클 %d 예외(계속): %s: %s'
                   % (cyc, type(e).__name__, e), flush=True)
@@ -241,11 +285,13 @@ def main():
     ap.add_argument('--cycles', type=int)
     ap.add_argument('--hours', type=float)
     ap.add_argument('--token')
+    ap.add_argument('--offline', action='store_true',
+                    help='브로커 없이 결정론 계측/CEM만 실행 (사용량 제한 없음)')
     ap.add_argument('--url', default='http://127.0.0.1:8080')
     ap.add_argument('--seed', type=int, default=1)
     args = ap.parse_args()
     run(cycles=args.cycles, hours=args.hours, token=args.token,
-        url=args.url, seed=args.seed)
+        url=args.url, seed=args.seed, offline=args.offline)
 
 
 if __name__ == '__main__':

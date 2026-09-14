@@ -21,6 +21,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 import time
 
@@ -32,6 +33,62 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
 import para  # PARA 기준 경로 (위치 계산은 para.py 한 곳에만)
 CONFIG = os.path.join(para.PROJECT, 'config')
 PI_LOGS = para.PI_LOGS
+
+
+def _load_command_corrections():
+    """Load the same safe STT corrections used by the Pi runtime.
+
+    ``real_commands.json`` is rebuilt from archived events, including events
+    recorded before the current Pi deployment.  Canonicalising here prevents
+    old wake-name mishears (for example ``나비야``) from becoming separate
+    simulation command seeds.
+    """
+    path = os.path.join(CONFIG, 'stt_corrections.json')
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return [], ()
+    pairs = []
+    for pair in data.get('word_fixes', []):
+        if isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[0] and pair[1]:
+            pairs.append((str(pair[0]), str(pair[1])))
+    # Built-ins are kept here as well because old correction files may not
+    # contain aliases that were compiled into voice_chat.py.
+    names = list(data.get('name_mishears', []))
+    names.extend(('다비치', '리치야', '리치아', '루치아', '유치아', '니치',
+                  '릿지', '리찌', '리취', '리치가', '리치는'))
+    return pairs, tuple(dict.fromkeys(str(x) for x in names if x))
+
+
+def _canonical_command(text, corrections):
+    if not isinstance(text, str):
+        return text
+    pairs, names = corrections
+    for wrong in names:
+        text = text.replace(wrong, '리치')
+    # Match voice_chat's position guard for old motion logs.  Do not turn
+    # genuine questions such as "몇 시야 지금" or "위치가 어디야" into a
+    # wake name, but treat the same token before a motion cue as a mishear.
+    cues = ('인사', '만세', '박수', '들어', '올려', '내려', '움직', '접어',
+            '펴', '돌려', '춤', '하이파이브', '악수', '보관함', '그리퍼')
+    questions = ('지금', '몇시', '몇 시', '시간', '어디', '어때', '뭐야', '뭐예요')
+    for wrong in ('위치', '유치원', '유치하', '유치', '지하', '몇 시야',
+                  '몇시야', '비치', '이치'):
+        stripped = text.strip()
+        if stripped == wrong or not stripped.startswith(wrong):
+            continue
+        rest = stripped[len(wrong):].strip()
+        # Korean particles are often attached by STT: "위치와 왼팔...".
+        rest = re.sub(r'^(와|과|야|는|가|를|을)\s*', '', rest)
+        rest = rest.replace(' ', '')
+        if rest and not any(q.replace(' ', '') in rest for q in questions) \
+                and any(c in rest for c in cues):
+            text = stripped.replace(wrong, '리치', 1)
+        break
+    for wrong, right in pairs:
+        text = text.replace(wrong, right)
+    return text
 
 
 def export(n_tasks=6, min_success=5, min_quality=70, natural_min=65):
@@ -81,6 +138,7 @@ def export(n_tasks=6, min_success=5, min_quality=70, natural_min=65):
 
 
 def absorb(since=None):
+    corrections = _load_command_corrections()
     rows = []
     for p in glob.glob(os.path.join(PI_LOGS, '**', 'events.jsonl'),
                        recursive=True):
@@ -99,7 +157,7 @@ def absorb(since=None):
 
     import collections
     motions = [r for r in rows if r.get('kind') == 'motion']
-    cmd = collections.Counter((r.get('text') or '').strip()
+    cmd = collections.Counter(_canonical_command((r.get('text') or '').strip(), corrections)
                               for r in motions if r.get('text'))
     fails = collections.Counter(
         r.get('outcome') for r in motions

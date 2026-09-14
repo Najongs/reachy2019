@@ -3,9 +3,9 @@
   1 명령    sim_tasks (템플릿) / 지시문
   2 환경    sim_tasks.generate_feasible - 실현가능성 필터 통과한 장면만
   3 답변    ollama /reply 한 줄 ("네, 컵으로 손을 가져갈게요")
-  4 동작    opus /vision 접지 -> 결정론 서보 (sim_agent.BrokerPlanner)
+  4 동작    Codex /ground 접지 -> 결정론 서보 (sim_agent.BrokerPlanner)
   5 피드백  객관 검증 실패 시 지적을 만들어 1회 재시도 (lessons 되먹임)
-  6 오케스트라  배치 끝에 지표 감사 + 커리큘럼 + opus 총평 1회
+  6 오케스트라  배치 끝에 지표 감사 + 커리큘럼 + Codex 총평 1회
   7 데이터  시도별 레코드 -> sim_data/<run>/ -> docs/eval/<run>.md
 
 사용:
@@ -64,6 +64,16 @@ def run_episode(task, planner, run_id, answer_client=None, retry=True):
                        'action': plan.get('action'),
                        'action_mismatch': plan.get('action_mismatch'),
                        'why': plan.get('why')}
+
+        if plan.get('infra_error'):
+            rec['verdict'] = {
+                'stage': 'infra_error', 'stage_ko': '인프라 오류',
+                'success': False,
+                'why': plan.get('why') or '계획 백엔드가 응답하지 않음',
+            }
+            rec['execution'] = None
+            rec['findings'] = [rec['verdict']['why']]
+            return rec
 
         # 대상 이름은 궤적 계측용(대상/비대상 충돌 분리)이지 계획 정보가
         # 아니다 - 접지는 여전히 박스 번호로만 한다.
@@ -141,7 +151,7 @@ def _verdict(world, task, trace=None, reached=None):
     path_obj = min((t['obj'] for t in (trace or [])), default=99)
     path_tgt = min((t.get('tgt', 99) for t in (trace or [])), default=99)
     q = C.quality(trace) if trace else None
-    uses_arm = task['kind'] in ('reach', 'point', 'pick')
+    uses_arm = task['kind'] in ('reach', 'point', 'pick', 'lift')
     qscore = (q or {}).get('score', 100 if not uses_arm else 0)
 
     stage, why = C.stage_verdict(path_tab, path_obj, path_tgt, reached,
@@ -160,25 +170,35 @@ def _verdict(world, task, trace=None, reached=None):
 
 
 def run_batch(n=6, kinds=('look', 'reach', 'pick'), planner_name='oracle',
-              url='http://127.0.0.1:8080', token=None, seed=0, tag=''):
+              url='http://127.0.0.1:8080', token=None, seed=0, tag='',
+              include_speech=True):
     run_id = R.new_run(tag or planner_name)
     print('run %s | 계획자 %s | 태스크 %d개 생성(실현가능성 필터)...'
           % (run_id, planner_name, n))
     tasks = T.generate_feasible(n, seed=seed, kinds=kinds)
+    if len(tasks) < n:
+        # 임의 무필터 과제는 백엔드 호출만 낭비하고 실패 더미를 만든다.
+        # 일반 분포가 희소하면 Oracle 전 경로 검사를 통과한 쉬운 과제로만
+        # 빈자리를 채운다.
+        sweet = T.generate_sweet(n - len(tasks), seed=seed + 9173,
+                                 kinds=kinds)
+        vetted = [t for t in sweet if T.feasible(t)]
+        selected = vetted[:n - len(tasks)]
+        tasks.extend(selected)
+        if selected:
+            print('[주의] 일반 태스크 부족 - 검증된 스위트스팟으로 %d개 보충'
+                  % len(selected), flush=True)
     if not tasks:
-        # 포켓 희소기: 배치가 0건으로 헛도는 것보다 무필터가 낫다 -
-        # 판정은 정직하고, 브로커 대조 데이터가 계속 쌓여야 한다.
-        tasks = [t for t in T.generate(3 * n, seed=seed)
-                 if t['kind'] in kinds][:n]
-        if tasks:
-            print('[주의] 실현가능 없음 - 무필터 %d개 배치' % len(tasks),
-                  flush=True)
+        raise RuntimeError('Oracle 전 경로 검사를 통과한 태스크가 없어 '
+                           '배치를 시작하지 않습니다.')
 
     answer_client = None
     if planner_name == 'broker':
         from llm_client import BrokerClient
         planner = A.BrokerPlanner(url, token=token, seed=seed)
-        answer_client = BrokerClient(url, token=token, session='sim-answer')
+        if include_speech:
+            answer_client = BrokerClient(url, token=token,
+                                         session='sim-answer')
     else:
         planner = A.OraclePlanner()
 
@@ -191,6 +211,10 @@ def run_batch(n=6, kinds=('look', 'reach', 'pick'), planner_name='oracle',
             '✓' if v['success'] else '✗', t['kind'], t['instruction'][:34],
             v.get('stage_ko', '?'), v.get('why', '')[:36], ans))
         records.append(rec)
+        if v.get('stage') == 'infra_error':
+            print('  [배치 중단] 계획 백엔드 오류를 동작 실패로 누적하지 않습니다.',
+                  flush=True)
+            break
 
     # 역할 6+7: 감사 -> 커리큘럼 -> 총평 -> 리포트
     summary = R.aggregate(run_id)
@@ -203,7 +227,7 @@ def run_batch(n=6, kinds=('look', 'reach', 'pick'), planner_name='oracle',
         ['**지표 감사**: ' + ('깨끗함' if not flags else '')] +
         ['- ⚠ ' + f for f in flags] +
         ['', '**커리큘럼**: ' + cur['note']] +
-        (['', '**opus 총평**: ' + review] if review else []))
+        (['', '**Codex 총평**: ' + review] if review else []))
     doc = R.report(run_id, orchestra=orchestra_md)
 
     print('\n성공 %d/%d | 감사 %s | %s'

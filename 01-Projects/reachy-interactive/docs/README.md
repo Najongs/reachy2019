@@ -7,11 +7,11 @@
 docs/
 ├─ architecture/          실물 시스템이 어떻게 생겼나
 │  ├─ overview.md         전체 그림: Pi ↔ DGX, 두 축의 관계
-│  ├─ broker.md           DGX 브로커: /reply /motion /vision
+│  ├─ broker.md           DGX 브로커: /reply /motion /ground /evaluate
 │  └─ robot-runtime.md    Pi 런타임: 대화 흐름, 수면 모드, 모터 꺼짐 대응
 ├─ sim/                   시뮬 학습 파이프라인
 │  ├─ pipeline.md         7-역할 구조와 파일 대응표
-│  ├─ evaluation.md       3단계 판정, 품질 지표, opus 비평·결투, 래칫
+│  ├─ evaluation.md       3단계 판정, 품질 지표, Codex 비평·결투, 래칫
 │  ├─ improve-loop.md     개선 루프 돌리는 법, 산출물, 복구
 │  ├─ world.md            MuJoCo 월드: 기구학 일치, 카메라, 시선
 │  ├─ motion-presets.md   키프레임 동작 학습 분기 (프리셋 만들기)

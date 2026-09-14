@@ -7,7 +7,7 @@
    findings, artifacts, seed, ts}
 
 - perception:  검출 목록 + 기억 요약 + 오버레이 이미지 경로 (참값 없음)
-- plan:        opus 원문 + 해석된 선택
+- plan:        접지 모델 응답 + 해석된 선택
 - execution:   서보 스텝 수, 최종 손-목표 거리, 프레임별 최소 clearance
 - verdict:     객관 판정 (참값 채점 + 투과) - 모델 판정 아님
 - artifacts:   영상/프레임 경로

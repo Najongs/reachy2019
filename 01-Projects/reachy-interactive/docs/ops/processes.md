@@ -17,10 +17,10 @@ Pi 는 armv7l / Raspbian Buster - 파이썬·패키지 오래됨을 전제.
 
 | 이름 | 방식 | 역할 |
 |---|---|---|
-| reachy-broker | systemd --user | 브로커 :8080 (/reply /motion /vision) |
+| reachy-broker | systemd --user | 브로커 :8080 (/reply /motion /ground /evaluate) |
 | ollama | 시스템 | EXAONE 3.5 (GPU0) |
 | broker_watchdog | cron (~/reachy-ops/ 심 → ops/dgx/broker_watchdog.sh) | /health 감시 |
-| sim_director.py | **cron 야간 전용** (20:10~07:55 KST) | 시뮬 학습 감독 - 실물과 같은 opus CLI 를 쓰므로 로봇 수면시간에만 돈다 |
+| sim_director.py | **cron 야간 전용** (20:10~07:55 KST) | 시뮬 학습 감독 - GPU 부하와 Codex 평가 호출을 낮 시간 실물 운용과 분리 |
 | daily_update.sh | cron | 로그 수집·리포트 |
 
 ## 규칙
@@ -91,7 +91,10 @@ python3 voice_chat.py --stt-test            # 들은 것 + captured RMS 만 출�
 python3 broker/llm_broker.py --host 127.0.0.1 --port 8080 \
   --backend ollama --ollama-model exaone3.5:7.8b --token <TOKEN> \
   --system-prompt-file config/persona.txt \
-  --motion-model opus --motion-prompt-file config/motion_prompt.txt
+  --motion-backend ollama --motion-model qwen2.5:7b \
+  --motion-prompt-file config/motion_prompt.txt \
+  --ground-backend codex --ground-prompt-file config/vision_prompt.txt \
+  --eval-backend codex
 
 # [DGX] 로그 당겨와 분석·개선 (사람 사진 가져오기 포함)
 bash ops/daily_update.sh
@@ -111,7 +114,9 @@ python3 ops/data/sync_persons.py --purge-remote       # 옮긴 뒤 Pi 원본 삭
 | 경로 | 하는 일 |
 |---|---|
 | `POST /reply` | 대화. `{"text": "...", "session": "..."}` |
-| `POST /motion` | 동작 생성(opus). `{"text": "..."}` → `{say, preset, moves}` |
+| `POST /motion` | 동작 생성(Qwen). `{"text": "..."}` → `{say, preset, moves}` |
+| `POST /ground` | 시각 접지(Codex). 이미지+지시 → 스키마 검증된 접지 객체 |
+| `POST /evaluate` | 시뮬 평가(Codex). `kind`별 스키마 검증 객체 |
 | `POST /reset` | 그 세션의 대화 맥락 비우기 |
 | `GET /health` | 살아 있는지 + 어떤 백엔드인지 |
 
@@ -135,6 +140,7 @@ curl -s http://127.0.0.1:8080/reply -H 'X-Auth-Token: <TOKEN>' \
 | `99-reachy-cameras.rules` | 카메라 이름 고정 (main/sub) | Pi |
 | `70-wifi-powersave-off.rules` | 와이파이 절전 끄기 (끊김 원인이었다) | Pi |
 | `camera_tune.sh` / `respeaker_gain.py` | 카메라·마이크 설정 고정 | Pi |
+| `dgx/reachy-broker.service` | 브로커 사용자 서비스의 저장소 기준본 | DGX |
 
 **설치 스크립트**(1회): `ops/install_ollama.sh`(DGX 로컬 LLM),
 `ops/pi/install_vosk.sh`(오프라인 STT), `ops/pi/install_object_vision.sh`(물체 검출 모델).

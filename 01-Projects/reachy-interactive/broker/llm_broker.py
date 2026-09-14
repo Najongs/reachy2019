@@ -1,26 +1,30 @@
 """LLM broker — runs on the workstation, not on the robot.
 
-The Pi is stuck on Python 3.7 (Buster, armv7l), where the current Anthropic SDK
-will not install, and it has no CPU headroom to spare from the motor loop. So the
-model call lives here and the robot only sends a short HTTP request over the LAN.
-Keeping it here also keeps the API key off the robot.
+The Pi is stuck on Python 3.7 (Buster, armv7l) and has no CPU headroom to spare
+from the motor loop. Model calls therefore live here and the robot only sends a
+short HTTP request over the LAN.
 
 Usage:
-    export ANTHROPIC_API_KEY=...
-    python llm_broker.py                          # Claude, listens on 0.0.0.0:8080
+    python llm_broker.py --backend ollama         # listens on 0.0.0.0:8080
     python llm_broker.py --backend echo            # no API needed, for wiring tests
     python llm_broker.py --token secret123         # require X-Auth-Token from clients
 
 API:
-    GET  /health          -> {"ok": true, "backend": "claude"}
+    GET  /health          -> {"ok": true, "backend": "OllamaBackend", ...}
     POST /reply           {"text": "...", "session": "default"} -> {"reply": "..."}
+    POST /ground          {"kind": "ground", ...} -> {"result": {...}}
+    POST /evaluate        {"kind": "critique", ...} -> {"result": {...}}
     POST /reset           {"session": "default"}                -> {"ok": true}
 """
 
 import argparse
+import base64
 import json
 import logging
+import os
 import re
+import subprocess
+import tempfile
 import time
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,6 +45,135 @@ SYSTEM_PROMPT = (
 HISTORY_LIMIT = 12
 
 FALLBACK_REPLY = '미안해요, 지금은 대답하기 어려워요.'
+
+
+GROUND_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'box': {'type': ['integer', 'null']},
+        'tray_box': {'type': ['integer', 'null']},
+        'memory': {'type': ['string', 'null']},
+        'action': {'type': 'string',
+                   'enum': ['look', 'point', 'reach', 'pick', 'lift']},
+        'approach': {'type': 'string', 'enum': ['top', 'side']},
+        'reason': {'type': 'string'},
+    },
+    'required': ['box', 'tray_box', 'memory', 'action', 'approach', 'reason'],
+    'additionalProperties': False,
+}
+
+PILOT_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'cmd': {'type': 'string', 'enum': [
+            'gaze', 'ground', 'approach', 'descend', 'adjust', 'close',
+            'lift', 'carry', 'release', 'done', 'abort']},
+        'why': {'type': 'string'},
+        'box': {'type': ['integer', 'null']},
+        'dx': {'type': ['number', 'null']},
+        'dy': {'type': ['number', 'null']},
+    },
+    'required': ['cmd', 'why', 'box', 'dx', 'dy'],
+    'additionalProperties': False,
+}
+
+EVAL_SCHEMAS = {
+    'health': {
+        'type': 'object', 'properties': {'ok': {'type': 'boolean'}},
+        'required': ['ok'], 'additionalProperties': False,
+    },
+    'duel': {
+        'type': 'object',
+        'properties': {'winner': {'type': 'string', 'enum': ['A', 'B']},
+                       'why': {'type': 'string'}},
+        'required': ['winner', 'why'], 'additionalProperties': False,
+    },
+    'review': {
+        'type': 'object',
+        'properties': {'review': {'type': 'string'}},
+        'required': ['review'], 'additionalProperties': False,
+    },
+    'critique': {
+        'type': 'object',
+        'properties': {
+            'naturalness': {'type': 'number'},
+            'rubric': {
+                'type': 'object',
+                'properties': {k: {'type': 'number'} for k in
+                               ('smooth', 'direct', 'posture', 'tempo')},
+                'required': ['smooth', 'direct', 'posture', 'tempo'],
+                'additionalProperties': False,
+            },
+            'worst_frame': {'type': 'integer'},
+            'failure_cause': {'type': ['string', 'null']},
+            'fix_hint': {'type': 'string'},
+            'issues': {'type': 'array', 'items': {'type': 'string'}},
+            'advice': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'parameter': {'type': 'string'},
+                        'direction': {'type': 'string', 'enum': ['up', 'down']},
+                    },
+                    'required': ['parameter', 'direction'],
+                    'additionalProperties': False,
+                },
+            },
+        },
+        'required': ['naturalness', 'rubric', 'worst_frame', 'failure_cause',
+                     'fix_hint', 'issues', 'advice'],
+        'additionalProperties': False,
+    },
+    'orchestra': {
+        'type': 'object',
+        'properties': {
+            'experiment': {
+                'type': ['object', 'null'],
+                'properties': {
+                    'table': {'type': 'array', 'items': {'type': 'number'}},
+                    'objects': {'type': 'array', 'items': {'type': 'integer'}},
+                    'min_gap': {'type': 'number'},
+                },
+                'required': ['table', 'objects', 'min_gap'],
+                'additionalProperties': False,
+            },
+            'feedback_add': {'type': 'array', 'items': {'type': 'string'}},
+            'feedback_done': {'type': 'array', 'items': {'type': 'integer'}},
+            'why': {'type': 'string'},
+        },
+        'required': ['experiment', 'feedback_add', 'feedback_done', 'why'],
+        'additionalProperties': False,
+    },
+    'director': {
+        'type': 'object',
+        'properties': {
+            'env': {
+                'type': ['object', 'null'],
+                'properties': {
+                    'table': {'type': 'array', 'items': {'type': 'number'}},
+                    'objects': {'type': 'array', 'items': {'type': 'integer'}},
+                    'min_gap': {'type': 'number'},
+                },
+                'required': ['table', 'objects', 'min_gap'],
+                'additionalProperties': False,
+            },
+            'kinds': {'type': ['array', 'null'], 'items': {
+                'type': 'string',
+                'enum': ['pick', 'lift', 'reach', 'look']}},
+            'natural_min': {'type': ['integer', 'null']},
+            'reset_params': {'type': ['string', 'null'],
+                             'enum': ['defaults', None]},
+            'feedback_add': {'type': 'array', 'items': {'type': 'string'}},
+            'feedback_done': {'type': 'array', 'items': {'type': 'integer'}},
+            'code_suspect': {'type': ['string', 'null']},
+            'why': {'type': 'string'},
+        },
+        'required': ['env', 'kinds', 'natural_min', 'reset_params',
+                     'feedback_add', 'feedback_done', 'code_suspect', 'why'],
+        'additionalProperties': False,
+    },
+}
 
 
 class Backend(object):
@@ -134,12 +267,12 @@ class ClaudeBackend(Backend):
 class OllamaJsonBackend(Backend):
     """Ollama 로 구조화 JSON 을 만드는 백엔드 (동작 생성용).
 
-    opus CLI 연동이 자꾸 끊긴다는 사용자 판단으로 동작 생성을 로컬
+    외부 CLI 연동이 자꾸 끊긴다는 사용자 판단으로 동작 생성을 로컬
     모델로 옮겼다. 채팅용 OllamaBackend 와 다른 점:
     - 시스템 프롬프트를 직접 받는다 (전역 페르소나가 아니라 동작 설계서)
     - format=json 으로 JSON 만 나오게 강제한다
     - 발화용 후처리(문장 자르기·이모지 제거)를 하지 않는다 - JSON 이 깨진다
-    - 이미지는 무시한다 (qwen2.5 는 텍스트 전용; 시각 접지는 /vision 몫)
+    - 이미지는 무시한다 (qwen2.5 는 텍스트 전용; 시각 접지는 /ground 몫)
     """
 
     def __init__(self, model='qwen2.5:7b', system='', host='127.0.0.1:11434',
@@ -350,6 +483,76 @@ class ClaudeCliBackend(Backend):
         """Forget a conversation by dropping its process."""
         with self._lock:
             self._kill(session)
+
+
+class CodexCliBackend(Backend):
+    """Codex CLI 비대화 실행기. 평가/접지마다 독립된 구조화 응답을 만든다."""
+
+    def __init__(self, model=None, timeout=180, system_prompt=None,
+                 workspace=None):
+        import shutil
+
+        self.codex = shutil.which('codex')
+        if self.codex is None:
+            raise RuntimeError('"codex" CLI not found on this machine.')
+        self.model = model or None
+        self.timeout = timeout
+        self.system_prompt = system_prompt or ''
+        self.workspace = workspace or os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))
+
+    def health(self):
+        try:
+            p = subprocess.run([self.codex, 'login', 'status'],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, timeout=10)
+            return {'ok': p.returncode == 0,
+                    'detail': (p.stdout or p.stderr).strip()[-160:]}
+        except Exception as e:
+            return {'ok': False, 'error': '{}: {}'.format(type(e).__name__, e)}
+
+    def reply(self, text, history, session='default', image=None):
+        return self.reply_structured(text, session=session, image=image,
+                                     schema=None)
+
+    def reply_structured(self, text, session='default', image=None, schema=None):
+        prompt = text
+        if self.system_prompt:
+            prompt = self.system_prompt + '\n\n' + text
+        with tempfile.TemporaryDirectory(prefix='reachy-codex-') as td:
+            out_path = os.path.join(td, 'answer.txt')
+            cmd = [self.codex, '--ask-for-approval', 'never', 'exec',
+                   '--ephemeral', '--sandbox', 'read-only', '--skip-git-repo-check',
+                   '--color', 'never', '-C', self.workspace,
+                   '--output-last-message', out_path]
+            if self.model:
+                cmd += ['--model', self.model]
+            if schema is not None:
+                schema_path = os.path.join(td, 'schema.json')
+                with open(schema_path, 'w', encoding='utf-8') as fh:
+                    json.dump(schema, fh, ensure_ascii=False)
+                cmd += ['--output-schema', schema_path]
+            if image:
+                image_path = os.path.join(td, 'frame.jpg')
+                try:
+                    raw_image = base64.b64decode(image, validate=True)
+                except Exception as e:
+                    raise RuntimeError('invalid base64 image: {}'.format(e))
+                with open(image_path, 'wb') as fh:
+                    fh.write(raw_image)
+                cmd += ['--image', image_path]
+            cmd.append('-')
+            p = subprocess.run(cmd, input=prompt, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True,
+                               timeout=self.timeout)
+            if p.returncode != 0:
+                raise RuntimeError('codex CLI failed (rc={}): {}'.format(
+                    p.returncode, (p.stderr or p.stdout)[-300:]))
+            try:
+                with open(out_path, encoding='utf-8') as fh:
+                    return fh.read().strip()
+            except OSError as e:
+                raise RuntimeError('codex CLI produced no final response: {}'.format(e))
 
 
 # Strip emojis / pictographs - the local models add them despite the persona,
@@ -782,8 +985,90 @@ def extract_motion_json(text):
     return {'say': payload['say'], 'preset': preset, 'moves': moves}
 
 
+def extract_json_object(text):
+    """모델 원문에서 JSON 객체 하나를 꺼낸다."""
+    if not text:
+        return None
+    start, end = text.find('{'), text.rfind('}')
+    if start < 0 or end <= start:
+        return None
+    try:
+        out = json.loads(text[start:end + 1])
+    except ValueError:
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def _validate_schema(value, schema, path='$'):
+    """이 브로커가 쓰는 JSON Schema 부분집합을 백엔드와 무관하게 검사한다."""
+    expected = schema.get('type')
+    expected = expected if isinstance(expected, list) else [expected]
+
+    def type_ok(kind):
+        if kind == 'null':
+            return value is None
+        if kind == 'object':
+            return isinstance(value, dict)
+        if kind == 'array':
+            return isinstance(value, list)
+        if kind == 'string':
+            return isinstance(value, str)
+        if kind == 'boolean':
+            return isinstance(value, bool)
+        if kind == 'integer':
+            return isinstance(value, int) and not isinstance(value, bool)
+        if kind == 'number':
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return True
+
+    if expected != [None] and not any(type_ok(kind) for kind in expected):
+        raise RuntimeError('{} has wrong type (expected {})'.format(
+            path, '/'.join(expected)))
+    if 'enum' in schema and value not in schema['enum']:
+        raise RuntimeError('{} is outside enum'.format(path))
+    if value is None:
+        return
+    if isinstance(value, dict) and 'object' in expected:
+        properties = schema.get('properties', {})
+        missing = [key for key in schema.get('required', []) if key not in value]
+        if missing:
+            raise RuntimeError('{} missing required keys: {}'.format(
+                path, ', '.join(missing)))
+        if schema.get('additionalProperties') is False:
+            extra = sorted(set(value) - set(properties))
+            if extra:
+                raise RuntimeError('{} has unexpected keys: {}'.format(
+                    path, ', '.join(extra)))
+        for key, child in value.items():
+            if key in properties:
+                _validate_schema(child, properties[key], path + '.' + key)
+    elif isinstance(value, list) and 'array' in expected:
+        item_schema = schema.get('items')
+        if item_schema:
+            for idx, child in enumerate(value):
+                _validate_schema(child, item_schema,
+                                 '{}[{}]'.format(path, idx))
+
+
+def structured_reply(provider, text, session, image, schema):
+    if hasattr(provider, 'reply_structured'):
+        raw = provider.reply_structured(text, session=session, image=image,
+                                        schema=schema)
+    else:
+        raw = provider.reply(text, [], session=session, image=image)
+    out = extract_json_object(raw)
+    if out is None:
+        raise RuntimeError('model did not return a JSON object')
+    _validate_schema(out, schema)
+    return out
+
+
 def make_handler(backend, conversations, token, motion_backend=None,
+                 grounding_backend=None, evaluation_backend=None,
                  vision_backend=None, stats=None):
+    # vision_backend 은 옛 호출자 호환용 이름이다.
+    if grounding_backend is None:
+        grounding_backend = vision_backend
     stats = stats if stats is not None else Stats()
     health_cache = {'at': 0.0, 'value': None}
 
@@ -906,6 +1191,21 @@ def make_handler(backend, conversations, token, motion_backend=None,
                        'backend': type(backend).__name__}
             payload.update(detail)
             payload['uptime_s'] = round(time.time() - stats.started_at)
+            components = {}
+            for name, provider in (('grounding', grounding_backend),
+                                   ('evaluation', evaluation_backend)):
+                if provider is None:
+                    components[name] = {'enabled': False}
+                    continue
+                try:
+                    h = provider.health()
+                except Exception as e:
+                    h = {'ok': False, 'error': '{}: {}'.format(
+                        type(e).__name__, e)}
+                components[name] = dict({'enabled': True}, **h)
+            # 대화 백엔드의 정상 여부만 HTTP 상태에 반영한다. 평가기 장애로
+            # 로봇 대화 워치독이 브로커를 재시작하는 폭주를 막는다.
+            payload['components'] = components
 
             # 실패는 실패로 알린다. 200 으로 돌려주면 워치독이 못 알아챈다 -
             # 예전에는 브로커가 떠 있기만 하면 늘 200 이라, Ollama 가 죽어도
@@ -928,6 +1228,10 @@ def make_handler(backend, conversations, token, motion_backend=None,
             if self.path == '/reset':
                 conversations.reset(session)
                 backend.reset(session)
+                for provider in (motion_backend, grounding_backend,
+                                 evaluation_backend):
+                    if provider is not None:
+                        provider.reset(session)
                 self._send(200, {'ok': True})
                 return
 
@@ -964,9 +1268,9 @@ def make_handler(backend, conversations, token, motion_backend=None,
                 self._send(200, motion)
                 return
 
-            if self.path == '/vision':
-                if vision_backend is None:
-                    self._send(404, {'error': 'vision backend not enabled'})
+            if self.path in ('/ground', '/vision'):
+                if grounding_backend is None:
+                    self._send(404, {'error': 'grounding backend not enabled'})
                     return
                 text = (payload.get('text') or '').strip()
                 if not text:
@@ -974,18 +1278,56 @@ def make_handler(backend, conversations, token, motion_backend=None,
                     return
                 t0 = time.time()
                 try:
-                    raw = vision_backend.reply(
-                        text, [], payload.get('session', 'vision'),
-                        image=payload.get('image') or None)
+                    ground_kind = payload.get('kind', 'ground')
+                    if ground_kind not in ('ground', 'pilot'):
+                        self._send(400, {'error': 'unknown grounding kind'})
+                        return
+                    schema = (PILOT_SCHEMA if ground_kind == 'pilot'
+                              else GROUND_SCHEMA)
+                    result = structured_reply(
+                        grounding_backend, text,
+                        payload.get('session', 'ground'),
+                        payload.get('image') or None, schema)
                 except Exception as e:
-                    logger.exception('Vision backend failed')
-                    stats.record('vision', time.time() - t0, error=e)
+                    logger.exception('Grounding backend failed')
+                    stats.record('ground', time.time() - t0, error=e)
                     self._send(502, {'error': '{}: {}'.format(
                         type(e).__name__, e)})
                     return
-                stats.record('vision', time.time() - t0)
-                # 모션과 달리 파싱하지 않는다 - caller 가 형식을 정한다.
-                self._send(200, {'text': (raw or '').strip()})
+                stats.record('ground', time.time() - t0)
+                if self.path == '/vision':
+                    self._send(200, {'text': json.dumps(
+                        result, ensure_ascii=False)})
+                else:
+                    self._send(200, {'result': result})
+                return
+
+            if self.path == '/evaluate':
+                if evaluation_backend is None:
+                    self._send(404, {'error': 'evaluation backend not enabled'})
+                    return
+                text = (payload.get('text') or '').strip()
+                kind = payload.get('kind')
+                if not text:
+                    self._send(400, {'error': 'missing "text"'})
+                    return
+                if kind not in EVAL_SCHEMAS:
+                    self._send(400, {'error': 'unknown evaluation kind'})
+                    return
+                t0 = time.time()
+                try:
+                    result = structured_reply(
+                        evaluation_backend, text,
+                        payload.get('session', 'evaluate'),
+                        payload.get('image') or None, EVAL_SCHEMAS[kind])
+                except Exception as e:
+                    logger.exception('Evaluation backend failed')
+                    stats.record('evaluate', time.time() - t0, error=e)
+                    self._send(502, {'error': '{}: {}'.format(
+                        type(e).__name__, e)})
+                    return
+                stats.record('evaluate', time.time() - t0)
+                self._send(200, {'result': result})
                 return
 
             if self.path != '/reply':
@@ -1029,7 +1371,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', default='0.0.0.0', help='bind address')
     parser.add_argument('--port', type=int, default=8080)
-    parser.add_argument('--backend', default='claude',
+    parser.add_argument('--backend', default='ollama',
                         choices=['claude', 'claude-cli', 'ollama', 'echo'])
     parser.add_argument('--model', default='claude-opus-5')
     parser.add_argument('--max-tokens', type=int, default=512)
@@ -1050,17 +1392,29 @@ def main():
     parser.add_argument('--ollama-ctx', type=int, default=OllamaBackend.NUM_CTX,
                         help='context window; must fit the persona or Ollama '
                              'truncates it away (default: %(default)s)')
-    parser.add_argument('--motion-backend', default='cli',
+    parser.add_argument('--motion-backend', default='ollama',
                         choices=('cli', 'ollama'),
-                        help='동작 생성을 opus CLI 로 할지 로컬 Ollama 로 할지')
-    parser.add_argument('--motion-model', default='opus',
+                        help='동작 생성을 레거시 CLI 로 할지 로컬 Ollama 로 할지')
+    parser.add_argument('--motion-model', default='qwen2.5:7b',
                         help='model for the motion-generation session')
     parser.add_argument('--motion-prompt-file',
                         help='enable POST /motion using this system prompt file')
     parser.add_argument('--vision-model', default='opus',
                         help='model for the visual-grounding session')
     parser.add_argument('--vision-prompt-file',
-                        help='enable POST /vision using this system prompt file')
+                        help='deprecated alias for --ground-prompt-file')
+    parser.add_argument('--ground-backend', default='codex',
+                        choices=('codex', 'claude-cli'),
+                        help='backend for POST /ground (default: codex)')
+    parser.add_argument('--ground-model',
+                        help='optional Codex model for grounding; default uses Codex config')
+    parser.add_argument('--ground-prompt-file',
+                        help='enable POST /ground using this system prompt file')
+    parser.add_argument('--eval-backend', default='codex',
+                        choices=('codex', 'claude-cli', 'disabled'),
+                        help='backend for POST /evaluate (default: codex)')
+    parser.add_argument('--eval-model',
+                        help='optional Codex model for evaluation; default uses Codex config')
     parser.add_argument('--token', help='shared secret clients must send as X-Auth-Token')
     args = parser.parse_args()
 
@@ -1105,21 +1459,41 @@ def main():
         logger.info('Motion backend enabled (model=%s, prompt %d chars)',
                     args.motion_model, len(motion_prompt))
 
-    # 시각 접지용 전용 opus CLI 세션. 모션 CLI 와 분리한다 - 프롬프트도
-    # 대화 맥락도 다르고, 세션이 섞이면 접지 답이 모션 JSON 형식에 오염된다.
-    vision_backend = None
-    if args.vision_prompt_file:
-        with open(args.vision_prompt_file, encoding='utf-8') as f:
-            vision_prompt = f.read().strip()
-        vision_backend = ClaudeCliBackend(model=args.vision_model,
-                                          timeout=90,
-                                          system_prompt=vision_prompt)
-        logger.info('Vision backend enabled (model=%s, prompt %d chars)',
-                    args.vision_model, len(vision_prompt))
+    ground_prompt_file = args.ground_prompt_file or args.vision_prompt_file
+    grounding_backend = None
+    if ground_prompt_file:
+        with open(ground_prompt_file, encoding='utf-8') as f:
+            ground_prompt = f.read().strip()
+        if args.ground_backend == 'codex':
+            grounding_backend = CodexCliBackend(
+                model=args.ground_model, timeout=180,
+                system_prompt=ground_prompt)
+        else:
+            grounding_backend = ClaudeCliBackend(
+                model=args.vision_model, timeout=90,
+                system_prompt=ground_prompt)
+        logger.info('Grounding backend enabled (%s, prompt %d chars)',
+                    type(grounding_backend).__name__, len(ground_prompt))
+
+    evaluation_backend = None
+    if args.eval_backend == 'codex':
+        evaluation_backend = CodexCliBackend(
+            model=args.eval_model, timeout=240,
+            system_prompt=('로봇 시뮬레이션 평가 전용이다. 주어진 증거만 보고 '
+                           '요청된 JSON 객체만 반환하라. 도구를 사용하지 마라.'))
+    elif args.eval_backend == 'claude-cli':
+        evaluation_backend = ClaudeCliBackend(
+            model=args.vision_model, timeout=120,
+            system_prompt=('로봇 시뮬레이션 평가 전용이다. 요청한 JSON 형식만 '
+                           '반환하라.'))
+    if evaluation_backend is not None:
+        logger.info('Evaluation backend enabled (%s)',
+                    type(evaluation_backend).__name__)
 
     handler = make_handler(backend, Conversations(), args.token,
                            motion_backend=motion_backend,
-                           vision_backend=vision_backend, stats=Stats())
+                           grounding_backend=grounding_backend,
+                           evaluation_backend=evaluation_backend, stats=Stats())
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
     logger.info('Broker listening on %s:%d (backend=%s)', args.host, args.port, args.backend)

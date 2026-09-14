@@ -1,6 +1,6 @@
 """Validate and execute LLM-generated motions safely.
 
-The LLM (an opus session on the broker) emits keyframes:
+The motion model (Qwen on the broker) emits keyframes:
 
     [{"pose": {"right_arm.shoulder_pitch": -40, ...}, "duration": 1.5}, ...]
 

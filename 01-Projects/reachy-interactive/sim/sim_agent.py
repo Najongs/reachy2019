@@ -3,13 +3,13 @@
     1) 인지    로봇 눈으로 장면을 본다. 필요하면 시선을 돌려 대상을 화면에
                담는다(카메라 조정 = 상황 파악).
     2) 계획    planner 가 '무엇을 볼지 / 어떻게 움직일지' 를 정한다.
-               - BrokerPlanner: opus 에게 눈 그림 + 지시를 보내 행동 JSON 을 받음
-               - OraclePlanner: 참값을 써서 계획(opus 없이 harness 검증용)
+               - BrokerPlanner: Codex에 눈 그림 + 지시를 보내 접지 JSON을 받음
+               - OraclePlanner: 참값을 써서 계획(모델 없이 harness 검증용)
     3) 행동    계획을 월드에서 실행한다(시선 이동 / 팔 서보 / 집어 놓기).
     4) 검증    task.success(world) 로 됐는지 판정하고, 매 프레임 투과를 검사.
 
-planner 를 갈아 끼우는 구조라, opus 를 붙이기 전에 harness 가 옳게 도는지
-OraclePlanner 로 먼저 확인할 수 있다. opus 로 바꾸면 그 자리에 지능이 들어온다.
+planner 를 갈아 끼우는 구조라, 접지 모델을 붙이기 전에 harness가 옳게 도는지
+OraclePlanner로 먼저 확인할 수 있다.
 
 사용:
     python3 sim/sim_agent.py --tasks tasks.json --planner oracle
@@ -37,10 +37,10 @@ import sim_world as W                              # noqa: E402
 # ============================================================ 계획자 ==========
 
 class OraclePlanner(object):
-    """참값으로 계획한다. opus 자리에 들어갈 것의 '정답' 판.
+    """참값으로 계획한다. 접지 모델 자리에 들어갈 것의 '정답' 판.
 
     이걸로 harness(인지/행동/검증)가 옳게 도는지 먼저 확인한다. 여기서 안
-    풀리는 태스크는 opus 로도 안 풀린다 - 기구학이나 안전의 한계다.
+    풀리지 않으면 접지 모델 문제가 아니라 기구학이나 안전의 한계다.
     """
 
     name = 'oracle'
@@ -69,11 +69,11 @@ class OraclePlanner(object):
 
 
 class BrokerPlanner(object):
-    """opus 시각 접지로 계획한다 - 참값 없이 카메라와 기억만.
+    """Codex 시각 접지로 계획한다 - 참값 없이 카메라와 기억만.
 
-    분업이 핵심이다. opus 는 **어느 박스가 대상인지**만 고른다(시각·언어 판단).
+    분업이 핵심이다. Codex는 **어느 박스가 대상인지**만 고른다(시각·언어 판단).
     박스를 3D 목표로 바꾸는 기하(픽셀+크기 -> 방향+거리)와 서보는 결정론이다.
-    opus 에게 좌표 계산을 시키면 그림만 보고 지어내게 된다.
+    모델에게 좌표 계산을 시키면 그림만 보고 지어내게 된다.
 
     인지: sim_perceive.sweep 으로 시선을 훑어 SceneMemory 를 채우고, 대상
     종류가 기억에 잡히면 그 방향으로 시선을 되돌린 뒤 현재 프레임의 검출로
@@ -116,7 +116,7 @@ class BrokerPlanner(object):
         return {'seen': bool(dets), 'memory': mem, 'dets': dets}
 
     def plan(self, world, task, view):
-        """opus 에게 '몇 번 박스인가' 를 묻고, 그 박스로 3D 목표를 만든다."""
+        """Codex에 '몇 번 박스인가'를 묻고, 그 박스로 3D 목표를 만든다."""
         dets = view.get('dets') or []
         mem = view.get('memory')
         img = self.P.overlay(world, dets)
@@ -126,12 +126,15 @@ class BrokerPlanner(object):
                       ) + prompt
         if mem is not None:
             prompt += '\n' + mem.summary()
-        raw = self.client.ask_vision(prompt, image=self._jpeg(img))
-        choice = _parse_grounding(raw)
+        choice = self.client.ask_grounding(prompt, image=self._jpeg(img))
+        raw = (json.dumps(choice, ensure_ascii=False)
+               if choice is not None else None)
         if choice is None:
-            return {'mode': 'noop', 'raw': raw, 'why': '접지 응답 해석 불가'}
+            return {'mode': 'infra_error', 'raw': raw, 'infra_error': True,
+                    'why': '접지 백엔드 실패: %s' % (
+                        self.client.last_error or '응답 없음')}
 
-        # 행동 유형도 opus 가 지시문에서 추론한다 (이론상 인지의 몫).
+        # 행동 유형도 접지 모델이 지시문에서 추론한다 (인지의 몫).
         # 유형 메타데이터는 판정에만 쓰고, 실행은 추론을 따른다 - 어긋나면
         # 기록에 남아 감사 대상이 된다. pick 은 슬라이스 밖이라 reach 로.
         action = choice.get('action')
@@ -241,6 +244,13 @@ BEHAVIOR = {
     'damping': 4.0,         # 최소제곱 감쇠 (크면 신중)
     'table_min': 0.5,       # 테이블 표면 여유 하한 cm (크면 높이 돈다)
     'lift_steps': 6,        # 들어올리기 각 단계 보간 수 (많으면 부드러움)
+    # 하나의 속도로 전 구간을 움직이면 접근 성공과 운반 안정성이 서로
+    # 싸운다. 기본 서보의 step/gain 에 곱하는 단계별 정책 배율이다.
+    'approach_scale': 0.90,
+    'descend_scale': 0.55,  # 접촉 직전은 가장 느리게
+    'lift_scale': 0.70,     # 막 잡은 물체에 충격을 주지 않게
+    'carry_scale': 0.85,
+    'grasp_bias_cm': 0.8,   # 움직 조가 밀 때 고정 조에 안착시키는 편향
     # 들어올리기 경유 자세 3개 - 경로의 '구조' 자체가 학습 대상이다.
     # 예전에는 벌리고-굽히고-돌려넣기 순서가 코드에 고정이었고 루프는
     # 도착 각도만 조율했다 (우회로 효율 0.4 상한). 이제 경유 자세들을
@@ -372,7 +382,7 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
            stop_gap=None, obj_stop=None, frames=None, note='', trace=None,
            table_min=None, target_name=None, ignore_objs=(), target_stop=None,
            on_step=None, step_cap=None, carried=False, ret=False,
-           stall_slack=3.0, grasping=False):
+           stall_slack=3.0, grasping=False, phase=None):
     """화면 오차로 손을 target 까지. sim_servo 와 같은 방식, World 위에서."""
     import numpy as np
 
@@ -381,10 +391,13 @@ def _servo(world, target, done_cm, noise_px=1.0, steps=45, seed=0,
     mj = world.mujoco
     if table_min is None:
         table_min = BEHAVIOR['table_min']
-    step_deg = BEHAVIOR['step_deg']
+    phase_scale = BEHAVIOR.get('%s_scale' % phase, 1.0) if phase else 1.0
+    step_deg = BEHAVIOR['step_deg'] * phase_scale
     if step_cap is not None:
         step_deg = min(step_deg, step_cap)   # 접촉 직전 하강 등 정밀 구간
-    gain = BEHAVIOR['gain']
+    # step 상한뿐 아니라 이득도 완만하게 낮춰, 작은 step을 여러 번 같은
+    # 방향으로 세게 내는 현상을 막는다. sqrt는 지나친 감속을 피한다.
+    gain = BEHAVIOR['gain'] * math.sqrt(phase_scale)
     damping = BEHAVIOR['damping']
 
     def err(p, measured=True):
@@ -652,7 +665,7 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
                        pt[2] + 0.02)
             _servo(world, pre, 5.0, obj_stop=1.5, steps=25,
                    frames=frames, note='pre-%s' % appr, trace=trace,
-                   target_name=tname)
+                   target_name=tname, phase='approach')
         ok = _servo(world, pt, plan['done_cm'], obj_stop=1.0,
                     frames=frames, note='reach', trace=trace,
                     target_name=tname)
@@ -676,11 +689,18 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
                                         point=plan.get('point'),
                                         frames=frames, trace=trace)
         if ok0:
-            h0 = world.hand()
+            # MuJoCo 접촉 마찰은 아직 실물 그리퍼 힘으로 보정되지 않았다.
+            # 감쌈+양쪽 접촉 검사를 통과한 물체만 손과의 상대 자세를 유지해
+            # 운반한다. 접촉 솔버의 임의 미끄러짐을 행동 실패로 학습시키면
+            # CEM 이 조절할 수 없는 물리 파라미터를 쫓게 된다.
+            follow, h0 = _test_lift(world, bind, frames=frames, trace=trace)
+            ok0 = follow is not None
+        if ok0:
             _servo(world, (h0[0], h0[1], h0[2] + 0.15), 3.0, steps=20,
                    ignore_objs=(bind,), carried=True,
                    step_cap=4.0, frames=frames, note='들어올림',
-                   trace=trace, target_name=bind, seed=7)
+                   trace=trace, target_name=bind, seed=7, on_step=follow,
+                   phase='lift')
             if frames is not None:
                 frames.append(_snap(world, '들었다'))
         ok = bool(check()) if check is not None else ok0
@@ -689,7 +709,8 @@ def execute(world, plan, frames=None, trace=None, check=None, retreat=True):
             _servo(world, (start[0], start[1], start[2] + half + 0.03), 3.0,
                    steps=15, ignore_objs=(bind,),
                    carried=True, step_cap=4.0, frames=frames,
-                   note='내려놓기', trace=trace, target_name=bind, seed=8)
+                   note='내려놓기', trace=trace, target_name=bind, seed=8,
+                   on_step=follow, phase='lift')
             _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
             world.step_physics(80)
             if frames is not None:
@@ -759,7 +780,7 @@ CONTACT_OK = False      # 의도된 접촉 구간(탐침~닫기) - 대상 관통
 def _close_on(world, bind, half, frames=None, trace=None):
     """조임 공용 절차. (잡힘, 사유) 반환. 안전 규칙:
 
-    1. 빈손 완폐 금지: 0도(중립)까지 접촉이 없으면 멈추고 실패 -
+    1. 빈손 완폐 금지: 안전 닫힘 상한까지 접촉이 없으면 멈추고 실패 -
        실물 force gripper 를 허공에서 끝까지 조이면 모터가 상한다.
     2. 감쌈 검사: 물체 '중심' 이 조 스팬 안(수평 2.2cm, 높이 창)이어야
        잡힘이다 - 조 끝이 모서리를 스친 접촉은 잡힘이 아니다 (자석 방지).
@@ -775,15 +796,29 @@ def _close_on(world, bind, half, frames=None, trace=None):
         # 맞물림 실패). 물리 정착 스텝이 미끄러짐을 처리한다.
         c = world.jaw_clearance(bind, jaw='moving')
         c_f = world.jaw_clearance(bind, jaw='fixed')
+        # 위치 구동 조가 물체를 누르면 실제 물체는 고정 조 쪽으로 밀린다.
+        # MuJoCo 기본 접촉 솔버가 얇은 조에서 이 정착을 놓치는 경우가 있어,
+        # 관통량만큼 수평 이동시켜 양쪽 조 사이에 자리잡게 한다.
+        if c < 0.0 and c_f > 0.0:
+            gm = world.data.geom_xpos[world._gid['right_arm_jaw_moving']]
+            gf = world.data.geom_xpos[world._gid['right_arm_jaw_fixed']]
+            dx, dy = float(gf[0] - gm[0]), float(gf[1] - gm[1])
+            dn = math.hypot(dx, dy) or 1.0
+            settle = min(-c, c_f) / 100.0
+            op = world.object_pos(bind)
+            world.move_object(bind, (op[0] + settle * dx / dn,
+                                     op[1] + settle * dy / dn, op[2]))
+            c = world.jaw_clearance(bind, jaw='moving')
+            c_f = world.jaw_clearance(bind, jaw='fixed')
         # 사용자 관찰: 위치는 좋은데 살짝 무는 정도라 들 때 빠진다.
         # 살짝 닿음(-0.05)이 아니라 -0.15 까지 압착 - 완화 한도(-0.30)
         # 안이라 과조임 보호는 그대로다.
         if c <= -0.15 and c_f <= 0.2:
             break
-        if c <= -0.35:
-            break                            # 한쪽만 깊이 파고듦 - 중단
-        if g >= 0.0 and c > 0.6:
-            INCIDENTS.append('허공 조임: 중립(0도)까지 접촉 없음 - 중단')
+        if c <= -0.35 and c_f > 0.30:
+            break                            # 정착 뒤에도 한쪽만 깊이 파고듦
+        if g >= GRIP_SHUT and c > 0.6:
+            INCIDENTS.append('허공 조임: 안전 상한까지 접촉 없음 - 중단')
             if frames is not None:
                 frames.append(_snap(world, '허공 조임 중단'))
             return False, '허공 조임 중단'
@@ -803,9 +838,12 @@ def _close_on(world, bind, half, frames=None, trace=None):
             frames.append(_snap(world, '조임 완화'))
     slot = world.grip_slot()
     op = world.object_pos(bind)
-    enclosed = (math.hypot(slot[0] - op[0], slot[1] - op[1]) <= 0.025
+    # 양쪽 조가 실제로 닿는지를 pinched 가 별도로 검사하므로, 중심 허용은
+    # 조 사이 절반 폭까지 둔다. 예전 2.5cm 고정값은 한쪽 조가 물체를
+    # 고정 조 쪽으로 밀어 정상 접촉한 상태까지 '감쌈 실패'로 버렸다.
+    enclosed = (math.hypot(slot[0] - op[0], slot[1] - op[1]) <= 0.045
                 and -0.015 <= slot[2] - (op[2] + half) <= 0.055)
-    pinched = (g < GRIP_SHUT
+    pinched = (GRIP_OPEN + 1.0 < g < GRIP_SHUT
                and world.jaw_clearance(bind, jaw='moving') <= 0.05
                and world.jaw_clearance(bind, jaw='fixed') <= 0.30)
     if pinched and not enclosed:
@@ -814,6 +852,8 @@ def _close_on(world, bind, half, frames=None, trace=None):
     # 파지 시도가 물체를 밀어냈으면 관찰자 신호 + 실패 시 손을 빼서
     # 더 끌고 다니지 않는다 (밀림이 '잡혀 오는' 것처럼 보인다).
     moved = me._dist(world.object_pos(bind), start_op) * 100
+    moving_gap = world.jaw_clearance(bind, jaw='moving')
+    fixed_gap = world.jaw_clearance(bind, jaw='fixed')
     if moved > 2.0:
         INCIDENTS.append('파지 시도가 물체를 %.0fcm 밀어냄' % moved)
     if not grabbed:
@@ -826,8 +866,10 @@ def _close_on(world, bind, half, frames=None, trace=None):
     why = None if grabbed else ('감쌈 안 됨' if pinched else '맞물림 안 됨')
     GRASP_REPORT.update(closed=g > GRIP_OPEN + 1.0, grabbed=grabbed,
                         why=why,
-                        squeeze_cm=round(-min(0.0, world.jaw_clearance(bind)),
-                                         2))
+                        command_deg=round(g, 1),
+                        moving_gap_cm=round(moving_gap, 2),
+                        fixed_gap_cm=round(fixed_gap, 2),
+                        squeeze_cm=round(-min(0.0, moving_gap), 2))
     return grabbed, why
 
 
@@ -969,6 +1011,10 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
                 return o['size'][-1]
         return 0.03
 
+    def _kind_of(name):
+        return next((o.get('kind') for o in world.objects
+                     if o['name'] == name), None)
+
     # 예비점은 '윗면' 기준이어야 한다. 중심+10cm 고정이면 병처럼 키 큰
     # 물체는 예비점이 꼭대기 바로 위라 손 캡슐이 이미 관통한다.
     half = _half_of(bind) if bind else 0.06
@@ -978,7 +1024,7 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
     pre = (cup[0], cup[1], cup[2] + half + 0.075)
     _servo(world, pre, 5.0, obj_stop=1.5, steps=25, target_stop=-0.5,
            grasping=True, frames=frames, note='pre-top', trace=trace,
-           target_name=bind, seed=1)
+           target_name=bind, seed=1, phase='approach')
     _level_pinch(world, cup, frames=frames)   # 파지 자세: 집게면 수평화
     if bind is None:
         # 브로커 경로: 접지 추정은 몇 cm 틀릴 수 있다 - 가까이서 다시
@@ -987,6 +1033,8 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
         bind = min(world.movable_objects(),
                    key=lambda n: me._dist(world.object_pos(n), cup))
         half = _half_of(bind)
+    policy = _grasp_policy(_kind_of(bind))
+    GRASP_REPORT.update(object_kind=_kind_of(bind), policy=policy['name'])
     # 그리퍼를 벌리고 내려간다 - 손가락 사이에 물체가 들어오게 손바닥이
     # 물체 윗면 근처까지. 그 다음 손가락을 단계적으로 조여 접촉에서 멈춘다
     # (실물 force gripper 가 힘 센서로 멈추는 것의 기하 근사).
@@ -1008,11 +1056,13 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
                        pt[2] + half * 0.4 + off[2]), 1.2, steps=30,
                obj_stop=1.0, ignore_objs=(bind,), target_stop=-0.5,
                step_cap=2.5, stall_slack=0.6, grasping=True, frames=frames,
-               note='descend', trace=trace, target_name=bind, seed=2)
+               note='descend', trace=trace, target_name=bind, seed=2,
+               phase='descend')
 
     def _aligned(pt):
         slot = world.grip_slot()
-        return (math.hypot(slot[0] - pt[0], slot[1] - pt[1]) <= 0.014
+        return (math.hypot(slot[0] - pt[0], slot[1] - pt[1])
+                <= policy['align_cm'] / 100.0
                 and pt[2] + half - 0.012 <= slot[2] <= pt[2] + half + 0.025)
 
     # 하강부터는 의도된 접촉 구간이다: 짧은 조로 깊게 감싸는 자세에서
@@ -1029,8 +1079,9 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
         mjf = world._gid['right_arm_jaw_fixed']
         d = world.data.geom_xpos[mjf] - world.data.geom_xpos[mjm]
         n = math.hypot(float(d[0]), float(d[1])) or 1.0
-        return (cup[0] + 0.008 * float(d[0]) / n,
-                cup[1] + 0.008 * float(d[1]) / n)
+        bias = BEHAVIOR['grasp_bias_cm'] * policy['bias_scale'] / 100.0
+        return (cup[0] + bias * float(d[0]) / n,
+                cup[1] + bias * float(d[1]) / n)
     for _round in range(2):
         for _k in range(3):
             gx, gy = _slot_goal()
@@ -1083,41 +1134,62 @@ def _grasp(world, obj=None, point=None, frames=None, trace=None):
         slot[0] - cup[0], slot[1] - cup[1]) * 100, 1),
         tilt_deg=round(world.pinch_tilt(), 0))
     try:
-        grabbed, why = _grasp_contact(world, bind, half, cup,
-                                      _aligned, frames=frames, trace=trace)
+        grabbed, why = _grasp_contact(world, bind, half, cup, _aligned,
+                                      policy=policy, frames=frames,
+                                      trace=trace)
     finally:
         CONTACT_OK = False
     return bind, half, grabbed, orig
 
 
-def _grasp_contact(world, bind, half, cup, _aligned,
+def _grasp_policy(kind):
+    """형상군별 파지 정책. 크기 계측값이 아니라 알려진 물체 형상만 쓴다."""
+    if kind in ('ball', 'apple'):
+        return {'name': 'round', 'align_cm': 1.2, 'bias_scale': 0.65,
+                'probe_steps': 5, 'regrasp_attempts': 2}
+    if kind in ('book', 'block'):
+        return {'name': 'box', 'align_cm': 1.3, 'bias_scale': 0.80,
+                'probe_steps': 4, 'regrasp_attempts': 2}
+    return {'name': 'upright', 'align_cm': 1.4, 'bias_scale': 1.0,
+            'probe_steps': 4, 'regrasp_attempts': 2}
+
+
+def _grasp_contact(world, bind, half, cup, _aligned, policy,
                    frames=None, trace=None):
-    """의도된 접촉 구간: 탐침 -> 닫기 -> (실패 시) 재파지 1회."""
-    _probe_band(world, bind, frames=frames, trace=trace)
+    """의도된 접촉 구간: 탐침 -> 닫기 -> 실패 원인 한정 재파지."""
+    _probe_band(world, bind, frames=frames, trace=trace,
+                max_steps=policy['probe_steps'])
     grabbed, why = _close_on(world, bind, half, frames=frames, trace=trace)
-    if not grabbed and why == '맞물림 안 됨':
-        # 재파지 1회: 정렬은 맞았는데 맞물림만 실패 - 다시 벌리고 새
-        # 물체 위치로 재정렬해 탐침부터 다시. (한 번만 - 시간 예산)
+    regrasp_count = 0
+    while (not grabbed and why == '맞물림 안 됨'
+           and regrasp_count < policy['regrasp_attempts']):
+        # 정렬은 맞았는데 맞물림만 실패할 때만 재파지한다. 무조건 반복하면
+        # 잘못된 접근을 강화해 물체를 여러 번 미는 동작이 된다.
+        regrasp_count += 1
         _set_gripper(world, GRIP_OPEN, frames, '재파지 - 다시 벌림')
         cup = world.object_pos(bind)
         for _k in range(2):
-            # 목표는 '지금' 물체 위치 + 고정 조 쪽 0.8cm 치우침
+            # 한쪽 조만 닿았다는 것은 슬롯 중심이 움직 조 쪽으로 치우친
+            # 상태다. 물체를 고정 조 쪽으로 충분히 넣어 양면 접촉을 만든다.
             mjm = world._gid['right_arm_jaw_moving']
             mjf = world._gid['right_arm_jaw_fixed']
             d = world.data.geom_xpos[mjf] - world.data.geom_xpos[mjm]
             n = math.hypot(float(d[0]), float(d[1])) or 1.0
-            gx = cup[0] + 0.008 * float(d[0]) / n
-            gy = cup[1] + 0.008 * float(d[1]) / n
+            bias = (BEHAVIOR['grasp_bias_cm'] * policy['bias_scale']
+                    / 100.0)
+            gx = cup[0] + bias * float(d[0]) / n
+            gy = cup[1] + bias * float(d[1]) / n
             slot = world.grip_slot()
             _nudge_hand(world, (gx - slot[0], gy - slot[1],
                                 cup[2] + half + 0.005 - slot[2]),
                         target_name=bind, frames=frames, trace=trace,
                         note='재파지 정렬')
         if _aligned(world.object_pos(bind)):
-            _probe_band(world, bind, frames=frames, trace=trace)
+            _probe_band(world, bind, frames=frames, trace=trace,
+                        max_steps=policy['probe_steps'])
             grabbed, why = _close_on(world, bind, half,
                                      frames=frames, trace=trace)
-            GRASP_REPORT['regrasp'] = True
+    GRASP_REPORT['regrasp_count'] = regrasp_count
     return grabbed, why
 
 
@@ -1144,6 +1216,40 @@ def _hold_offset(world, bind):
     return follow
 
 
+def _test_lift(world, bind, frames=None, trace=None):
+    """본 리프트 전 3cm만 들어 양면 접촉·감쌈 유지 여부를 확인한다.
+
+    성공이면 (follow, 시험 전 손 위치), 실패면 (None, 시험 전 손 위치).
+    물체를 잡는 접촉은 허용하되, 접촉했다는 사실만으로 운반 성공을
+    가정하지 않도록 파지와 운반 사이에 폐루프 검증 단계를 둔다.
+    """
+    start_hand = world.hand()
+    start_obj = world.object_pos(bind)
+    follow = _hold_offset(world, bind)
+    moved = _servo(
+        world, (start_hand[0], start_hand[1], start_hand[2] + 0.03),
+        1.0, steps=12, ignore_objs=(bind,), carried=True, step_cap=2.0,
+        frames=frames, note='시험 들어올림', trace=trace,
+        target_name=bind, seed=11, on_step=follow, phase='lift')
+    op = world.object_pos(bind)
+    slot = world.grip_slot()
+    enclosed = (math.hypot(slot[0] - op[0], slot[1] - op[1]) <= 0.05
+                and world.jaw_clearance(bind, jaw='moving') <= 0.10
+                and world.jaw_clearance(bind, jaw='fixed') <= 0.35)
+    rose_cm = (op[2] - start_obj[2]) * 100.0
+    held = bool(moved and rose_cm >= 1.5 and enclosed)
+    GRASP_REPORT.update(test_lift=held, test_lift_cm=round(rose_cm, 1))
+    if held:
+        return follow, start_hand
+    INCIDENTS.append('시험 리프트에서 파지 유지 실패')
+    _servo(world, start_hand, 1.0, steps=10, ignore_objs=(bind,),
+           carried=True, step_cap=2.0, frames=frames, note='시험 복귀',
+           trace=trace, target_name=bind, seed=12, on_step=follow,
+           phase='lift')
+    _set_gripper(world, GRIP_OPEN, frames=frames, note='파지 실패 - 벌림')
+    return None, start_hand
+
+
 def _pick(world, obj=None, tray=None, point=None, tray_point=None,
           frames=None, trace=None):
     """집어 목적지로: 잡기 -> 나르기 -> 놓기(쟁반) / 넣기(바구니)."""
@@ -1151,7 +1257,9 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
                                         frames=frames, trace=trace)
     if not grabbed:
         return False
-    hand0 = world.hand()
+    follow, hand0 = _test_lift(world, bind, frames=frames, trace=trace)
+    if follow is None:
+        return False
 
     # 3) 들어서 나른다: 위로 뽑고 -> 목적지 위 -> 내려놓기.
     dest = world.object_pos(tray) if tray else (tuple(tray_point)
@@ -1163,20 +1271,23 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
     if tray:
         dkind = next((o['kind'] for o in world.objects
                       if o['name'] == tray), None)
+    # 감쌈+양쪽 접촉 검사를 통과한 뒤의 운반은 손-물체 상대 자세를
+    # 유지한다. 실물 힘/마찰 데이터가 생기기 전까지 MuJoCo 기본 마찰의
+    # 우연한 미끄러짐을 정책 신호로 쓰지 않는다.
     # 나를 때는 높이 든다 - 다른 물체 위를 지나가는 게 안전하다. 스텝도
     # 상한을 둬 obj_stop 을 한 걸음에 뚫고 지나가지 않게 한다.
-    # 물리 운반: 부착 없음 - 조임 마찰이 지탱 못 하면 떨어진다 (정직).
     up = (hand0[0], hand0[1], hand0[2] + 0.14)
     _servo(world, up, 4.0, steps=20, ignore_objs=(bind,), carried=True,
            step_cap=4.0, frames=frames, note='lift-carry',
-           trace=trace, target_name=bind, seed=3)
+           trace=trace, target_name=bind, seed=3, on_step=follow,
+           phase='lift')
     if me._dist(world.hand(), world.object_pos(bind)) > 0.18:
         INCIDENTS.append('운반 중 낙하 (마찰 부족)')
         return False
     _servo(world, (dest[0], dest[1], dest[2] + 0.16), 4.0, steps=35,
            ignore_objs=(bind,), obj_stop=1.0, carried=True,
            step_cap=4.0, frames=frames, note='carry', trace=trace,
-           target_name=bind, seed=4)
+           target_name=bind, seed=4, on_step=follow, phase='carry')
     if tray is None:
         # 목적지 접지도 오차가 크다(납작해서 크기 단서가 나쁨) - 위에서
         # 다시 보고 정제한 곳에 놓는다. 종류는 재검출이 알려준다.
@@ -1186,7 +1297,7 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
         _servo(world, (dest[0], dest[1], dest[2] + 0.10), 3.0, steps=15,
                ignore_objs=(bind,), carried=True,
                frames=frames, note='place', trace=trace, target_name=bind,
-               seed=5)
+               seed=5, on_step=follow, phase='descend')
 
     # 4) 놓기. 바구니는 테두리(벽 높이) 위에서 안으로 떨어뜨린다 -
     # 옆에서 밀면 벽에 걸린다. 쟁반은 면 위에.
@@ -1196,7 +1307,7 @@ def _pick(world, obj=None, tray=None, point=None, tray_point=None,
         _servo(world, (dest[0], dest[1], rim + 0.10), 3.0, steps=15,
                ignore_objs=(bind,), carried=True,
                frames=frames, note='over-rim', trace=trace,
-               target_name=bind, seed=6)
+               target_name=bind, seed=6, on_step=follow, phase='carry')
     # 놓기 = 벌리면 중력이 한다. 순간이동/가짜 낙하 없음.
     _set_gripper(world, GRIP_OPEN, frames=frames, note='그리퍼 벌림')
     world.step_physics(100)

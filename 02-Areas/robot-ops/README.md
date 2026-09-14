@@ -10,7 +10,7 @@ Reachy 로봇의 하드웨어 특성, 네트워크, 부팅/서비스, 배포, �
 | 마이크 게인 | ReSpeaker AGC 설정 | Pi | `respeaker_gain.service` |
 | DGX 터널 | SSH 포워딩 | Pi | `pi_tunnel.service` |
 | 와이파이 복구 | 2분마다 점검 | Pi | `wifi-ensure.timer` |
-| LLM 브로커 | 대화(로컬)+동작(opus) | DGX | `reachy-broker.service` (--user) |
+| LLM 브로커 | 대화·동작(로컬)+시뮬 평가(Codex) | DGX | `reachy-broker.service` (--user) |
 | 로컬 LLM | Ollama + EXAONE | DGX | `ollama.service` (--user) |
 
 전원만 켜면 위가 전부 자동으로 올라온다. DGX 쪽은 `loginctl enable-linger kiro-ai` 로 로그아웃/재부팅에도 유지.
@@ -79,7 +79,8 @@ systemctl --user status ollama reachy-broker
 systemctl --user restart reachy-broker      # 페르소나/프롬프트 바꾼 뒤
 ```
 - `ollama.service` — **버전 고정 v0.3.14**. 최신 Ollama 는 드라이버 550+ 를 요구하는데 이 DGX 는 535 라 GPU 를 못 잡고 CPU 로 떨어진다(11 tok/s). v0.3.14 는 CUDA 12.2 런너를 포함해 **드라이버 업그레이드 없이 V100 사용**(100 tok/s). 모델은 `OLLAMA_KEEP_ALIVE=-1` 로 상주
-- `reachy-broker.service` — 대화는 로컬 Ollama, 동작 생성은 Claude opus CLI
+- `reachy-broker.service` — 대화·동작 생성은 로컬 Ollama, 시뮬 접지·평가는 Codex CLI
+  - 저장소 기준본: `01-Projects/reachy-interactive/ops/dgx/reachy-broker.service`
 - `~/reachy-ops/broker_watchdog.sh` (cron 2분) — health 무응답 시 재시작
 
 ## 배포 (DGX → Pi)

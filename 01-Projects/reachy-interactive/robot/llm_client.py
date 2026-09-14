@@ -146,6 +146,7 @@ class BrokerClient(BaseClient):
         self.token = token
         self.timeout = timeout
         self.session = session
+        self.last_error = None
 
     def _headers(self):
         return {'X-Auth-Token': self.token} if self.token is not None else {}
@@ -271,20 +272,48 @@ class BrokerClient(BaseClient):
             return None
 
     def ask_vision(self, text, image=None, timeout=90):
-        """시각 접지 세션에 묻는다. 원문 텍스트 또는 None. 절대 안 던진다."""
-        body = {'text': text, 'session': self.session + '-vision'}
+        """옛 호출자 호환용. 새 코드는 ask_grounding 을 사용한다."""
+        out = self.ask_grounding(text, image=image, timeout=timeout)
+        return json.dumps(out, ensure_ascii=False) if out is not None else None
+
+    def _ask_structured(self, path, text, image=None, timeout=90, kind=None):
+        body = {'text': text, 'session': self.session + '-' + path.strip('/')}
+        if kind is not None:
+            body['kind'] = kind
         if image:
             body['image'] = image
+        self.last_error = None
         try:
-            out = _post_json(self.url + '/vision', body, self._headers(), timeout)
-            return out.get('text')
+            out = _post_json(self.url + path, body, self._headers(), timeout)
+            result = out.get('result')
+            if not isinstance(result, dict):
+                self.last_error = '구조화 응답이 없습니다.'
+                return None
+            return result
         except urllib.error.HTTPError as e:
-            logger.warning('Vision endpoint returned %s: %s', e.code,
-                           e.read()[:200])
+            detail = e.read()[:300]
+            self.last_error = 'HTTP {}: {}'.format(e.code, detail)
+            logger.warning('%s returned %s: %s', path, e.code, detail)
             return None
         except (urllib.error.URLError, OSError, ValueError) as e:
-            logger.warning('Cannot reach vision endpoint: %s', e)
+            self.last_error = '{}: {}'.format(type(e).__name__, e)
+            logger.warning('Cannot reach %s: %s', path, e)
             return None
+
+    def ask_grounding(self, text, image=None, timeout=180):
+        """시각 접지 JSON 또는 None. 실패 원인은 last_error 에 남긴다."""
+        return self._ask_structured('/ground', text, image=image,
+                                    timeout=timeout)
+
+    def ask_pilot(self, text, image=None, timeout=180):
+        """에피소드 조종 명령 JSON 또는 None."""
+        return self._ask_structured('/ground', text, image=image,
+                                    timeout=timeout, kind='pilot')
+
+    def ask_evaluation(self, text, kind, image=None, timeout=240):
+        """역할별 구조화 평가 JSON 또는 None."""
+        return self._ask_structured('/evaluate', text, image=image,
+                                    timeout=timeout, kind=kind)
 
     def reset(self):
         BaseClient.reset(self)

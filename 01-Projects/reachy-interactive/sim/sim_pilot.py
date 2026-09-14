@@ -1,16 +1,16 @@
-"""opus 조종사(pilot) - 에피소드 '안에서' 보고-생각하고-명령하는 루프.
+"""Codex 조종사(pilot) - 에피소드 '안에서' 보고-생각하고-명령하는 루프.
 
 사용자가 짚은 단순한 구조 그대로다:
   1) 카메라로 물체를 잘 찾는 답변을 만들고     (눈 화면 + 검출 오버레이)
   2) 팔을 어떻게 움직일지 생각해 명령값을 주면  (의미 수준 명령 JSON)
   3) 결정론 프리미티브가 동작한다              (서보/조임/운반 - 기하와 안전)
 
-VLA 가 아니다: opus 는 에피소드당 5~10번, 단계 결정만 한다. 좌표 계산과
+VLA가 아니다: Codex는 에피소드당 5~10번, 단계 결정만 한다. 좌표 계산과
 충돌 가드는 전부 결정론이다. 파라미터 진화(sim_improve)와 달리 여기서는
 관찰->교정이 '지금 즉시' 일어난다 - 정렬이 거부되면 그 사실이 다음
-프롬프트로 들어가 opus 가 adjust 를 내린다.
+프롬프트로 들어가 Codex가 adjust를 내린다.
 
-opus 가 받는 것(인지 방화벽 유지): 눈 화면 + 검출 오버레이, 자기 손 위치
+Codex가 받는 것(인지 방화벽 유지): 눈 화면 + 검출 오버레이, 자기 손 위치
 (FK = 고유수용감각), 그리퍼 각도, 직전 명령의 결과. 참값은 없다.
 """
 
@@ -37,7 +37,7 @@ PILOT_PROMPT = """로봇 팔 조종사다. 로봇 눈 화면(번호 박스 = 검
 {state}
 
 명령 (JSON 한 줄만):
-{{"cmd": "...", "why": "짧게"}}
+{{"cmd": "...", "why": "짧게", "box": 번호|null, "dx": cm|null, "dy": cm|null}}
 - "gaze"               대상이 화면에 없다 - 시선을 훑어 다시 찾는다
 - "ground", "box": n   화면의 n번 박스가 대상이다 (처음/재탐색 후 반드시)
 - "approach"           대상 위 예비 위치로 (들어올리기 포함)
@@ -106,15 +106,16 @@ def run_episode(world, task, client, frames=None, trace=None, noise_px=2.0,
     for step in range(MAX_CMDS):
         dets = P.detect(world, noise_px, 0.03, rng)
         img = P.overlay(world, dets)
-        raw = client.ask_vision(
+        cmd = client.ask_pilot(
             PILOT_PROMPT.format(instruction=task['instruction'],
                                 state=state_text(dets)),
             image=_jpeg(img))
-        try:
-            cmd = json.loads(raw[raw.find('{'):raw.rfind('}') + 1])
-        except Exception:
-            st['last'] = '명령 해석 불가'
-            continue
+        if cmd is None:
+            st['last'] = '조종 백엔드 실패: %s' % (
+                client.last_error or '응답 없음')
+            log.append({'cmd': 'infra_error', 'why': st['last'],
+                        'step': step})
+            break
         c = cmd.get('cmd')
         log.append({'cmd': c, 'why': cmd.get('why'), 'step': step})
         snap('조종: %s' % c)
@@ -187,7 +188,8 @@ def run_episode(world, task, client, frames=None, trace=None, noise_px=2.0,
                                   trace=trace)
             if ok:
                 st.update(bind=bind, half=half, holding=True,
-                          orig=world.object_pos(bind))
+                          orig=world.object_pos(bind),
+                          follow=A._hold_offset(world, bind))
                 st['last'] = 'close 성공 (잡음)'
                 st['phase'] = '잡음'
             else:
@@ -197,7 +199,7 @@ def run_episode(world, task, client, frames=None, trace=None, noise_px=2.0,
             A._servo(world, (h[0], h[1], h[2] + 0.15), 3.0, steps=20,
                      ignore_objs=(st['bind'],), carried=True,
                      step_cap=4.0, frames=frames, note='lift', trace=trace,
-                     target_name=st['bind'])
+                     target_name=st['bind'], on_step=st['follow'])
             st['last'] = 'lift 완료'
             st['phase'] = '들었음'
         elif c == 'carry' and st['holding']:
@@ -211,7 +213,8 @@ def run_episode(world, task, client, frames=None, trace=None, noise_px=2.0,
             A._servo(world, (dest[0], dest[1], dest[2] + 0.16), 4.0, steps=35,
                      ignore_objs=(st['bind'],), obj_stop=1.0,
                      carried=True, step_cap=4.0, frames=frames, note='carry',
-                     trace=trace, target_name=st['bind'])
+                     trace=trace, target_name=st['bind'],
+                     on_step=st['follow'])
             st['dest'] = dest
             st['last'] = 'carry 완료'
             st['phase'] = '목적지 위'

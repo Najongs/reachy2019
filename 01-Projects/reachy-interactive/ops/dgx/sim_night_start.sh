@@ -1,8 +1,7 @@
 #!/bin/bash
 # 야간 시뮬 학습 시작 - 로봇 수면시간(18~09 KST, 사용자 지정 근무 9~18)에만.
 #
-# 이유(사용자 결정 2026-09-07): 시뮬과 실물이 같은 opus CLI 를 나눠
-# 쓴다. 낮에 시뮬이 돌면 실물이 동작 답변을 못 한다.
+# 시뮬의 MuJoCo GPU 부하와 Codex 평가 호출을 낮 시간 실물 운용과 분리한다.
 # 시각 판정은 스크립트가 KST 로 직접 한다 - 서버 타임존이 무엇이든
 # (UTC->KST 전환 중이든) cron 은 30분마다 부르기만 하면 된다.
 KH=$(TZ=Asia/Seoul date +%H)
@@ -33,7 +32,9 @@ if [ "$(cat "$STAMP" 2>/dev/null)" != "$KD" ]; then
         || echo "$(TZ=Asia/Seoul date '+%F %T KST') 일일 갱신 실패 - 내일 재시도" \
             >> sim_data/night_schedule.log
 fi
-setsid nohup "$PY" sim/sim_director.py --hours 14.5 --token reachy2019 \
+# 야간 최적화는 실제 대화용 브로커/Codex 쿼터와 분리한다. Oracle 기반
+# 결정론 CEM은 비전/평가 모델 없이도 행동 파라미터를 개선할 수 있다.
+setsid nohup "$PY" sim/sim_director.py --hours 14.5 --offline \
     --seed "$(date +%j)" > sim_data/director.log 2>&1 < /dev/null &
 echo $! > "$PIDF"
 echo "$(TZ=Asia/Seoul date '+%F %T KST') 야간 시뮬 시작 (pid $(cat "$PIDF"))" \

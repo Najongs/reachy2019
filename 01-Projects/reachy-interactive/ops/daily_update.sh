@@ -119,7 +119,13 @@ else
 fi
 
 echo
+echo "── 지식 원장 갱신 (실제/시뮬 aggregate, 원본 개인정보 미복사)"
+python3 ops/data/knowledge_ledger.py --sync 2>&1 | tail -12 \
+  || echo "   ! 지식 원장 갱신 실패 (기존 데이터로 계속)"
+
+echo
 echo "── 완료. 다음 단계:"
 echo "   • 제안 검토: config/quick_notes.proposed.json"
 echo "   • 반영: build_notes.py --merge  또는  quick_notes.json 직접 편집"
+echo "   • 지식 원장: ../../04-Archives/knowledge/knowledge_summary.json"
 echo "   • 배포: bash ops/deploy.sh   (반영했을 때만)"

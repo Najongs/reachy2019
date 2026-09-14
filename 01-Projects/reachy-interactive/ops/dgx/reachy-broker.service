@@ -1,0 +1,21 @@
+[Unit]
+Description=Reachy LLM broker (Ollama + Codex)
+
+[Service]
+WorkingDirectory=/home/kiro-ai/NAJY/reachy-2019/01-Projects/reachy-interactive
+# Codex CLI requires modern Node. /usr/bin/node is v12 on this DGX, so the
+# nvm Node directory must precede /usr/local/bin/codex's env-node lookup.
+Environment=PATH=/home/kiro-ai/.nvm/versions/node/v22.23.2/bin:/home/kiro-ai/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 broker/llm_broker.py --host 127.0.0.1 --port 8080 \
+  --backend ollama --ollama-model exaone3.5:7.8b --token reachy2019 \
+  --system-prompt-file config/persona.txt \
+  --motion-backend ollama --motion-model qwen2.5:7b --motion-prompt-file config/motion_prompt.txt \
+  --ground-backend codex --ground-prompt-file config/vision_prompt.txt \
+  --eval-backend codex
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/kiro-ai/reachy-ops/broker.log
+StandardError=append:/home/kiro-ai/reachy-ops/broker.log
+
+[Install]
+WantedBy=default.target
